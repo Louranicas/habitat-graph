@@ -24,7 +24,10 @@ pub trait Extractor: Send + Sync {
 /// Returns the set of registered extractors (currently: Rust).
 #[must_use]
 pub fn registered_extractors() -> Vec<Box<dyn Extractor>> {
-    vec![Box::new(crate::ast::rust::RustExtractor) as Box<dyn Extractor>]
+    vec![
+        Box::new(crate::ast::rust::RustExtractor) as Box<dyn Extractor>,
+        Box::new(crate::ast::python::PythonExtractor) as Box<dyn Extractor>,
+    ]
 }
 
 /// Reads and extracts every file in `files`, dispatching by extension, in parallel.
@@ -86,11 +89,18 @@ mod tests {
     // ── registered_extractors ─────────────────────────────────────────────────
 
     #[test]
-    fn registered_extractors_returns_exactly_one() {
-        assert_eq!(
-            registered_extractors().len(),
-            1,
-            "should have exactly one registered extractor"
+    fn registered_extractors_include_rust_and_python() {
+        let langs: Vec<&str> = registered_extractors()
+            .iter()
+            .map(|e| e.language())
+            .collect();
+        assert!(
+            langs.contains(&"rust"),
+            "rust extractor must be registered; got {langs:?}"
+        );
+        assert!(
+            langs.contains(&"python"),
+            "python extractor must be registered; got {langs:?}"
         );
     }
 
@@ -113,7 +123,7 @@ mod tests {
     #[test]
     fn registered_extractor_does_not_handle_unknown_extensions() {
         let extractors = registered_extractors();
-        for ext in &["md", "py", "txt", "toml", "json"] {
+        for ext in &["md", "txt", "toml", "json"] {
             for e in &extractors {
                 assert!(
                     !e.extensions().contains(ext),
