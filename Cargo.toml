@@ -12,6 +12,7 @@ members = [
     "crates/habitat-graph-export",
     "crates/habitat-graph-cli",
     "crates/habitat-graph-serve",
+    "crates/habitat-graph-fixtures",
 ]
 
 [workspace.package]

@@ -394,6 +394,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "habitat-graph-fixtures"
+version = "0.0.0"
+dependencies = [
+ "habitat-graph-core",
+ "serde_json",
+]
+
+[[package]]
 name = "habitat-graph-serve"
 version = "0.0.0"
 dependencies = [

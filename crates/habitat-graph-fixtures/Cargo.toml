@@ -1,0 +1,16 @@
+[package]
+name = "habitat-graph-fixtures"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+rust-version.workspace = true
+description = "Parity harness for habitat-graph: compare our output to graphify's committed goldens (dev-only)."
+keywords = ["parity", "testing", "knowledge-graph"]
+categories = ["development-tools"]
+publish = false
+
+[dependencies]
+habitat-graph-core = { workspace = true }
+serde_json = { workspace = true }
