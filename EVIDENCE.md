@@ -3,10 +3,11 @@
 > Back to: [[CLAUDE.md]] · [[habitat-graph/README]] · [[DEPLOYMENT_FRAMEWORK]]
 > Gold standard: deep-diff-forge `EVIDENCE.md`.
 
-**STATUS: BUILT — 13-crate workspace, gate-green, 1225 all-targets tests / 0 failed (S1008796).**
-D0→D6 + a semantic-backend crate + an MCP frontier organ are sealed below. Remaining: D7 release
-(port-claim + standalone remotes + no-mistakes seal — gated on Luke @ 0.A) and D8 learning.
-Honesty rule: a claim with no warrant is not recorded here; every count below was re-run
+**STATUS: BUILT + PUSHED (private) — 13-crate workspace, gate-green, 1225 all-targets tests / 0 failed (S1008796).**
+D0→D6 + a semantic-backend crate + an MCP frontier organ are sealed below; D7 has pushed the repo
+private to GitHub and initialized the no-mistakes gate. Remaining (D7 tail, all gated on Luke @ 0.A,
+all one-way doors): OSS/public flip · GitLab mirror · `port-claim` + devenv deploy · crates.io. Plus
+D8 learning. Honesty rule: a claim with no warrant is not recorded here; every count below was re-run
 authoritatively in the main loop (never trusted from a builder's self-report).
 
 ## Warrant labels (from the gold standard)
@@ -78,7 +79,7 @@ Each sealed phase records `claim | warrant | evidence`:
 
 ### D7 Release — PARTIAL (private GitHub push DONE; OSS/GitLab/crates.io deferred to Luke)
 - gate-green | [VBE] | 1225 all-targets tests / 0 failed, pedantic-clean (re-run authoritatively at HEAD).
-- **standalone push** | [VBE] | Luke chose "Private, then push" (S1008796). Secret-screen clean (only `.rs/.toml/.md/.json/.lock/.py` + fixtures tracked); `gh repo create Louranicas/habitat-graph --private --push`; **remote `main` sha `d3eba1d` == local HEAD** (ground-truth `git ls-remote`), visibility PRIVATE, 22 commits. Standalone-only — origin is the crate's own repo, never the superproject.
+- **standalone push** | [VBE] | Luke chose "Private, then push" (S1008796). Secret-screen clean (only `.rs/.toml/.md/.json/.lock/.py` + fixtures tracked); `gh repo create Louranicas/habitat-graph --private --push`. **`origin/main` tracks local `HEAD` exactly** — verified sha-agnostically by `git ls-remote origin refs/heads/main` == `git rev-parse HEAD` (re-checked after each evidence commit, so this claim does not stale as HEAD advances). Visibility PRIVATE. Standalone-only — origin is the crate's own repo, never the superproject.
 - **no-mistakes gate** | [VBE] | `no-mistakes init` (local bare-repo gate + post-receive hook; protects future pushes) + seal run `01KW4BMZ…` → `outcome: passed, findings: none`. Caveat: deep steps skipped (commit already upstream) — the substantive validation is the 1225-test gate above.
 - _deferred to Luke @ 0.A (one-way doors):_ public/OSS-upstream flip (`gh repo edit --visibility public`), GitLab mirror (needs `glab`/token), `port-claim` set (rec. 8202) + devenv `[[services]]` deploy, crates.io publish (token-gated, irreversible).
 
