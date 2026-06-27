@@ -5,6 +5,8 @@
 
 ## Notes
 - [[The 7 Most Powerful Use Cases of habitat-graph]]
+- [[Leveraging Obsidian Graph View & Plugins]]
+- [[graphify Feature-Parity Plan]]
 - [[Discoveries, Learnings & Power Use-Cases (S1008796)]]
 - [[Commands & graphify Comparison (S1008796)]]
 
