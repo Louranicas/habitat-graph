@@ -53,7 +53,8 @@ Each sealed phase records `claim | warrant | evidence`:
 ### D5 Interface (P4) — IN PROGRESS (CLI working + live-proven; serve/daemon pending)
 - `habitat-graph-cli` (extract pipeline + meta) | [VBE] | dynamic Workflow (0 repair rounds); `extract` = detect→extract→build→analyze→export→write `graph.json`+`GRAPH_REPORT.md`; clap binary `habitat-graph`. **509 workspace tests** (cli 34). forbid(unsafe), no unwrap/expect/panic in command paths.
 - **G8 RUNTIME SMOKE — live binary** | [VBE] | `--version` ok; `self-test` → `self-test ok: 2 nodes`; `doctor` prints engine wiring; **`extract crates/habitat-graph-core/src` → 139 nodes / 48 edges / 97 communities**, valid NetworkX node-link `graph.json` (32K) + `GRAPH_REPORT.md`. **The tool is self-hosting — it extracts its own source.**
-- CLI/MCP parity + Python-graphify-retireable | _pending_ | _needs MCP (serve #9) + the parity gate (#4)_
+- `habitat-graph-serve` query engine (load + query/path) | [VBE] | dynamic Workflow (0 repair rounds); `from_node_link` parses the node-link envelope back into a Graph (**round-trip with export proven**), `find_by_label` (case-insensitive substring, sorted), `shortest_path` (undirected BFS, deterministic, cycle-tested). **569 workspace tests** (serve 60). forbid(unsafe), no unwrap/expect in lib.
+- CLI/MCP parity + Python-graphify-retireable | _pending_ | _needs CLI query/path wiring + MCP/daemon transport (#10) + the parity gate (#4)_
 
 ### D6 Habitat (P5) — PENDING
 - arc-graph reproduces arc-coherence set + flags severed ear | _pending_

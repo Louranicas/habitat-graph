@@ -1,0 +1,18 @@
+[package]
+name = "habitat-graph-serve"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+rust-version.workspace = true
+description = "Query engine for habitat-graph: load a node-link graph and answer label/path queries (L7)."
+keywords = ["query", "knowledge-graph", "shortest-path", "search"]
+categories = ["development-tools"]
+
+[dependencies]
+habitat-graph-core = { workspace = true }
+serde_json = { workspace = true }
+
+[dev-dependencies]
+habitat-graph-export = { workspace = true }
