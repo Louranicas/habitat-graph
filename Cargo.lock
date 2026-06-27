@@ -349,6 +349,20 @@ dependencies = [
 ]
 
 [[package]]
+name = "habitat-graph-cli"
+version = "0.0.0"
+dependencies = [
+ "clap",
+ "habitat-graph-analyze",
+ "habitat-graph-build",
+ "habitat-graph-core",
+ "habitat-graph-export",
+ "habitat-graph-extract",
+ "habitat-graph-source",
+ "tempfile",
+]
+
+[[package]]
 name = "habitat-graph-core"
 version = "0.0.0"
 dependencies = [

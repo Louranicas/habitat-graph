@@ -10,6 +10,7 @@ members = [
     "crates/habitat-graph-build",
     "crates/habitat-graph-analyze",
     "crates/habitat-graph-export",
+    "crates/habitat-graph-cli",
 ]
 
 [workspace.package]
@@ -31,9 +32,13 @@ indexmap = "2"
 leiden-rs = "0.8"
 tree-sitter = "0.22"
 tree-sitter-rust = "0.21"
+clap = { version = "4", features = ["derive"] }
 habitat-graph-core = { path = "crates/habitat-graph-core" }
 habitat-graph-source = { path = "crates/habitat-graph-source" }
+habitat-graph-extract = { path = "crates/habitat-graph-extract" }
+habitat-graph-build = { path = "crates/habitat-graph-build" }
 habitat-graph-analyze = { path = "crates/habitat-graph-analyze" }
+habitat-graph-export = { path = "crates/habitat-graph-export" }
 
 [profile.release]
 lto = "thin"

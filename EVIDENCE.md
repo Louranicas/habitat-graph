@@ -50,8 +50,10 @@ Each sealed phase records `claim | warrant | evidence`:
 - `habitat-graph-export` (node-link json + report + obsidian) | [VBE] | dynamic Workflow (0 repair rounds); `to_node_link` = graphify-compatible NetworkX node-link envelope (nodes/links, `Lnn` locations, weight 1.0/0.8, inline community) with `display_safe`+`sanitize_label` on labels AND relations (judge security gap closed with a bidi-relation test); `render_report` (counts/top-hubs/communities/queries); `render_vault` (Obsidian notes + MOC, `[[wikilinks]]`). **475 workspace tests** (export 82). forbid(unsafe), no unwrap/expect in lib.
 - exporter parity vs goldens | _pending_ | _via fixtures adapter (#3) once the Python path lands_
 
-### D5 Interface (P4) — PENDING
-- CLI + MCP contract | _pending_ | _tools/list, exit codes; Python graphify retireable_
+### D5 Interface (P4) — IN PROGRESS (CLI working + live-proven; serve/daemon pending)
+- `habitat-graph-cli` (extract pipeline + meta) | [VBE] | dynamic Workflow (0 repair rounds); `extract` = detect→extract→build→analyze→export→write `graph.json`+`GRAPH_REPORT.md`; clap binary `habitat-graph`. **509 workspace tests** (cli 34). forbid(unsafe), no unwrap/expect/panic in command paths.
+- **G8 RUNTIME SMOKE — live binary** | [VBE] | `--version` ok; `self-test` → `self-test ok: 2 nodes`; `doctor` prints engine wiring; **`extract crates/habitat-graph-core/src` → 139 nodes / 48 edges / 97 communities**, valid NetworkX node-link `graph.json` (32K) + `GRAPH_REPORT.md`. **The tool is self-hosting — it extracts its own source.**
+- CLI/MCP parity + Python-graphify-retireable | _pending_ | _needs MCP (serve #9) + the parity gate (#4)_
 
 ### D6 Habitat (P5) — PENDING
 - arc-graph reproduces arc-coherence set + flags severed ear | _pending_
