@@ -14,3 +14,8 @@ publish = false
 [dependencies]
 habitat-graph-core = { workspace = true }
 serde_json = { workspace = true }
+
+[dev-dependencies]
+habitat-graph-source = { workspace = true }
+habitat-graph-extract = { workspace = true }
+habitat-graph-build = { workspace = true }
