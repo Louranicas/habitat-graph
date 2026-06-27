@@ -9,6 +9,7 @@ members = [
     "crates/habitat-graph-extract",
     "crates/habitat-graph-build",
     "crates/habitat-graph-analyze",
+    "crates/habitat-graph-export",
 ]
 
 [workspace.package]
@@ -32,6 +33,7 @@ tree-sitter = "0.22"
 tree-sitter-rust = "0.21"
 habitat-graph-core = { path = "crates/habitat-graph-core" }
 habitat-graph-source = { path = "crates/habitat-graph-source" }
+habitat-graph-analyze = { path = "crates/habitat-graph-analyze" }
 
 [profile.release]
 lto = "thin"

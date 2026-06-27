@@ -1,0 +1,16 @@
+[package]
+name = "habitat-graph-export"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+rust-version.workspace = true
+description = "Render habitat-graph artifacts: node-link JSON, GRAPH_REPORT.md, and an Obsidian vault (L6)."
+keywords = ["export", "node-link", "obsidian", "knowledge-graph"]
+categories = ["development-tools"]
+
+[dependencies]
+habitat-graph-core = { workspace = true }
+habitat-graph-analyze = { workspace = true }
+serde_json = { workspace = true }

@@ -1,0 +1,683 @@
+//! Obsidian vault export: one note per node with `[[wikilinks]]`.
+
+use std::collections::{BTreeMap, HashMap};
+use std::fmt::Write as FmtWrite;
+
+use habitat_graph_core::{display_safe, sanitize_label, CommunityId, Graph, Node, NodeId};
+
+/// Renders `graph` as an Obsidian vault: a deterministic list of `(filename, markdown)` pairs —
+/// one note per node (its `source_file` + `[[wikilinks]]` to connected nodes) plus a
+/// Map-of-Content index note (`_MOC.md`). The caller is responsible for writing the files.
+/// Infallible.
+///
+/// # Filename rules
+///
+/// Each node filename is derived from its label via [`sanitize_label`] (strips control chars,
+/// caps at 256), then replacing any remaining `/` or whitespace characters with `_`, then
+/// appending `.md`. When two or more nodes produce the same stem both are disambiguated by
+/// appending the [`NodeId`] before the extension (e.g. `foo_n1.md`, `foo_n2.md`).
+///
+/// # Note content
+///
+/// ```text
+/// # {display_safe(label)}
+///
+/// Source: `{source_file}`
+///
+/// ## Links
+/// - {relation} [[{display_safe(neighbour_label)}]]
+/// …
+/// ```
+///
+/// An edge appears at **both** endpoints (source and target). Self-loops appear once.
+///
+/// # MOC
+///
+/// `_MOC.md` lists every node under `## community {id}` headings (sorted by `CommunityId`);
+/// nodes that belong to no community appear under `## Unclustered`.
+///
+/// All pairs are returned sorted by filename for determinism.
+#[must_use]
+pub fn render_vault(graph: &Graph) -> Vec<(String, String)> {
+    let label_map = collect_labels(graph);
+    let filenames = assign_filenames(graph);
+    let adj = build_adjacency(graph);
+
+    let mut result: Vec<(String, String)> = graph
+        .nodes
+        .iter()
+        .zip(filenames.iter())
+        .map(|(node, fname)| (fname.clone(), render_node_note(node, &adj, &label_map)))
+        .collect();
+
+    result.push(("_MOC.md".to_owned(), render_moc(graph, &label_map)));
+    result.sort_unstable_by(|a, b| a.0.cmp(&b.0));
+    result
+}
+
+/// Returns a `NodeId → label` look-up for the graph (clones labels for owned storage).
+#[must_use]
+fn collect_labels(graph: &Graph) -> HashMap<NodeId, String> {
+    graph
+        .nodes
+        .iter()
+        .map(|n| (n.id, n.label.clone()))
+        .collect()
+}
+
+/// Assigns each node (in `graph.nodes` order) a `.md` filename based on the sanitized label,
+/// disambiguating stem collisions by appending the [`NodeId`].
+#[must_use]
+fn assign_filenames(graph: &Graph) -> Vec<String> {
+    let stems: Vec<String> = graph.nodes.iter().map(|n| make_stem(&n.label)).collect();
+
+    // Count occurrences so collisions can be detected in a single pass.
+    let mut stem_count: HashMap<&str, usize> = HashMap::new();
+    for s in &stems {
+        *stem_count.entry(s.as_str()).or_default() += 1;
+    }
+
+    graph
+        .nodes
+        .iter()
+        .zip(stems.iter())
+        .map(|(node, stem)| {
+            if stem_count.get(stem.as_str()).copied().unwrap_or(0) > 1 {
+                format!("{}_{}.md", stem, node.id)
+            } else {
+                format!("{stem}.md")
+            }
+        })
+        .collect()
+}
+
+/// Builds a per-node sorted adjacency list: `NodeId → [(relation, neighbour_id)]`.
+///
+/// Every edge contributes an entry for **both** endpoints; self-loops contribute one entry
+/// (at the source side) to avoid double-counting a single edge.
+#[must_use]
+fn build_adjacency(graph: &Graph) -> HashMap<NodeId, Vec<(String, NodeId)>> {
+    let mut adj: HashMap<NodeId, Vec<(String, NodeId)>> = HashMap::new();
+    for edge in &graph.edges {
+        adj.entry(edge.source)
+            .or_default()
+            .push((edge.relation.clone(), edge.target));
+        if edge.source != edge.target {
+            adj.entry(edge.target)
+                .or_default()
+                .push((edge.relation.clone(), edge.source));
+        }
+    }
+    for neighbours in adj.values_mut() {
+        neighbours.sort_unstable_by(|a, b| a.0.cmp(&b.0).then_with(|| a.1.cmp(&b.1)));
+    }
+    adj
+}
+
+/// Renders the Markdown content for one node note.
+#[must_use]
+fn render_node_note(
+    node: &Node,
+    adj: &HashMap<NodeId, Vec<(String, NodeId)>>,
+    label_map: &HashMap<NodeId, String>,
+) -> String {
+    let safe_label = display_safe(&node.label);
+    let mut content = format!(
+        "# {safe_label}\n\nSource: `{}`\n\n## Links\n",
+        node.source_file
+    );
+    if let Some(neighbours) = adj.get(&node.id) {
+        for (relation, neighbour_id) in neighbours {
+            let neighbour_label = label_map.get(neighbour_id).map_or("", String::as_str);
+            let safe_neighbour = display_safe(neighbour_label);
+            // write! on String is infallible (OOM is the only failure, which aborts).
+            let _ = writeln!(content, "- {relation} [[{safe_neighbour}]]");
+        }
+    }
+    content
+}
+
+/// Renders the `_MOC.md` Map-of-Content note grouping every node by community.
+#[must_use]
+fn render_moc(graph: &Graph, label_map: &HashMap<NodeId, String>) -> String {
+    // Map NodeId → CommunityId for grouping.
+    let mut node_to_comm: HashMap<NodeId, CommunityId> = HashMap::new();
+    for community in &graph.communities {
+        for &member in &community.members {
+            node_to_comm.insert(member, community.id);
+        }
+    }
+
+    let mut comm_members: BTreeMap<CommunityId, Vec<NodeId>> = BTreeMap::new();
+    let mut unclustered: Vec<NodeId> = Vec::new();
+
+    for node in &graph.nodes {
+        match node_to_comm.get(&node.id) {
+            Some(&cid) => comm_members.entry(cid).or_default().push(node.id),
+            None => unclustered.push(node.id),
+        }
+    }
+
+    for members in comm_members.values_mut() {
+        members.sort_unstable();
+    }
+
+    let mut moc = String::from("# Map of Content\n");
+
+    for (comm_id, members) in &comm_members {
+        let _ = write!(moc, "\n## community {comm_id}\n\n");
+        for &nid in members {
+            let label = label_map.get(&nid).map_or("", String::as_str);
+            let _ = writeln!(moc, "- [[{}]]", display_safe(label));
+        }
+    }
+
+    if !unclustered.is_empty() {
+        moc.push_str("\n## Unclustered\n\n");
+        for nid in &unclustered {
+            let label = label_map.get(nid).map_or("", String::as_str);
+            let _ = writeln!(moc, "- [[{}]]", display_safe(label));
+        }
+    }
+
+    moc
+}
+
+/// Converts a node label to a filesystem-safe filename stem (no `/`, no whitespace, no controls).
+///
+/// [`sanitize_label`] strips control characters first; this function then replaces `/` and
+/// whitespace with `_`. Returns `"_"` if the resulting stem would be empty (all-control label).
+#[must_use]
+fn make_stem(label: &str) -> String {
+    let sanitized = sanitize_label(label);
+    let stem: String = sanitized
+        .chars()
+        .map(|c| {
+            if c == '/' || c.is_whitespace() {
+                '_'
+            } else {
+                c
+            }
+        })
+        .collect();
+    if stem.is_empty() {
+        String::from("_")
+    } else {
+        stem
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use habitat_graph_core::{
+        Community, CommunityId, Confidence, Edge, Graph, Manifest, Node, NodeId, Span,
+    };
+
+    use super::render_vault;
+
+    // ── Test fixtures ───────────────────────────────────────────────────────
+
+    fn span() -> Span {
+        Span::new(0, 1, 1, 1)
+    }
+
+    fn make_node(id: u32, label: &str, source_file: &str) -> Node {
+        Node {
+            id: NodeId::new(id),
+            label: label.to_owned(),
+            source_file: source_file.to_owned(),
+            source_location: span(),
+        }
+    }
+
+    fn make_edge(source: u32, target: u32, relation: &str) -> Edge {
+        Edge {
+            source: NodeId::new(source),
+            target: NodeId::new(target),
+            relation: relation.to_owned(),
+            confidence: Confidence::Extracted,
+        }
+    }
+
+    fn make_community(id: u32, label: &str, members: &[u32]) -> Community {
+        Community {
+            id: CommunityId::new(id),
+            label: label.to_owned(),
+            members: members.iter().copied().map(NodeId::new).collect(),
+        }
+    }
+
+    fn empty_manifest() -> Manifest {
+        Manifest {
+            inputs: Vec::new(),
+            tool_version: "test".to_owned(),
+            generated_at: None,
+        }
+    }
+
+    fn graph_with_nodes(nodes: Vec<Node>) -> Graph {
+        Graph {
+            schema: "test".to_owned(),
+            nodes,
+            edges: Vec::new(),
+            communities: Vec::new(),
+            manifest: empty_manifest(),
+        }
+    }
+
+    // ── Tests ───────────────────────────────────────────────────────────────
+
+    /// T01: empty graph → exactly one pair: the MOC note.
+    #[test]
+    fn empty_graph_returns_only_moc() {
+        let g = Graph::default();
+        let pairs = render_vault(&g);
+        assert_eq!(pairs.len(), 1, "expected exactly 1 pair");
+        assert_eq!(pairs[0].0, "_MOC.md");
+        assert_eq!(pairs[0].1, "# Map of Content\n");
+    }
+
+    /// T02: single node → two pairs (the node note plus `_MOC.md`).
+    #[test]
+    fn single_node_yields_two_pairs() {
+        let mut g = graph_with_nodes(vec![make_node(1, "alpha", "src/lib.rs")]);
+        g.communities.push(make_community(0, "c0", &[1]));
+        let pairs = render_vault(&g);
+        assert_eq!(pairs.len(), 2);
+    }
+
+    /// T03: the note filename is the sanitized label + `.md`.
+    #[test]
+    fn note_filename_matches_sanitized_label() {
+        let g = graph_with_nodes(vec![make_node(1, "mynode", "f.rs")]);
+        let pairs = render_vault(&g);
+        let fname = pairs
+            .iter()
+            .find(|(f, _)| f != "_MOC.md")
+            .map(|(f, _)| f.as_str());
+        assert_eq!(fname, Some("mynode.md"));
+    }
+
+    /// T04: the note content includes the source file in a code span.
+    #[test]
+    fn note_contains_source_file() {
+        let g = graph_with_nodes(vec![make_node(1, "alpha", "crates/foo/src/lib.rs")]);
+        let pairs = render_vault(&g);
+        let (_, content) = pairs.iter().find(|(f, _)| f == "alpha.md").unwrap();
+        assert!(
+            content.contains("`crates/foo/src/lib.rs`"),
+            "source file missing from note: {content}"
+        );
+    }
+
+    /// T05: the note heading is `# {label}`.
+    #[test]
+    fn note_heading_contains_label() {
+        let g = graph_with_nodes(vec![make_node(1, "myfn", "a.rs")]);
+        let pairs = render_vault(&g);
+        let (_, content) = pairs.iter().find(|(f, _)| f == "myfn.md").unwrap();
+        assert!(content.starts_with("# myfn\n"), "bad heading: {content}");
+    }
+
+    /// T06: the note always has a `## Links` section, even with no edges.
+    #[test]
+    fn note_has_links_section_header() {
+        let g = graph_with_nodes(vec![make_node(1, "solo", "s.rs")]);
+        let pairs = render_vault(&g);
+        let (_, content) = pairs.iter().find(|(f, _)| f == "solo.md").unwrap();
+        assert!(
+            content.contains("## Links\n"),
+            "## Links missing: {content}"
+        );
+    }
+
+    /// T07: an outgoing edge creates a wikilink to the target in the source node's note.
+    #[test]
+    fn wikilink_for_out_edge() {
+        let mut g = graph_with_nodes(vec![
+            make_node(1, "alpha", "a.rs"),
+            make_node(2, "beta", "b.rs"),
+        ]);
+        g.edges.push(make_edge(1, 2, "calls"));
+        let pairs = render_vault(&g);
+        let (_, content) = pairs.iter().find(|(f, _)| f == "alpha.md").unwrap();
+        assert!(
+            content.contains("- calls [[beta]]"),
+            "wikilink missing: {content}"
+        );
+    }
+
+    /// T08: the target node of an edge also sees a link back to the source node.
+    #[test]
+    fn wikilink_for_in_edge() {
+        let mut g = graph_with_nodes(vec![
+            make_node(1, "alpha", "a.rs"),
+            make_node(2, "beta", "b.rs"),
+        ]);
+        g.edges.push(make_edge(1, 2, "calls"));
+        let pairs = render_vault(&g);
+        let (_, content) = pairs.iter().find(|(f, _)| f == "beta.md").unwrap();
+        assert!(
+            content.contains("- calls [[alpha]]"),
+            "in-edge wikilink missing from beta: {content}"
+        );
+    }
+
+    /// T09: a self-loop edge appears exactly once in the node's links section.
+    #[test]
+    fn self_loop_counted_once() {
+        let mut g = graph_with_nodes(vec![make_node(1, "recursive", "r.rs")]);
+        g.edges.push(make_edge(1, 1, "recurses"));
+        let pairs = render_vault(&g);
+        let (_, content) = pairs.iter().find(|(f, _)| f == "recursive.md").unwrap();
+        let count = content.matches("- recurses [[recursive]]").count();
+        assert_eq!(count, 1, "self-loop appeared {count} times, expected 1");
+    }
+
+    /// T10: the MOC note filename is exactly `_MOC.md`.
+    #[test]
+    fn moc_filename_is_moc_md() {
+        let g = Graph::default();
+        let pairs = render_vault(&g);
+        assert!(
+            pairs.iter().any(|(f, _)| f == "_MOC.md"),
+            "no _MOC.md in result"
+        );
+    }
+
+    /// T11: the MOC note lists every node in the graph.
+    #[test]
+    fn moc_lists_all_nodes() {
+        let g = graph_with_nodes(vec![
+            make_node(1, "alpha", "a.rs"),
+            make_node(2, "beta", "b.rs"),
+            make_node(3, "gamma", "c.rs"),
+        ]);
+        let pairs = render_vault(&g);
+        let (_, moc) = pairs.iter().find(|(f, _)| f == "_MOC.md").unwrap();
+        assert!(moc.contains("[[alpha]]"), "alpha missing from MOC");
+        assert!(moc.contains("[[beta]]"), "beta missing from MOC");
+        assert!(moc.contains("[[gamma]]"), "gamma missing from MOC");
+    }
+
+    /// T12: with lowercase labels `_MOC.md` sorts lexicographically first (`_` < `a`).
+    #[test]
+    fn moc_sorts_first_with_lowercase_labels() {
+        let g = graph_with_nodes(vec![
+            make_node(1, "alpha", "a.rs"),
+            make_node(2, "beta", "b.rs"),
+        ]);
+        let pairs = render_vault(&g);
+        assert_eq!(pairs[0].0, "_MOC.md", "MOC should be first: {pairs:?}");
+    }
+
+    /// T13: `/` in a label becomes `_` in the filename.
+    #[test]
+    fn slash_in_label_becomes_underscore() {
+        let g = graph_with_nodes(vec![make_node(1, "foo/bar", "x.rs")]);
+        let pairs = render_vault(&g);
+        assert!(
+            pairs.iter().any(|(f, _)| f == "foo_bar.md"),
+            "expected foo_bar.md, got: {pairs:?}"
+        );
+        assert!(
+            !pairs.iter().any(|(f, _)| f.contains('/')),
+            "raw slash leaked into filename"
+        );
+    }
+
+    /// T14: whitespace in a label becomes `_` in the filename.
+    #[test]
+    fn whitespace_in_label_becomes_underscore() {
+        let g = graph_with_nodes(vec![make_node(1, "foo bar", "x.rs")]);
+        let pairs = render_vault(&g);
+        assert!(
+            pairs.iter().any(|(f, _)| f == "foo_bar.md"),
+            "expected foo_bar.md: {pairs:?}"
+        );
+        let note_fname = pairs
+            .iter()
+            .find(|(f, _)| f != "_MOC.md")
+            .map(|(f, _)| f.as_str());
+        assert!(
+            note_fname.is_none_or(|f| !f.contains(' ')),
+            "whitespace leaked into filename"
+        );
+    }
+
+    /// T15: two nodes whose labels produce the same stem are both disambiguated with the `NodeId`.
+    #[test]
+    fn collision_appends_node_id() {
+        // "foo/bar" and "foo bar" both become stem "foo_bar".
+        let g = graph_with_nodes(vec![
+            make_node(1, "foo/bar", "a.rs"),
+            make_node(2, "foo bar", "b.rs"),
+        ]);
+        let pairs = render_vault(&g);
+        let fnames: Vec<&str> = pairs
+            .iter()
+            .filter(|(f, _)| f != "_MOC.md")
+            .map(|(f, _)| f.as_str())
+            .collect();
+        // Both must carry NodeId suffix (n1 / n2).
+        assert!(
+            fnames.contains(&"foo_bar_n1.md"),
+            "expected foo_bar_n1.md in {fnames:?}"
+        );
+        assert!(
+            fnames.contains(&"foo_bar_n2.md"),
+            "expected foo_bar_n2.md in {fnames:?}"
+        );
+    }
+
+    /// T16: output is sorted lexicographically by filename.
+    #[test]
+    fn output_is_sorted_by_filename() {
+        let g = graph_with_nodes(vec![
+            make_node(3, "zeta", "z.rs"),
+            make_node(1, "alpha", "a.rs"),
+            make_node(2, "mu", "m.rs"),
+        ]);
+        let pairs = render_vault(&g);
+        let fnames: Vec<&str> = pairs.iter().map(|(f, _)| f.as_str()).collect();
+        let mut sorted = fnames.clone();
+        sorted.sort_unstable();
+        assert_eq!(fnames, sorted, "output is not sorted");
+    }
+
+    /// T17: calling `render_vault` twice on the same graph yields identical results.
+    #[test]
+    fn calling_twice_is_idempotent() {
+        let mut g = graph_with_nodes(vec![
+            make_node(1, "alpha", "a.rs"),
+            make_node(2, "beta", "b.rs"),
+        ]);
+        g.edges.push(make_edge(1, 2, "calls"));
+        let first = render_vault(&g);
+        let second = render_vault(&g);
+        assert_eq!(first, second, "render_vault is not deterministic");
+    }
+
+    /// T18: labels containing bidi / control characters are `display_safe`-escaped in note content.
+    #[test]
+    fn bidi_chars_escaped_in_note_content() {
+        // U+202E RIGHT-TO-LEFT OVERRIDE — classic Trojan-Source codepoint.
+        let evil = "fn\u{202E}mal".to_owned();
+        let g = graph_with_nodes(vec![make_node(1, &evil, "src.rs")]);
+        let pairs = render_vault(&g);
+        // The heading must not contain the raw U+202E.
+        let (_, content) = pairs.iter().find(|(f, _)| f != "_MOC.md").unwrap();
+        assert!(
+            !content.contains('\u{202E}'),
+            "raw bidi char leaked into note: {content:?}"
+        );
+        assert!(
+            content.contains("\\u{202E}"),
+            "escaped form missing from note: {content:?}"
+        );
+    }
+
+    /// T19: bidi chars in neighbour labels are also escaped in wikilinks.
+    #[test]
+    fn bidi_chars_escaped_in_wikilink() {
+        let evil = "b\u{202E}eta".to_owned();
+        let mut g = graph_with_nodes(vec![
+            make_node(1, "alpha", "a.rs"),
+            make_node(2, &evil, "b.rs"),
+        ]);
+        g.edges.push(make_edge(1, 2, "calls"));
+        let pairs = render_vault(&g);
+        let (_, content) = pairs.iter().find(|(f, _)| f == "alpha.md").unwrap();
+        assert!(
+            !content.contains('\u{202E}'),
+            "raw bidi char in wikilink: {content:?}"
+        );
+    }
+
+    /// T20: bidi chars in labels are also escaped in the MOC.
+    #[test]
+    fn bidi_chars_escaped_in_moc() {
+        let evil = "a\u{202E}lpha".to_owned();
+        let g = graph_with_nodes(vec![make_node(1, &evil, "a.rs")]);
+        let pairs = render_vault(&g);
+        let (_, moc) = pairs.iter().find(|(f, _)| f == "_MOC.md").unwrap();
+        assert!(
+            !moc.contains('\u{202E}'),
+            "raw bidi char leaked into MOC: {moc:?}"
+        );
+    }
+
+    /// T21: nodes in a community appear under the correct `## community {id}` heading.
+    #[test]
+    fn moc_groups_by_community() {
+        let mut g = graph_with_nodes(vec![
+            make_node(1, "alpha", "a.rs"),
+            make_node(2, "beta", "b.rs"),
+        ]);
+        g.communities.push(make_community(0, "cluster-a", &[1, 2]));
+        let pairs = render_vault(&g);
+        let (_, moc) = pairs.iter().find(|(f, _)| f == "_MOC.md").unwrap();
+        assert!(
+            moc.contains("## community c0"),
+            "community heading missing: {moc}"
+        );
+        assert!(moc.contains("[[alpha]]"), "alpha missing under community");
+        assert!(moc.contains("[[beta]]"), "beta missing under community");
+    }
+
+    /// T22: a node not assigned to any community appears under `## Unclustered`.
+    #[test]
+    fn unclustered_node_in_moc() {
+        let g = graph_with_nodes(vec![make_node(1, "orphan", "o.rs")]);
+        // No communities added.
+        let pairs = render_vault(&g);
+        let (_, moc) = pairs.iter().find(|(f, _)| f == "_MOC.md").unwrap();
+        assert!(
+            moc.contains("## Unclustered"),
+            "Unclustered section missing: {moc}"
+        );
+        assert!(
+            moc.contains("[[orphan]]"),
+            "orphan missing from Unclustered: {moc}"
+        );
+    }
+
+    /// T23: multiple communities appear in ascending `CommunityId` order in the MOC.
+    #[test]
+    fn multiple_communities_ordered_in_moc() {
+        let mut g = graph_with_nodes(vec![
+            make_node(1, "alpha", "a.rs"),
+            make_node(2, "beta", "b.rs"),
+            make_node(3, "gamma", "c.rs"),
+        ]);
+        // Insert communities deliberately out of id order.
+        g.communities.push(make_community(2, "last", &[3]));
+        g.communities.push(make_community(0, "first", &[1]));
+        g.communities.push(make_community(1, "mid", &[2]));
+        let pairs = render_vault(&g);
+        let (_, moc) = pairs.iter().find(|(f, _)| f == "_MOC.md").unwrap();
+        let pos_c0 = moc.find("## community c0").unwrap_or(usize::MAX);
+        let pos_c1 = moc.find("## community c1").unwrap_or(usize::MAX);
+        let pos_c2 = moc.find("## community c2").unwrap_or(usize::MAX);
+        assert!(
+            pos_c0 < pos_c1 && pos_c1 < pos_c2,
+            "communities out of order in MOC:\n{moc}"
+        );
+    }
+
+    /// T24: the edge relation string appears verbatim in the link bullet.
+    #[test]
+    fn edge_relation_appears_in_links() {
+        let mut g = graph_with_nodes(vec![
+            make_node(1, "alpha", "a.rs"),
+            make_node(2, "beta", "b.rs"),
+        ]);
+        g.edges.push(make_edge(1, 2, "imports"));
+        let pairs = render_vault(&g);
+        let (_, content) = pairs.iter().find(|(f, _)| f == "alpha.md").unwrap();
+        assert!(
+            content.contains("- imports [[beta]]"),
+            "relation 'imports' missing: {content}"
+        );
+    }
+
+    /// T25: a label composed entirely of control characters falls back to `_.md` filename.
+    #[test]
+    fn all_control_char_label_fallback_filename() {
+        // sanitize_label strips all control chars → empty stem → fallback "_".
+        let g = graph_with_nodes(vec![make_node(1, "\x01\x02\x03", "ctrl.rs")]);
+        let pairs = render_vault(&g);
+        assert!(
+            pairs.iter().any(|(f, _)| f == "_.md"),
+            "fallback filename '_.md' not found: {pairs:?}"
+        );
+    }
+
+    /// T26: multiple edges touching the same node all appear in its links section.
+    #[test]
+    fn multiple_edges_all_appear_in_links() {
+        let mut g = graph_with_nodes(vec![
+            make_node(1, "hub", "h.rs"),
+            make_node(2, "alpha", "a.rs"),
+            make_node(3, "beta", "b.rs"),
+        ]);
+        g.edges.push(make_edge(1, 2, "calls"));
+        g.edges.push(make_edge(1, 3, "imports"));
+        let pairs = render_vault(&g);
+        let (_, content) = pairs.iter().find(|(f, _)| f == "hub.md").unwrap();
+        assert!(
+            content.contains("[[alpha]]"),
+            "alpha missing from hub: {content}"
+        );
+        assert!(
+            content.contains("[[beta]]"),
+            "beta missing from hub: {content}"
+        );
+    }
+
+    /// T27: nodes not assigned to a community do not appear under a community heading.
+    #[test]
+    fn community_heading_only_for_assigned_nodes() {
+        let mut g = graph_with_nodes(vec![
+            make_node(1, "alpha", "a.rs"),
+            make_node(2, "orphan", "o.rs"),
+        ]);
+        g.communities.push(make_community(0, "c0", &[1]));
+        let pairs = render_vault(&g);
+        let (_, moc) = pairs.iter().find(|(f, _)| f == "_MOC.md").unwrap();
+        // "orphan" must appear under Unclustered, not under community c0.
+        let c0_pos = moc.find("## community c0").unwrap_or(usize::MAX);
+        let unclust_pos = moc.find("## Unclustered").unwrap_or(usize::MAX);
+        let orphan_pos = moc.find("[[orphan]]").unwrap_or(usize::MAX);
+        assert!(
+            orphan_pos > unclust_pos,
+            "orphan should be after Unclustered heading"
+        );
+        // Also verify orphan is not under c0.
+        let alpha_pos = moc.find("[[alpha]]").unwrap_or(usize::MAX);
+        assert!(
+            alpha_pos > c0_pos && alpha_pos < unclust_pos,
+            "alpha should be under community c0"
+        );
+    }
+}

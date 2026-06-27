@@ -46,8 +46,9 @@ Each sealed phase records `claim | warrant | evidence`:
 - `habitat-graph-analyze` (Leiden cluster + centrality) | [VBE] | dynamic Workflow (0 repair rounds); `cluster::detect_communities` via **leiden-rs 0.8**, seeded (`LEIDEN_SEED`) + canonical output → **deterministic** (R4), with Σmembers==nodes invariant + a 50-node scale test (judge gap); `degree_centrality` (in+out, isolated incl., deterministic sort). **393 workspace tests** (analyze 45). patterns/questions deferred (heuristic, non-parity).
 - community parity vs golden | _pending_ | _needs fixtures adapter (#3) + Python extractor (#15)_
 
-### D4 Output (P3) — PENDING
-- exporter parity | _pending_ | _json/html/svg/graphml/cypher/obsidian vs goldens_
+### D4 Output (P3) — IN PROGRESS (json/report/obsidian done; svg/graphml/cypher/wiki/benchmark deferred)
+- `habitat-graph-export` (node-link json + report + obsidian) | [VBE] | dynamic Workflow (0 repair rounds); `to_node_link` = graphify-compatible NetworkX node-link envelope (nodes/links, `Lnn` locations, weight 1.0/0.8, inline community) with `display_safe`+`sanitize_label` on labels AND relations (judge security gap closed with a bidi-relation test); `render_report` (counts/top-hubs/communities/queries); `render_vault` (Obsidian notes + MOC, `[[wikilinks]]`). **475 workspace tests** (export 82). forbid(unsafe), no unwrap/expect in lib.
+- exporter parity vs goldens | _pending_ | _via fixtures adapter (#3) once the Python path lands_
 
 ### D5 Interface (P4) — PENDING
 - CLI + MCP contract | _pending_ | _tools/list, exit codes; Python graphify retireable_
