@@ -13,6 +13,7 @@ members = [
     "crates/habitat-graph-cli",
     "crates/habitat-graph-serve",
     "crates/habitat-graph-fixtures",
+    "crates/habitat-graph-daemon",
 ]
 
 [workspace.package]
@@ -36,6 +37,8 @@ tree-sitter = "0.22"
 tree-sitter-rust = "0.21"
 tree-sitter-python = "0.21"
 clap = { version = "4", features = ["derive"] }
+axum = "0.8"
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "net"] }
 habitat-graph-core = { path = "crates/habitat-graph-core" }
 habitat-graph-source = { path = "crates/habitat-graph-source" }
 habitat-graph-extract = { path = "crates/habitat-graph-extract" }

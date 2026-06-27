@@ -1,0 +1,22 @@
+[package]
+name = "habitat-graph-daemon"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+rust-version.workspace = true
+description = "HTTP service for habitat-graph: /health, /query, /path over a loaded knowledge graph (D5)."
+keywords = ["http", "axum", "knowledge-graph", "service"]
+categories = ["development-tools", "web-programming::http-server"]
+
+[dependencies]
+habitat-graph-core = { workspace = true }
+habitat-graph-serve = { workspace = true }
+serde_json = { workspace = true }
+axum = { workspace = true }
+tokio = { workspace = true }
+
+[dev-dependencies]
+tower = { version = "0.5", features = ["util"] }
+tokio = { version = "1", features = ["rt", "macros"] }
