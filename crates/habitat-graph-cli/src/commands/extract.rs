@@ -14,13 +14,16 @@ use habitat_graph_core::{GraphError, Result};
 /// graph: N nodes, E edges, C communities -> <out>
 /// ```
 #[must_use]
-pub fn run(dir: &Path, out: &Path) -> u8 {
-    match run_inner(dir, out) {
+pub fn run(dir: &Path, out: &Path, vault: Option<&Path>) -> u8 {
+    match run_inner(dir, out, vault) {
         Ok((n, e, c)) => {
             println!(
                 "graph: {n} nodes, {e} edges, {c} communities -> {}",
                 out.display()
             );
+            if let Some(v) = vault {
+                println!("obsidian vault ({n} notes + _MOC) -> {}", v.display());
+            }
             0
         }
         Err(err) => {
@@ -39,7 +42,7 @@ pub fn run(dir: &Path, out: &Path) -> u8 {
 /// Returns [`GraphError::Io`] if any filesystem operation fails: directory traversal,
 /// output-directory creation, or artifact write.  Propagates [`GraphError::Parse`] from the
 /// tree-sitter extractor and [`GraphError::Schema`] from JSON serialization.
-fn run_inner(dir: &Path, out: &Path) -> Result<(usize, usize, usize)> {
+fn run_inner(dir: &Path, out: &Path, vault: Option<&Path>) -> Result<(usize, usize, usize)> {
     // Detect all Rust source files under `dir`, honoring .gitignore.
     let files = habitat_graph_source::detect(dir, &["rs"])?;
 
@@ -72,6 +75,16 @@ fn run_inner(dir: &Path, out: &Path) -> Result<(usize, usize, usize)> {
     let html = habitat_graph_export::render_html(&graph)?;
     std::fs::write(out.join("graph.html"), html.as_bytes())
         .map_err(|e| GraphError::Io(e.to_string()))?;
+
+    // Optionally emit an Obsidian vault — one note per node (`[[wikilinks]]` + frontmatter/tags)
+    // for Obsidian's graph view + Dataview / Juggl / Breadcrumbs.
+    if let Some(vault_dir) = vault {
+        std::fs::create_dir_all(vault_dir).map_err(|e| GraphError::Io(e.to_string()))?;
+        for (filename, content) in habitat_graph_export::render_vault(&graph) {
+            std::fs::write(vault_dir.join(&filename), content.as_bytes())
+                .map_err(|e| GraphError::Io(format!("{filename}: {e}")))?;
+        }
+    }
 
     Ok(graph.counts())
 }
@@ -120,7 +133,52 @@ mod tests {
         let src = TempDir::new().unwrap();
         let out = TempDir::new().unwrap();
         mk_file(src.path(), "lib.rs", "fn a() { b(); } fn b() {}");
-        assert_eq!(run(src.path(), out.path()), 0);
+        assert_eq!(run(src.path(), out.path(), None), 0);
+    }
+
+    // ── T1b: graph.html is written (the interactive viewer) ──────────────────
+    #[test]
+    fn graph_html_file_written() {
+        let src = TempDir::new().unwrap();
+        let out = TempDir::new().unwrap();
+        mk_file(src.path(), "lib.rs", "fn a() { b(); } fn b() {}");
+        let _ = run(src.path(), out.path(), None);
+        let html = fs::read_to_string(out.path().join("graph.html")).expect("graph.html");
+        assert!(html.starts_with("<!doctype html>"));
+        assert!(html.contains("graph-data"));
+    }
+
+    // ── T1c: --vault emits an Obsidian vault (notes + _MOC) ──────────────────
+    #[test]
+    fn vault_emitted_when_requested() {
+        let src = TempDir::new().unwrap();
+        let out = TempDir::new().unwrap();
+        let vault = TempDir::new().unwrap();
+        mk_file(src.path(), "lib.rs", "fn a() { b(); } fn b() {}");
+        assert_eq!(run(src.path(), out.path(), Some(vault.path())), 0);
+        assert!(vault.path().join("_MOC.md").exists(), "vault MOC must exist");
+        // At least one node note with frontmatter + a Dataview typed edge.
+        let entries: Vec<_> = fs::read_dir(vault.path())
+            .unwrap()
+            .filter_map(std::result::Result::ok)
+            .filter(|e| e.path().extension().is_some_and(|x| x == "md"))
+            .collect();
+        assert!(entries.len() >= 2, "expected node notes + MOC, got {}", entries.len());
+        let any = fs::read_to_string(vault.path().join("a.md")).expect("a.md");
+        assert!(any.starts_with("---\n"), "note must carry frontmatter: {any}");
+        assert!(any.contains("tags: [hg/node"), "note must carry tags: {any}");
+        assert!(any.contains(":: [["), "note must carry a Dataview typed edge: {any}");
+    }
+
+    // ── T1d: no vault written when not requested ─────────────────────────────
+    #[test]
+    fn no_vault_when_not_requested() {
+        let src = TempDir::new().unwrap();
+        let out = TempDir::new().unwrap();
+        mk_file(src.path(), "lib.rs", "fn solo() {}");
+        let _ = run(src.path(), out.path(), None);
+        // out dir holds graph.json/html/report only — no _MOC.md.
+        assert!(!out.path().join("_MOC.md").exists());
     }
 
     // ── T2: graph.json is written ────────────────────────────────────────────
@@ -131,7 +189,7 @@ mod tests {
         let src = TempDir::new().unwrap();
         let out = TempDir::new().unwrap();
         mk_file(src.path(), "lib.rs", "fn hello() {}");
-        let _ = run(src.path(), out.path());
+        let _ = run(src.path(), out.path(), None);
         assert!(
             out.path().join("graph.json").exists(),
             "graph.json must be created after a successful run"
@@ -146,7 +204,7 @@ mod tests {
         let src = TempDir::new().unwrap();
         let out = TempDir::new().unwrap();
         mk_file(src.path(), "lib.rs", "fn hello() {}");
-        let _ = run(src.path(), out.path());
+        let _ = run(src.path(), out.path(), None);
         assert!(
             out.path().join("GRAPH_REPORT.md").exists(),
             "GRAPH_REPORT.md must be created after a successful run"
@@ -162,7 +220,7 @@ mod tests {
         let src = TempDir::new().unwrap();
         let out = TempDir::new().unwrap();
         mk_file(src.path(), "lib.rs", "fn a() { b(); } fn b() {}");
-        let rc = run(src.path(), out.path());
+        let rc = run(src.path(), out.path(), None);
         assert_eq!(rc, 0, "must exit 0");
         let json = read_graph_json(out.path());
         assert!(
@@ -178,7 +236,7 @@ mod tests {
     fn empty_source_dir_returns_exit_zero() {
         let src = TempDir::new().unwrap();
         let out = TempDir::new().unwrap();
-        assert_eq!(run(src.path(), out.path()), 0);
+        assert_eq!(run(src.path(), out.path(), None), 0);
     }
 
     // ── T6: empty source dir → graph.json nodes is [] ────────────────────────
@@ -188,7 +246,7 @@ mod tests {
     fn empty_source_dir_writes_empty_nodes_array() {
         let src = TempDir::new().unwrap();
         let out = TempDir::new().unwrap();
-        let _ = run(src.path(), out.path());
+        let _ = run(src.path(), out.path(), None);
         let json = read_graph_json(out.path());
         assert!(
             json.contains("\"nodes\": []"),
@@ -207,7 +265,7 @@ mod tests {
     fn nonexistent_source_dir_returns_exit_four() {
         let out = TempDir::new().unwrap();
         let phantom = Path::new("/nonexistent_habitat_graph_cli_test_xyzzy_42");
-        assert_eq!(run(phantom, out.path()), 4);
+        assert_eq!(run(phantom, out.path(), None), 4);
     }
 
     // ── T8: nested output directory is created ────────────────────────────────
@@ -219,7 +277,7 @@ mod tests {
         let base = TempDir::new().unwrap();
         let out = base.path().join("a").join("b").join("c");
         mk_file(src.path(), "lib.rs", "fn foo() {}");
-        let rc = run(src.path(), &out);
+        let rc = run(src.path(), &out, None);
         assert_eq!(rc, 0, "must exit 0 after creating nested out dir");
         assert!(
             out.join("graph.json").exists(),
@@ -236,8 +294,8 @@ mod tests {
         let out1 = TempDir::new().unwrap();
         let out2 = TempDir::new().unwrap();
         mk_file(src.path(), "lib.rs", "fn a() { b(); } fn b() {}");
-        let _ = run(src.path(), out1.path());
-        let _ = run(src.path(), out2.path());
+        let _ = run(src.path(), out1.path(), None);
+        let _ = run(src.path(), out2.path(), None);
         let j1 = fs::read(out1.path().join("graph.json")).unwrap();
         let j2 = fs::read(out2.path().join("graph.json")).unwrap();
         assert_eq!(j1, j2, "graph.json must be byte-identical across runs");
@@ -251,7 +309,7 @@ mod tests {
         let src = TempDir::new().unwrap();
         let out = TempDir::new().unwrap();
         mk_file(src.path(), "lib.rs", "fn hello() {}");
-        let _ = run(src.path(), out.path());
+        let _ = run(src.path(), out.path(), None);
         let json = read_graph_json(out.path());
         for key in ["\"directed\"", "\"multigraph\"", "\"nodes\"", "\"links\""] {
             assert!(
@@ -269,7 +327,7 @@ mod tests {
         let src = TempDir::new().unwrap();
         let out = TempDir::new().unwrap();
         mk_file(src.path(), "lib.rs", "fn x() {}");
-        let _ = run(src.path(), out.path());
+        let _ = run(src.path(), out.path(), None);
         let report = fs::read_to_string(out.path().join("GRAPH_REPORT.md")).unwrap();
         assert!(
             report.starts_with("# Graph Report"),
@@ -289,7 +347,7 @@ mod tests {
             "lib.rs",
             "fn alpha() {} fn beta() {} struct Gamma {}",
         );
-        let rc = run(src.path(), out.path());
+        let rc = run(src.path(), out.path(), None);
         assert_eq!(rc, 0);
         let json = read_graph_json(out.path());
         // Each node entry contains exactly one "id": field.
@@ -310,7 +368,7 @@ mod tests {
         mk_file(src.path(), "README.md", "# docs");
         mk_file(src.path(), "build.toml", "[x]");
         mk_file(src.path(), "lib.rs", "fn only_me() {}");
-        let rc = run(src.path(), out.path());
+        let rc = run(src.path(), out.path(), None);
         assert_eq!(rc, 0);
         let json = read_graph_json(out.path());
         let node_count = count_str(&json, "\"id\":");
@@ -328,8 +386,8 @@ mod tests {
         let src = TempDir::new().unwrap();
         let out = TempDir::new().unwrap();
         mk_file(src.path(), "lib.rs", "fn alpha() {}");
-        let _ = run(src.path(), out.path());
-        let rc = run(src.path(), out.path());
+        let _ = run(src.path(), out.path(), None);
+        let rc = run(src.path(), out.path(), None);
         assert_eq!(rc, 0, "second run must also exit 0");
         let json = read_graph_json(out.path());
         assert!(
@@ -346,7 +404,7 @@ mod tests {
         let src = TempDir::new().unwrap();
         let out = TempDir::new().unwrap();
         mk_file(src.path(), "lib.rs", "fn a() {}");
-        let _ = run(src.path(), out.path());
+        let _ = run(src.path(), out.path(), None);
         let json = read_graph_json(out.path());
         assert!(
             json.contains("\"directed\": true"),
@@ -362,7 +420,7 @@ mod tests {
         let src = TempDir::new().unwrap();
         let out = TempDir::new().unwrap();
         mk_file(src.path(), "lib.rs", "fn a() { b(); } fn b() {}");
-        let rc = run(src.path(), out.path());
+        let rc = run(src.path(), out.path(), None);
         assert_eq!(rc, 0, "must exit 0");
         let json = read_graph_json(out.path());
         let node_count = count_str(&json, "\"id\":");
@@ -378,7 +436,7 @@ mod tests {
         let out = TempDir::new().unwrap();
         mk_file(src.path(), "a.rs", "fn fn_a() {}");
         mk_file(src.path(), "b.rs", "fn fn_b() {}");
-        let rc = run(src.path(), out.path());
+        let rc = run(src.path(), out.path(), None);
         assert_eq!(rc, 0);
         let json = read_graph_json(out.path());
         let node_count = count_str(&json, "\"id\":");
@@ -396,7 +454,7 @@ mod tests {
         let src = TempDir::new().unwrap();
         let out = TempDir::new().unwrap();
         mk_file(src.path(), "lib.rs", "fn lone() {}");
-        let _ = run(src.path(), out.path());
+        let _ = run(src.path(), out.path(), None);
         let json = read_graph_json(out.path());
         assert!(
             json.contains("\"links\""),
@@ -411,7 +469,7 @@ mod tests {
     fn empty_source_dir_writes_report() {
         let src = TempDir::new().unwrap();
         let out = TempDir::new().unwrap();
-        let _ = run(src.path(), out.path());
+        let _ = run(src.path(), out.path(), None);
         assert!(
             out.path().join("GRAPH_REPORT.md").exists(),
             "GRAPH_REPORT.md must exist even for an empty graph"
@@ -426,7 +484,7 @@ mod tests {
         let src = TempDir::new().unwrap();
         let out = TempDir::new().unwrap();
         mk_file(src.path(), "sub/module/deep.rs", "fn deep_fn() {}");
-        let rc = run(src.path(), out.path());
+        let rc = run(src.path(), out.path(), None);
         assert_eq!(rc, 0);
         let json = read_graph_json(out.path());
         let node_count = count_str(&json, "\"id\":");

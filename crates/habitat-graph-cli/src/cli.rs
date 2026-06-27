@@ -21,9 +21,13 @@ enum Command {
     Extract {
         /// Root directory to scan.
         dir: PathBuf,
-        /// Output directory for `graph.json` + `GRAPH_REPORT.md`.
+        /// Output directory for `graph.json` + `GRAPH_REPORT.md` + `graph.html`.
         #[arg(long, default_value = "graphify-out")]
         out: PathBuf,
+        /// Also emit an Obsidian vault (one note per node, `[[wikilinks]]` + frontmatter/tags) into
+        /// this directory — open it with Obsidian's graph view for interactive interconnection.
+        #[arg(long)]
+        vault: Option<PathBuf>,
     },
     /// Search nodes whose label contains a substring (case-insensitive).
     Query {
@@ -69,7 +73,9 @@ impl Cli {
     #[must_use]
     pub fn run(self) -> u8 {
         match self.command {
-            Command::Extract { dir, out } => commands::extract::run(&dir, &out),
+            Command::Extract { dir, out, vault } => {
+                commands::extract::run(&dir, &out, vault.as_deref())
+            }
             Command::Query { query, graph } => commands::query::run_query(&graph, &query),
             Command::Path { from, to, graph } => commands::query::run_path(&graph, &from, &to),
             Command::Serve { graph, addr } => commands::serve::run(&graph, &addr),

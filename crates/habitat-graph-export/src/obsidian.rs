@@ -42,17 +42,60 @@ pub fn render_vault(graph: &Graph) -> Vec<(String, String)> {
     let label_map = collect_labels(graph);
     let filenames = assign_filenames(graph);
     let adj = build_adjacency(graph);
+    let node_to_comm = node_community_map(graph);
 
     let mut result: Vec<(String, String)> = graph
         .nodes
         .iter()
         .zip(filenames.iter())
-        .map(|(node, fname)| (fname.clone(), render_node_note(node, &adj, &label_map)))
+        .map(|(node, fname)| {
+            (
+                fname.clone(),
+                render_node_note(node, &adj, &label_map, &node_to_comm),
+            )
+        })
         .collect();
 
     result.push(("_MOC.md".to_owned(), render_moc(graph, &label_map)));
     result.sort_unstable_by(|a, b| a.0.cmp(&b.0));
     result
+}
+
+/// Builds a `NodeId → CommunityId` map (a node belongs to at most one community).
+#[must_use]
+fn node_community_map(graph: &Graph) -> HashMap<NodeId, CommunityId> {
+    let mut map = HashMap::new();
+    for community in &graph.communities {
+        for &member in &community.members {
+            map.insert(member, community.id);
+        }
+    }
+    map
+}
+
+/// Derives the owning crate from a `crates/<name>/…` source path (else the first path segment, else
+/// `"root"`). Used for graph-view colour groups + a `crate/<name>` tag.
+#[must_use]
+fn crate_of(source_file: &str) -> String {
+    let parts: Vec<&str> = source_file.split('/').collect();
+    if parts.first() == Some(&"crates") && parts.len() >= 2 {
+        sanitize_label(parts[1])
+    } else if let Some(first) = parts.first().filter(|s| !s.is_empty()) {
+        sanitize_label(first)
+    } else {
+        "root".to_owned()
+    }
+}
+
+/// Maps a source-file extension to a coarse language tag.
+#[must_use]
+fn lang_of(source_file: &str) -> &'static str {
+    match source_file.rsplit('.').next() {
+        Some("rs") => "rust",
+        Some("py") => "python",
+        Some("js" | "ts" | "tsx" | "jsx") => "js",
+        _ => "other",
+    }
 }
 
 /// Returns a `NodeId → label` look-up for the graph (clones labels for owned storage).
@@ -114,24 +157,55 @@ fn build_adjacency(graph: &Graph) -> HashMap<NodeId, Vec<(String, NodeId)>> {
     adj
 }
 
-/// Renders the Markdown content for one node note.
+/// Renders the Markdown content for one node note — YAML frontmatter (for Dataview / Juggl / the
+/// graph-view colour groups) + a `## Links` section whose edges are Dataview inline fields
+/// (`relation:: [[target]]`, also consumed by Breadcrumbs) so each typed edge is queryable.
 #[must_use]
 fn render_node_note(
     node: &Node,
     adj: &HashMap<NodeId, Vec<(String, NodeId)>>,
     label_map: &HashMap<NodeId, String>,
+    node_to_comm: &HashMap<NodeId, CommunityId>,
 ) -> String {
     let safe_label = display_safe(&node.label);
-    let mut content = format!(
-        "# {safe_label}\n\nSource: `{}`\n\n## Links\n",
-        node.source_file
+    let krate = crate_of(&node.source_file);
+    let lang = lang_of(&node.source_file);
+    let line = node.source_location.start_line;
+    let degree = adj.get(&node.id).map_or(0, Vec::len);
+    let community = node_to_comm.get(&node.id).map(|c| c.get());
+
+    let mut content = String::from("---\n");
+    let _ = writeln!(content, "id: {}", node.id.get());
+    if let Some(cid) = community {
+        let _ = writeln!(content, "community: {cid}");
+    }
+    let _ = writeln!(content, "crate: {krate}");
+    let _ = writeln!(content, "lang: {lang}");
+    let _ = writeln!(content, "file: \"{}\"", display_safe(&node.source_file));
+    let _ = writeln!(content, "line: {line}");
+    let _ = writeln!(content, "degree: {degree}");
+    // Tags drive graph-view colour groups (`tag:#crate/<name>`) + Dataview `FROM #community/<n>`.
+    content.push_str("tags: [hg/node");
+    let _ = write!(content, ", crate/{krate}, lang/{lang}");
+    if let Some(cid) = community {
+        let _ = write!(content, ", community/{cid}");
+    }
+    content.push_str("]\n---\n\n");
+
+    let _ = writeln!(content, "# {safe_label}\n");
+    let _ = writeln!(
+        content,
+        "> `{}:{line}` · crate `{krate}` · degree {degree}\n",
+        display_safe(&node.source_file)
     );
+    content.push_str("## Links\n");
     if let Some(neighbours) = adj.get(&node.id) {
         for (relation, neighbour_id) in neighbours {
             let neighbour_label = label_map.get(neighbour_id).map_or("", String::as_str);
             let safe_neighbour = display_safe(neighbour_label);
+            // `relation:: [[x]]` = a Dataview inline field (queryable typed edge) + Breadcrumbs relation.
             // write! on String is infallible (OOM is the only failure, which aborts).
-            let _ = writeln!(content, "- {relation} [[{safe_neighbour}]]");
+            let _ = writeln!(content, "- {relation}:: [[{safe_neighbour}]]");
         }
     }
     content
@@ -305,7 +379,7 @@ mod tests {
         let pairs = render_vault(&g);
         let (_, content) = pairs.iter().find(|(f, _)| f == "alpha.md").unwrap();
         assert!(
-            content.contains("`crates/foo/src/lib.rs`"),
+            content.contains("crates/foo/src/lib.rs"),
             "source file missing from note: {content}"
         );
     }
@@ -316,7 +390,7 @@ mod tests {
         let g = graph_with_nodes(vec![make_node(1, "myfn", "a.rs")]);
         let pairs = render_vault(&g);
         let (_, content) = pairs.iter().find(|(f, _)| f == "myfn.md").unwrap();
-        assert!(content.starts_with("# myfn\n"), "bad heading: {content}");
+        assert!(content.contains("# myfn\n"), "bad heading: {content}");
     }
 
     /// T06: the note always has a `## Links` section, even with no edges.
@@ -342,9 +416,43 @@ mod tests {
         let pairs = render_vault(&g);
         let (_, content) = pairs.iter().find(|(f, _)| f == "alpha.md").unwrap();
         assert!(
-            content.contains("- calls [[beta]]"),
+            content.contains("- calls:: [[beta]]"),
             "wikilink missing: {content}"
         );
+    }
+
+    /// T07b: node notes carry YAML frontmatter (community/crate/lang/degree + tags) for Dataview,
+    /// Juggl, and the graph-view colour groups.
+    #[test]
+    fn note_has_frontmatter_and_tags() {
+        let mut g = graph_with_nodes(vec![
+            make_node(1, "alpha", "crates/habitat-graph-core/src/schema.rs"),
+            make_node(2, "beta", "b.py"),
+        ]);
+        g.edges.push(make_edge(1, 2, "calls"));
+        g.communities.push(make_community(7, "c7", &[1]));
+        let pairs = render_vault(&g);
+        let (_, content) = pairs.iter().find(|(f, _)| f == "alpha.md").unwrap();
+        assert!(content.starts_with("---\n"), "no frontmatter: {content}");
+        assert!(content.contains("community: 7"), "{content}");
+        assert!(content.contains("crate: habitat-graph-core"), "{content}");
+        assert!(content.contains("lang: rust"), "{content}");
+        assert!(content.contains("degree: 1"), "{content}");
+        assert!(
+            content.contains("tags: [hg/node, crate/habitat-graph-core, lang/rust, community/7]"),
+            "tags wrong: {content}"
+        );
+    }
+
+    /// T07c: a Python source file is tagged `lang/python`; a node with no community omits the field.
+    #[test]
+    fn lang_python_and_no_community() {
+        let g = graph_with_nodes(vec![make_node(2, "beta", "pkg/mod.py")]);
+        let pairs = render_vault(&g);
+        let (_, content) = pairs.iter().find(|(f, _)| f == "beta.md").unwrap();
+        assert!(content.contains("lang: python"), "{content}");
+        assert!(content.contains("crate: pkg"), "{content}");
+        assert!(!content.contains("community:"), "should omit community: {content}");
     }
 
     /// T08: the target node of an edge also sees a link back to the source node.
@@ -358,7 +466,7 @@ mod tests {
         let pairs = render_vault(&g);
         let (_, content) = pairs.iter().find(|(f, _)| f == "beta.md").unwrap();
         assert!(
-            content.contains("- calls [[alpha]]"),
+            content.contains("- calls:: [[alpha]]"),
             "in-edge wikilink missing from beta: {content}"
         );
     }
@@ -370,7 +478,7 @@ mod tests {
         g.edges.push(make_edge(1, 1, "recurses"));
         let pairs = render_vault(&g);
         let (_, content) = pairs.iter().find(|(f, _)| f == "recursive.md").unwrap();
-        let count = content.matches("- recurses [[recursive]]").count();
+        let count = content.matches("- recurses:: [[recursive]]").count();
         assert_eq!(count, 1, "self-loop appeared {count} times, expected 1");
     }
 
@@ -616,7 +724,7 @@ mod tests {
         let pairs = render_vault(&g);
         let (_, content) = pairs.iter().find(|(f, _)| f == "alpha.md").unwrap();
         assert!(
-            content.contains("- imports [[beta]]"),
+            content.contains("- imports:: [[beta]]"),
             "relation 'imports' missing: {content}"
         );
     }
