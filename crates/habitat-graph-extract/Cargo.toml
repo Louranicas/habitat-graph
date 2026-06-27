@@ -1,0 +1,21 @@
+[package]
+name = "habitat-graph-extract"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+rust-version.workspace = true
+description = "AST extraction for habitat-graph: tree-sitter language extractors emitting nodes/edges."
+keywords = ["tree-sitter", "ast", "code-analysis", "knowledge-graph"]
+categories = ["development-tools", "parsing"]
+
+[dependencies]
+habitat-graph-core = { workspace = true }
+habitat-graph-source = { workspace = true }
+rayon = { workspace = true }
+tree-sitter = { workspace = true }
+tree-sitter-rust = { workspace = true }
+
+[dev-dependencies]
+tempfile = "3"

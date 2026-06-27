@@ -12,6 +12,7 @@
 
 pub mod confidence;
 pub mod error;
+pub mod extraction;
 pub mod guard;
 pub mod ids;
 pub mod schema;
@@ -19,6 +20,7 @@ pub mod span;
 
 pub use confidence::Confidence;
 pub use error::{GraphError, Result};
+pub use extraction::{Extraction, RawEdge, RawNode};
 pub use guard::{confine_to, display_safe, sanitize_label, screen_for_secrets, validate_url};
 pub use ids::{CommunityId, EdgeId, NodeId};
 pub use schema::{Community, Edge, Graph, InputRecord, Manifest, Node, SCHEMA_VERSION};
