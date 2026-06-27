@@ -4,7 +4,8 @@ use std::path::Path;
 
 use habitat_graph_core::{GraphError, Result};
 
-/// Runs the extraction pipeline over `dir` and writes `graph.json` + `GRAPH_REPORT.md` into `out`.
+/// Runs the extraction pipeline over `dir` and writes `graph.json` + `GRAPH_REPORT.md` +
+/// `graph.html` (a self-contained interactive viewer) into `out`.
 ///
 /// Returns a process exit code: `0` on success, `4` on any error (diagnostics to stderr).
 ///
@@ -65,6 +66,11 @@ fn run_inner(dir: &Path, out: &Path) -> Result<(usize, usize, usize)> {
     // Write GRAPH_REPORT.md — human-facing Markdown summary.
     let report = habitat_graph_export::render_report(&graph);
     std::fs::write(out.join("GRAPH_REPORT.md"), report.as_bytes())
+        .map_err(|e| GraphError::Io(e.to_string()))?;
+
+    // Write graph.html — self-contained interactive viewer (the graphify graph.html analogue).
+    let html = habitat_graph_export::render_html(&graph)?;
+    std::fs::write(out.join("graph.html"), html.as_bytes())
         .map_err(|e| GraphError::Io(e.to_string()))?;
 
     Ok(graph.counts())
