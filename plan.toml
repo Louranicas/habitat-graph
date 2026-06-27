@@ -1,0 +1,153 @@
+# habitat-graph — machine authority (plan.toml)
+# STATUS: PLANNING SKETCH. Not yet consumed by LOOMWRIGHT. No scaffold generated.
+# This is the WARP the genesis loop would weave against. Derived from the deployment plan
+# (ai_docs/00_DEPLOYMENT_PLAN.md) + the graphify exemplar map (ai_docs/01_GRAPHIFY_EXEMPLAR_MAP.md).
+# Exemplar: github.com/safishamsi/graphify  ·  Authored S1008796.
+
+[project]
+name         = "habitat-graph"
+edition      = "2021"
+description  = "Queryable knowledge-graph organ for the ULTRAPLATE factory (Rust port of graphify)"
+exemplar     = "github.com/safishamsi/graphify"
+workspace    = true                      # core / bin / habitat split
+forbid_unsafe = true                     # except upstream tree-sitter FFI
+min_tests_per_module = 50
+gate         = "check -> clippy -D -> pedantic -> test"
+standalone   = true                      # own remotes ONLY (never superproject)
+port         = "TBD"                      # run `port-claim` skill before assigning
+
+[workspace.crates]   # publishing grouping; the authoritative narrow-crate map (~13) = docs/MODULE_STRUCTURE_PLAN.md
+core    = "habitat-graph-core"           # L0-L6 pure libs
+cache   = "habitat-graph-cache"          # L1.5 incremental substrate (ADR-04); NOT per-crate caches
+daemon  = "habitat-graph-daemon"         # L7 warm-DB host (salsa + UDS); first-class at D5 (ADR-04 §8.2)
+bin     = "habitat-graph"                # L7 binary
+habitat = "habitat-graph-habitat"        # L8, feature = "habitat"
+
+[incremental]   # ADR-04: caching / incremental / cluster decision (ai_docs/04_CACHING_INCREMENTAL_CLUSTER.md)
+cache_crate   = "habitat-graph-cache"    # ONE cross-cutting crate, never a cache per crate
+daemon_crate  = "habitat-graph-daemon"   # warm-DB host (salsa + UDS); first-class at D5 — capacity multiplier
+engine        = "salsa (COMMITTED) — tracked-functions from P1; coarse CAS as P0/P1 fallback"
+model         = "content-addressed store (blake3) + salsa demand-driven memoized queries"
+cluster       = "daemon + warm shared cache (rust-analyzer/morphd model); rayon intra-machine; multi-machine deferred"
+unlocks       = "sub-second incremental queries · live subscriptions · persistence · shared warm graph · live arc-coherence"
+decided       = "ADR-04 §8 taken S1008796: salsa · daemon-first · frontier-funded(gated) · POVM-injected"
+frontier_lane = "differential-dataflow / DBSP incremental views — feature 'incremental-view', D8, opt-in"
+parity        = "cache transparent: hit == recompute, asserted at G5"
+novelty       = "POVM-weighted retention (habitat crate) + arc-graph as live incremental view"
+
+# ── Layers (bottom-up). module = file under the owning crate ──────────────────
+
+[[layers]]
+id = "L0"; name = "core"; crate = "core"
+modules = [
+  { name = "types",       duty = "shared domain types (NodeId, Span, …)" },
+  { name = "error",       duty = "error taxonomy (thiserror); no panics in lib" },
+  { name = "config",      duty = "config load/merge/validate" },
+  { name = "schema",      duty = "Node/Edge/Graph/Community + graph.json serde (R2 byte-compat)" },
+  { name = "confidence",  duty = "Confidence{Extracted,Inferred,Ambiguous} — the trust signal" },
+]
+
+[[layers]]
+id = "L1"; name = "guard"; crate = "core"
+modules = [
+  { name = "validate_url",  duty = "URL allow/size/timeout policy (port security.py)" },
+  { name = "validate_path", duty = "path confinement to output dir (anti-traversal)" },
+  { name = "sanitize",      duty = "label sanitize: 256-char cap, strip control chars" },
+  { name = "schema_check",  duty = "runtime validation of extraction output (LLM path)" },
+  { name = "secrets",       duty = "secret screen on any persisted/exported content" },
+]
+
+[[layers]]
+id = "L2"; name = "source"; crate = "core"
+modules = [
+  { name = "detect",   duty = "collect files by extension; honor .gitignore (ignore crate)" },
+  { name = "ingest",   duty = "remote fetch with size/timeout caps (reqwest)" },
+  { name = "cache",    duty = "cached/uncached partition; blake3 content-hash keys" },
+  { name = "manifest", duty = "manifest of processed inputs (paths,hashes,ts)" },
+]
+
+[[layers]]
+id = "L3"; name = "extract"; crate = "core"
+modules = [
+  { name = "registry",     duty = "Extractor trait + language dispatch" },
+  { name = "ast_rust",     duty = "tree-sitter-rust extractor" },
+  { name = "ast_python",   duty = "tree-sitter-python extractor" },
+  { name = "ast_js_ts",    duty = "tree-sitter-{javascript,typescript} extractor" },
+  { name = "ast_go",       duty = "tree-sitter-go extractor" },
+  { name = "ast_jvm",      duty = "tree-sitter-{java,kotlin,scala} extractor" },
+  { name = "ast_c_cpp",    duty = "tree-sitter-{c,cpp} extractor" },
+  { name = "ast_misc",     duty = "tree-sitter-{ruby,c-sharp,php} extractor" },
+  { name = "semantic",     duty = "LLM/semantic extractor for docs/PDF/image (opt-in)" },
+  { name = "backends",     duty = "Backend trait: Ollama | OpenAI-compat | (L8 TIERWRIGHT)" },
+]
+
+[[layers]]
+id = "L4"; name = "build"; crate = "core"
+modules = [
+  { name = "assemble", duty = "petgraph build; stable NodeId interning" },
+  { name = "dedup",    duty = "node/edge dedup" },
+  { name = "merge",    duty = "merge + confidence reconciliation" },
+]
+
+[[layers]]
+id = "L5"; name = "analyze"; crate = "core"
+modules = [
+  { name = "cluster",    duty = "Leiden via network_partitions (already-Rust)" },
+  { name = "centrality", duty = "degree/betweenness (petgraph)" },
+  { name = "patterns",   duty = "anomaly + architectural-pattern rules" },
+  { name = "questions",  duty = "open-questions surfacing" },
+]
+
+[[layers]]
+id = "L6"; name = "output"; crate = "core"
+modules = [
+  { name = "report",         duty = "GRAPH_REPORT.md (minijinja)" },
+  { name = "export_json",    duty = "graph.json (serde_json)" },
+  { name = "export_html",    duty = "self-contained graph.html (template + vendored JS)" },
+  { name = "export_svg",     duty = "SVG (quick-xml)" },
+  { name = "export_graphml", duty = "GraphML (Gephi/yEd)" },
+  { name = "export_cypher",  duty = "Neo4j/FalkorDB Cypher text" },
+  { name = "export_obsidian",duty = "Obsidian vault + wiki markdown" },
+  { name = "benchmark",      duty = "token usage: full corpus vs subgraph (tiktoken-rs)" },
+]
+
+[[layers]]
+id = "L7"; name = "iface"; crate = "bin"
+modules = [
+  { name = "cli",   duty = "clap subcommands: extract/query/path/export/hook/prs/install" },
+  { name = "mcp",   duty = "rmcp server: query/path/subgraph tools (stdio+SSE)" },
+  { name = "watch", duty = "notify-based dir watch → rebuild flag" },
+  { name = "hooks", duty = "git2 post-commit hook + graph.json merge driver" },
+  { name = "serve", duty = "axum: /health + MCP SSE transport" },
+]
+
+[[layers]]
+id = "L8"; name = "habitat"; crate = "habitat"; feature = "habitat"
+modules = [
+  { name = "bridge",            duty = "health/bridge wiring; cc-health path-map" },
+  { name = "memory",            duty = "POVM pathway + injection.db causal_chain writer" },
+  { name = "obsidian_protocol", duty = "Back-to protocol + MASTER_INDEX + hmem rebuild" },
+  { name = "pv2_spheres",       duty = "Leiden community -> PV2 sphere registrar" },
+  { name = "orchestrator_pipe", duty = "cc-pipe verb map.scope; ACK/NACK schema" },
+  { name = "tierwright",        duty = "Backend impl routing via TIERWRIGHT :8201" },
+  { name = "arc_graph",         duty = "producer->consumer arc extractor + severed-ear diff" },
+]
+
+[automation]    # front door + operational memory (design: ai_docs/03_AUTOMATION_RUNBOOKS.md)
+justfile        = true                    # standalone repo owns it; root justfile = thin proxies only
+introspect      = "just --dump --dump-format json"
+recipe_groups   = ["quality", "parity", "graph", "deploy", "habitat", "meta"]
+runbooks        = ["DEPLOY", "PARITY", "MIGRATION", "INCIDENT"]
+gate_recipe     = "just gate"             # the canonical 4-stage pipeline
+parity_recipe   = "just parity"           # golden-corpus diff; REGRESSION fails
+root_proxies    = "habitat-graph-{gate,arc,health}"   # in workspace-root justfile
+
+[gates.human]   # decisions reserved for Luke @ 0.A (sparse-signal / arming)
+go_no_go        = "refactor to Rust at all"
+port_assign     = "via port-claim skill"
+repo_remotes    = "standalone repo name + remotes"
+backend_policy  = "AST-only default + TIERWRIGHT; any external call on source?"
+arming_key      = "factory.authorize.habitat-graph (never auto-written)"
+oss_upstream    = "contribute Rust port back to graphify, or keep internal?"
+root_justfile_proxy = "confirm two-tier (own justfile + root proxies) — 03 §1"
+# incremental_engine: DECIDED by architecture (ADR-04 §8 — salsa/daemon/frontier/POVM); no longer Luke-gated
