@@ -1,0 +1,27 @@
+[package]
+name = "habitat-graph-habitat"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+rust-version.workspace = true
+description = "Factory wiring for habitat-graph (L8): health bridge, POVM/injection.db memory, Obsidian protocol, PV2 sphere registrar, orchestrator cc-pipe, TIERWRIGHT backend, and arc-graph severed-ear analysis. Additive — never load-bearing on the OSS core."
+keywords = ["knowledge-graph", "ultraplate", "factory", "integration"]
+categories = ["development-tools"]
+
+[dependencies]
+habitat-graph-core = { workspace = true }
+habitat-graph-analyze = { workspace = true }
+habitat-graph-serve = { workspace = true }
+habitat-graph-backend = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+# Live adapters (real I/O) — off by default so the OSS build + gate stay dep-light and network-free.
+rusqlite = { version = "0.31", features = ["bundled"], optional = true }
+ureq = { version = "2", optional = true }
+
+[features]
+default = []
+# Concrete live adapters: rusqlite → injection.db, ureq → PV2/TIERWRIGHT/cc-health HTTP.
+live = ["dep:rusqlite", "dep:ureq", "habitat-graph-backend/net"]

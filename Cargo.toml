@@ -15,6 +15,7 @@ members = [
     "crates/habitat-graph-serve",
     "crates/habitat-graph-fixtures",
     "crates/habitat-graph-daemon",
+    "crates/habitat-graph-habitat",
 ]
 
 [workspace.package]
@@ -49,6 +50,7 @@ habitat-graph-analyze = { path = "crates/habitat-graph-analyze" }
 habitat-graph-export = { path = "crates/habitat-graph-export" }
 habitat-graph-serve = { path = "crates/habitat-graph-serve" }
 habitat-graph-daemon = { path = "crates/habitat-graph-daemon" }
+habitat-graph-habitat = { path = "crates/habitat-graph-habitat" }
 
 [profile.release]
 lto = "thin"
