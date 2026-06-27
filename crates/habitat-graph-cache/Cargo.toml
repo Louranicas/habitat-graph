@@ -1,0 +1,15 @@
+[package]
+name = "habitat-graph-cache"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+rust-version.workspace = true
+description = "Content-addressed store + demand-driven memoization for habitat-graph (the incremental substrate, ADR-04)."
+keywords = ["cache", "incremental", "content-addressed", "memoization"]
+categories = ["caching", "development-tools"]
+
+[dependencies]
+blake3 = { workspace = true }
+habitat-graph-core = { workspace = true }
