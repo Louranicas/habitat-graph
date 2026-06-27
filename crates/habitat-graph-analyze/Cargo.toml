@@ -1,0 +1,15 @@
+[package]
+name = "habitat-graph-analyze"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+rust-version.workspace = true
+description = "Structure mining for habitat-graph: Leiden community detection + centrality (L5)."
+keywords = ["leiden", "community-detection", "centrality", "graph"]
+categories = ["development-tools"]
+
+[dependencies]
+habitat-graph-core = { workspace = true }
+leiden-rs = { workspace = true }

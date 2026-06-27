@@ -43,7 +43,8 @@ Each sealed phase records `claim | warrant | evidence`:
 
 ### D3 Graph (P2) — IN PROGRESS (build/L4 done; analyze/L5 Leiden pending)
 - `habitat-graph-build` (assemble/dedup/merge) | [VBE] | dynamic Workflow (forge fibers + judges, 0 repair rounds); `assemble` interns RawNode labels→NodeId (IndexMap first-seen; dangling-edge drop) → `core::Graph`; `dedup` (by id / by src,tgt,relation); `merge` by-label re-intern + edge remap. Re-gated authoritatively + closed judge contract gaps (merge tool_version a-wins, generated_at fallback, inputs concat). **347 workspace tests** (build 78). forbid(unsafe), no unwrap/expect in lib.
-- Leiden community parity | _pending_ | _next: `habitat-graph-analyze` (Leiden) + centrality + patterns_
+- `habitat-graph-analyze` (Leiden cluster + centrality) | [VBE] | dynamic Workflow (0 repair rounds); `cluster::detect_communities` via **leiden-rs 0.8**, seeded (`LEIDEN_SEED`) + canonical output → **deterministic** (R4), with Σmembers==nodes invariant + a 50-node scale test (judge gap); `degree_centrality` (in+out, isolated incl., deterministic sort). **393 workspace tests** (analyze 45). patterns/questions deferred (heuristic, non-parity).
+- community parity vs golden | _pending_ | _needs fixtures adapter (#3) + Python extractor (#15)_
 
 ### D4 Output (P3) — PENDING
 - exporter parity | _pending_ | _json/html/svg/graphml/cypher/obsidian vs goldens_
