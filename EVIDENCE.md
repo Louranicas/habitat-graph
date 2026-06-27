@@ -30,7 +30,9 @@ Each sealed phase records `claim | warrant | evidence`:
 - `core` crate gate-green | [VBE] | `check`=0 `clippy -D warnings`=0 `pedantic`=0 `test`=0; **44 tests / 0 failed**; `forbid(unsafe)`, no `unwrap`/`expect` in lib.
 - graph.json roundtrip | [VBE] | `schema::tests::json_roundtrip_preserves_graph` + deterministic `sorted()` (R4) + `two_graphs_same_content_serialize_identically`.
 - Confidence R2 byte-compat | [VBE] | `confidence::tests::serde_matches_graphify_strings` asserts exact `"EXTRACTED"|"INFERRED"|"AMBIGUOUS"`.
-- guard rules + Trojan-Source/bidi escapes | _pending_ | _next: `habitat-graph-core::guard` + `habitat-graph-cache` parity-transparency_
+- guard rules + Trojan-Source/bidi escapes | [VBE] | `guard::sanitize::display_safe` escapes bidi overrides/isolates/marks + zero-width + BOM + control → `\u{XXXX}`; `path::confine_to` lexical anti-traversal; `url::validate_url` rejects scheme/creds/control/**bidi** (self-test caught a bidi-in-URL bypass, fixed); `secrets::screen_for_secrets`. **82 tests / 0 failed**.
+- `habitat-graph-cache` parity-transparency | _pending_ | _next: the cache crate + the hit==recompute invariant (G5)_
+- *Note:* per-module density (8–13) grows toward the 50/module **release** floor in later waves; 50/module is a release-eligibility gate (DDF G4), not per-commit.
 
 ### D2 Extract (P1) — PENDING
 - AST node/edge parity (rust/python/js-ts) | _pending_ | _0 REGRESSION vs goldens_
