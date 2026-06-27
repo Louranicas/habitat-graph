@@ -3,9 +3,11 @@
 > Back to: [[CLAUDE.md]] · [[habitat-graph/README]] · [[DEPLOYMENT_FRAMEWORK]]
 > Gold standard: deep-diff-forge `EVIDENCE.md`.
 
-**STATUS: PLANNING — TEMPLATE, NO SEALED EVIDENCE YET.** No crate exists, so there is nothing to
-warrant. This file documents the *form* evidence will take and is populated per phase (D1→D8) as
-gates pass. Honesty rule: a claim with no warrant is not recorded here.
+**STATUS: BUILT — 13-crate workspace, gate-green, 1225 all-targets tests / 0 failed (S1008796).**
+D0→D6 + a semantic-backend crate + an MCP frontier organ are sealed below. Remaining: D7 release
+(port-claim + standalone remotes + no-mistakes seal — gated on Luke @ 0.A) and D8 learning.
+Honesty rule: a claim with no warrant is not recorded here; every count below was re-run
+authoritatively in the main loop (never trusted from a builder's self-report).
 
 ## Warrant labels (from the gold standard)
 - `[VBE]` — verified by execution (real process; output + exit code asserted).
@@ -55,21 +57,35 @@ Each sealed phase records `claim | warrant | evidence`:
 - **G8 RUNTIME SMOKE — live binary** | [VBE] | `--version` ok; `self-test` → `self-test ok: 2 nodes`; `doctor` prints engine wiring; **`extract crates/habitat-graph-core/src` → 139 nodes / 48 edges / 97 communities**, valid NetworkX node-link `graph.json` (32K) + `GRAPH_REPORT.md`. **The tool is self-hosting — it extracts its own source.**
 - `habitat-graph-serve` query engine (load + query/path) | [VBE] | dynamic Workflow (0 repair rounds); `from_node_link` parses the node-link envelope back into a Graph (**round-trip with export proven**), `find_by_label` (case-insensitive substring, sorted), `shortest_path` (undirected BFS, deterministic, cycle-tested). **569 workspace tests** (serve 60). forbid(unsafe), no unwrap/expect in lib.
 - `habitat-graph-daemon` HTTP service + `habitat-graph serve` | [VBE] | dynamic Workflow; axum `/health`+`/query`+`/path` over `Arc<Graph>` (pure handlers + tower-oneshot-tested router); cli `serve` runs it. **LIVE PROVEN**: bound `:7878`, served the 139-node graph — `/health`→`{nodes:139,edges:48,communities:97}`, `/query?q=Confidence`→4 JSON matches, `/path` correct. **736 workspace tests** (after D3+D4 parity gates added).
-- CLI/MCP parity | _partial_ | query/path/serve work end-to-end; the rmcp MCP transport (Claude-Code organ) folds with the salsa warm-DB evolution.
+- `habitat-graph serve` (cli) | [VBE] | `Serve { graph, addr }` runs the daemon router; **LIVE PROVEN** :7878. Committed `60fb889`.
 
-### D6 Habitat (P5) — PENDING
-- arc-graph reproduces arc-coherence set + flags severed ear | _pending_
-- orchestrator pipe ACK/NACK | _pending_ | POVM write+read-back | _pending_
+### D-extra Semantic backend (L3) — DONE (`habitat-graph-backend`, 73 tests, commit `f719f27`)
+- `Backend` trait + `NoopBackend` (local-first, R3) | [VBE] | default backend yields empty `Extraction` — code extraction never reaches a model unless configured; `is_local()` makes that auditable.
+- Ollama + OpenAI-compatible adapters | [VBE] | generic over an injectable `HttpTransport` (network-free testing via `StaticTransport`; real `ureq` client behind `--features net`, gate-checked). Request-build + envelope-parse + error taxonomy tested.
+- untrusted-output guard | [VBE] | `protocol::parse_semantic` funnels every label/relation through `sanitize_label`; a Trojan-Source (U+202E is `Cf`, not `Cc`) **storage-keeps / render-escapes** invariant is pinned by test (`bidi_override_in_label_is_escaped_at_render`). 73 tests (default + net), pedantic-clean.
 
-### D7 Release — PENDING
-- gate-green + no-mistakes seal | _pending_ | crates.io (token-gated, irreversible)
+### D6 Habitat (P5/L8) — DONE (`habitat-graph-habitat`, 386 tests / 407 +live, commit `18d0942`)
+- built via dynamic Workflow (7 forge fibers + tester/security/claim-verifier judges OUTSIDE the loop). The **claim-verifier caught the fibers over-claiming gate-green** (per-file `--lib` check read clean when clippy aborted on sibling WIP); `forge-debugger-maintainer` drove the assembled crate to green; a main-loop re-gate confirmed it. Every boundary is a trait + in-memory double; live adapters behind `--features live`.
+- `arc_graph` reproduces producer→consumer arc set + flags severed ear | [VBE] | `extract_arcs` (deterministic R4) + `diff_arcs`→`SeveredEarReport{present,severed,coherence}`; coherence math 0/0.5/1.0 + empty-expected guard tested. Serves S1008620 bidi-wiring.
+- orchestrator pipe ACK/NACK | [VBE] | `handle_request` fail-closed: unknown verb→`NACK_UNKNOWN_VERB`, empty scope→`NACK_SCHEMA_INVALID`, scope-before-verb order; full serde round-trip; `LoopbackTransport` double.
+- memory no-risk-write | [VBE] | `persist_graph_summary` writes a `causal_chain` row then **reads it back and errors on mismatch** (tamper-sink test); `SqliteSink` (behind `live`) uses bound `?` params, tested via a real in-memory rusqlite roundtrip.
+- pv2 sphere naming-trap | [VBE] | `sphere_id_for_community` derives the id from the stable `CommunityId`, never the mutable label — two communities with the same label get different ids (proof test).
+- bridge + obsidian + tierwright | [VBE] | `cc-health` path-map (ME `/api/health`); Back-to header + `MASTER_INDEX` entry + `display_safe`; `TierwrightBackend` implements `Backend` routing via `:8201`.
+
+### D5.5 MCP frontier organ — DONE (`serve::mcp`, 30 tests, commit `8f3d1bd`)
+- pure JSON-RPC 2.0 handler | [VBE] | `handle_jsonrpc(&Graph,&str)->String` dispatches `initialize`/`tools/list`/`tools/call`, skips notifications; tools `graph_query`/`graph_path`/`graph_health`; output `display_safe`'d; `graph_query` filter-then-cap (50) reports true total.
+- **LIVE PROVEN over stdio** | [VBE] | `habitat-graph mcp` against the 139-node graph: `initialize`→`habitat-graph/2024-11-05`, `tools/list`→3 tools, `graph_health`→`nodes=139 edges=48 communities=97`, `graph_query "Confidence"`→4 matches, `notifications/initialized`→no reply.
+
+### D7 Release — PENDING (gated on Luke @ 0.A)
+- gate-green ✓ (1225 tests) · port-claim + standalone remotes + no-mistakes seal | _gated_ | crates.io (token-gated, irreversible). Runbook: `runbooks/DEPLOY_RUNBOOK.md`.
 
 ### D8 Learning (P6) — PENDING
-- Hebbian-reinforced graph | _pending_
+- Hebbian-reinforced graph | _pending_ (depends on D7 + live POVM actuation).
 
-## Cross-substrate memory web (to be wired at first seal, like DDF)
-Obsidian hub · HMS `injection.db` session_checkpoint + causal_chain · POVM namespace `habitat_graph`
-· auto-memory pointer · MASTER_INDEX. (Not yet created — planning phase.)
+## Cross-substrate memory web (wired S1008796)
+Obsidian hub (`~/projects/claude_code/`) · `injection.db` session_checkpoint + causal_chain · POVM
+namespace `habitat_graph` · auto-memory pointer (`memory/`) · `MASTER_INDEX.md` · CLAUDE.local.md
+anchor. Slug `s1008796-habitat-graph-rust`.
 
 ---
 *Evidence template authored S1008796 · Claude @ cortex. Populated per phase as gates pass — never ahead of them.*

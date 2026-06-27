@@ -1,7 +1,7 @@
 # habitat-graph — Crate Charter
 
 > Back to: [[CLAUDE.md]] (workspace root) · [[CLAUDE.local.md]] · framework: [[DEPLOYMENT_FRAMEWORK]] · [[MODULE_STRUCTURE_PLAN]]
-> **STATUS: PLANNING (S1008796).** No source yet. This charter governs the crate once scaffolded.
+> **STATUS: BUILT (S1008796).** 13-crate workspace, gate-green, 1225 all-targets tests / 0 failed. D0→D6 + semantic backend + MCP organ sealed (see `EVIDENCE.md`). D7 release gated on Luke @ 0.A (port-claim + remotes + no-mistakes seal).
 
 ## What this is
 
