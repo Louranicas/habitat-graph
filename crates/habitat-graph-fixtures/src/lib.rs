@@ -10,10 +10,12 @@
 
 use std::collections::BTreeSet;
 
+pub mod community_golden;
 pub mod diff;
 pub mod golden;
 pub mod normalize;
 
+pub use community_golden::communities_from_golden;
 pub use diff::{classify, ParityReport};
 pub use golden::from_golden;
 pub use normalize::from_core;

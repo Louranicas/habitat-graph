@@ -518,9 +518,12 @@ dependencies = [
 name = "habitat-graph-fixtures"
 version = "0.0.0"
 dependencies = [
+ "habitat-graph-analyze",
  "habitat-graph-build",
  "habitat-graph-core",
+ "habitat-graph-export",
  "habitat-graph-extract",
+ "habitat-graph-serve",
  "habitat-graph-source",
  "serde_json",
 ]

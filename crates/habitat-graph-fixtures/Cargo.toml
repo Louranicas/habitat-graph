@@ -19,3 +19,6 @@ serde_json = { workspace = true }
 habitat-graph-source = { workspace = true }
 habitat-graph-extract = { workspace = true }
 habitat-graph-build = { workspace = true }
+habitat-graph-analyze = { workspace = true }
+habitat-graph-export = { workspace = true }
+habitat-graph-serve = { workspace = true }
