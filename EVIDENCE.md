@@ -76,8 +76,11 @@ Each sealed phase records `claim | warrant | evidence`:
 - pure JSON-RPC 2.0 handler | [VBE] | `handle_jsonrpc(&Graph,&str)->String` dispatches `initialize`/`tools/list`/`tools/call`, skips notifications; tools `graph_query`/`graph_path`/`graph_health`; output `display_safe`'d; `graph_query` filter-then-cap (50) reports true total.
 - **LIVE PROVEN over stdio** | [VBE] | `habitat-graph mcp` against the 139-node graph: `initialize`→`habitat-graph/2024-11-05`, `tools/list`→3 tools, `graph_health`→`nodes=139 edges=48 communities=97`, `graph_query "Confidence"`→4 matches, `notifications/initialized`→no reply.
 
-### D7 Release — PENDING (gated on Luke @ 0.A)
-- gate-green ✓ (1225 tests) · port-claim + standalone remotes + no-mistakes seal | _gated_ | crates.io (token-gated, irreversible). Runbook: `runbooks/DEPLOY_RUNBOOK.md`.
+### D7 Release — PARTIAL (private GitHub push DONE; OSS/GitLab/crates.io deferred to Luke)
+- gate-green | [VBE] | 1225 all-targets tests / 0 failed, pedantic-clean (re-run authoritatively at HEAD).
+- **standalone push** | [VBE] | Luke chose "Private, then push" (S1008796). Secret-screen clean (only `.rs/.toml/.md/.json/.lock/.py` + fixtures tracked); `gh repo create Louranicas/habitat-graph --private --push`; **remote `main` sha `d3eba1d` == local HEAD** (ground-truth `git ls-remote`), visibility PRIVATE, 22 commits. Standalone-only — origin is the crate's own repo, never the superproject.
+- **no-mistakes gate** | [VBE] | `no-mistakes init` (local bare-repo gate + post-receive hook; protects future pushes) + seal run `01KW4BMZ…` → `outcome: passed, findings: none`. Caveat: deep steps skipped (commit already upstream) — the substantive validation is the 1225-test gate above.
+- _deferred to Luke @ 0.A (one-way doors):_ public/OSS-upstream flip (`gh repo edit --visibility public`), GitLab mirror (needs `glab`/token), `port-claim` set (rec. 8202) + devenv `[[services]]` deploy, crates.io publish (token-gated, irreversible).
 
 ### D8 Learning (P6) — PENDING
 - Hebbian-reinforced graph | _pending_ (depends on D7 + live POVM actuation).
