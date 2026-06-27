@@ -7,6 +7,7 @@ members = [
     "crates/habitat-graph-cache",
     "crates/habitat-graph-source",
     "crates/habitat-graph-extract",
+    "crates/habitat-graph-backend",
     "crates/habitat-graph-build",
     "crates/habitat-graph-analyze",
     "crates/habitat-graph-export",
@@ -42,6 +43,7 @@ tokio = { version = "1", features = ["rt-multi-thread", "macros", "net"] }
 habitat-graph-core = { path = "crates/habitat-graph-core" }
 habitat-graph-source = { path = "crates/habitat-graph-source" }
 habitat-graph-extract = { path = "crates/habitat-graph-extract" }
+habitat-graph-backend = { path = "crates/habitat-graph-backend" }
 habitat-graph-build = { path = "crates/habitat-graph-build" }
 habitat-graph-analyze = { path = "crates/habitat-graph-analyze" }
 habitat-graph-export = { path = "crates/habitat-graph-export" }

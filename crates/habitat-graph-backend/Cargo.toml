@@ -1,0 +1,23 @@
+[package]
+name = "habitat-graph-backend"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+rust-version.workspace = true
+description = "Semantic (LLM) extraction backends for habitat-graph: a local-first trait + noop default + Ollama / OpenAI-compatible adapters, generic over an injectable HTTP transport (L3)."
+keywords = ["llm", "knowledge-graph", "extraction", "ollama"]
+categories = ["development-tools"]
+
+[dependencies]
+habitat-graph-core = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+ureq = { version = "2", optional = true }
+
+[features]
+default = []
+# Concrete blocking HTTP transport (pulls in `ureq` + TLS). Off by default: the default build and
+# the quality gate carry no network dependency; adapters are exercised via the injectable transport.
+net = ["dep:ureq"]
