@@ -52,6 +52,12 @@ enum Command {
         #[arg(long, default_value = "127.0.0.1:7878")]
         addr: String,
     },
+    /// Serve the graph over the Model Context Protocol (JSON-RPC on stdio).
+    Mcp {
+        /// Path to a node-link `graph.json`.
+        #[arg(long, default_value = "graphify-out/graph.json")]
+        graph: PathBuf,
+    },
     /// Exercise the engine on a tiny in-memory corpus (no I/O).
     SelfTest,
     /// Print environment + wiring diagnostics.
@@ -67,6 +73,7 @@ impl Cli {
             Command::Query { query, graph } => commands::query::run_query(&graph, &query),
             Command::Path { from, to, graph } => commands::query::run_path(&graph, &from, &to),
             Command::Serve { graph, addr } => commands::serve::run(&graph, &addr),
+            Command::Mcp { graph } => commands::mcp::run(&graph),
             Command::SelfTest => commands::meta::self_test(),
             Command::Doctor => commands::meta::doctor(),
         }
