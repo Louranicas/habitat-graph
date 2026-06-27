@@ -25,6 +25,24 @@ enum Command {
         #[arg(long, default_value = "graphify-out")]
         out: PathBuf,
     },
+    /// Search nodes whose label contains a substring (case-insensitive).
+    Query {
+        /// Substring to search for.
+        query: String,
+        /// Path to a node-link `graph.json`.
+        #[arg(long, default_value = "graphify-out/graph.json")]
+        graph: PathBuf,
+    },
+    /// Find the shortest path between two node labels.
+    Path {
+        /// Source node label.
+        from: String,
+        /// Target node label.
+        to: String,
+        /// Path to a node-link `graph.json`.
+        #[arg(long, default_value = "graphify-out/graph.json")]
+        graph: PathBuf,
+    },
     /// Exercise the engine on a tiny in-memory corpus (no I/O).
     SelfTest,
     /// Print environment + wiring diagnostics.
@@ -37,6 +55,8 @@ impl Cli {
     pub fn run(self) -> u8 {
         match self.command {
             Command::Extract { dir, out } => commands::extract::run(&dir, &out),
+            Command::Query { query, graph } => commands::query::run_query(&graph, &query),
+            Command::Path { from, to, graph } => commands::query::run_path(&graph, &from, &to),
             Command::SelfTest => commands::meta::self_test(),
             Command::Doctor => commands::meta::doctor(),
         }

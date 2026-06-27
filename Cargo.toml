@@ -40,6 +40,7 @@ habitat-graph-extract = { path = "crates/habitat-graph-extract" }
 habitat-graph-build = { path = "crates/habitat-graph-build" }
 habitat-graph-analyze = { path = "crates/habitat-graph-analyze" }
 habitat-graph-export = { path = "crates/habitat-graph-export" }
+habitat-graph-serve = { path = "crates/habitat-graph-serve" }
 
 [profile.release]
 lto = "thin"

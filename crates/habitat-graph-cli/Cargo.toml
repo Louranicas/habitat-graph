@@ -22,6 +22,7 @@ habitat-graph-extract = { workspace = true }
 habitat-graph-build = { workspace = true }
 habitat-graph-analyze = { workspace = true }
 habitat-graph-export = { workspace = true }
+habitat-graph-serve = { workspace = true }
 
 [dev-dependencies]
 tempfile = "3"

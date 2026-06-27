@@ -358,6 +358,7 @@ dependencies = [
  "habitat-graph-core",
  "habitat-graph-export",
  "habitat-graph-extract",
+ "habitat-graph-serve",
  "habitat-graph-source",
  "tempfile",
 ]
