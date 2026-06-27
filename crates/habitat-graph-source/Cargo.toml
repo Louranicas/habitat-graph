@@ -1,0 +1,19 @@
+[package]
+name = "habitat-graph-source"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+rust-version.workspace = true
+description = "Input acquisition for habitat-graph: file detection, local ingest, and the processed-input manifest."
+keywords = ["walk", "ingest", "manifest", "knowledge-graph"]
+categories = ["filesystem", "development-tools"]
+
+[dependencies]
+habitat-graph-core = { workspace = true }
+blake3 = { workspace = true }
+ignore = { workspace = true }
+
+[dev-dependencies]
+tempfile = "3"

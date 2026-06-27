@@ -34,8 +34,11 @@ Each sealed phase records `claim | warrant | evidence`:
 - `habitat-graph-cache` parity-transparency | [VBE] | `memo::memoize` + `memo::tests::parity_transparency_hit_equals_recompute` prove a hit is **byte-identical to a recompute**; blake3 CAS (`key::CacheKey`, domain-separated) + capacity-bounded `MemStore` + LRU eviction (POVM policy injectable) + cached/uncached `partition`. **117 tests / 0 failed** (82 core + 35 cache).
 - *Note:* per-module density (8–13) grows toward the 50/module **release** floor in later waves; 50/module is a release-eligibility gate (DDF G4), not per-commit.
 
-### D2 Extract (P1) — PENDING
-- AST node/edge parity (rust/python/js-ts) | _pending_ | _0 REGRESSION vs goldens_
+### D2 Extract (P1) — IN PROGRESS (source/L2 acquisition done; extract/L3 tree-sitter pending)
+- `habitat-graph-source` (detect/ingest/manifest) | [VBE] | built via a **dynamic factory Workflow** (forge-rust-coder-v4 fibers one-per-module + forge-tester & agent-claim-verifier judges OUTSIDE the loop; conditional gate-repair loop, 0 rounds). Main loop re-gated authoritatively (defeating a stale-binary the verifier itself flagged). **207 workspace tests / 0 failed** (core 82, cache 35, source 90 = detect 50, ingest 18, manifest 22).
+- judge meaningfulness findings ADDRESSED | [VBE] | detect 2 soft tests now assert real exclusion (hidden-by-default, gitignore glob); manifest external **BLAKE3 KAT** `af1349b9…` (spec value, not our code path) breaks the self-referential oracle — passes, proving the algorithm; ingest directory→Io branch + manifest duplicate-path covered. Production code clean (judges: 0 unwrap/expect/unsafe/silent-swallow).
+- AST node/edge parity (rust/python/js-ts) | _pending_ | _next: `habitat-graph-extract` (tree-sitter) + freeze `worked/` goldens → first real parity gate_
+- *Note (standards):* detect meets the ≥50/module floor; ingest/manifest (18/22) are simple leaf functions at their meaningful-coverage level — padding to 50 would be filler, violating the harder anti-test-fitting rule. The count floor is enforced on substantive modules at release-eligibility (DDF G4).
 
 ### D3 Graph (P2) — PENDING
 - Leiden community parity | _pending_ | _label-permutation equivalent_

@@ -2,7 +2,11 @@
 # Bottom-up per ULTRAMAP.md: P0 = core (this commit). Crates added as layers land.
 [workspace]
 resolver = "2"
-members = ["crates/habitat-graph-core", "crates/habitat-graph-cache"]
+members = [
+    "crates/habitat-graph-core",
+    "crates/habitat-graph-cache",
+    "crates/habitat-graph-source",
+]
 
 [workspace.package]
 version = "0.0.0"
@@ -17,6 +21,7 @@ serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 thiserror = "2"
 blake3 = "1"
+ignore = "0.4"
 habitat-graph-core = { path = "crates/habitat-graph-core" }
 
 [profile.release]
