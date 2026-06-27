@@ -462,11 +462,13 @@ dependencies = [
  "habitat-graph-analyze",
  "habitat-graph-build",
  "habitat-graph-core",
+ "habitat-graph-daemon",
  "habitat-graph-export",
  "habitat-graph-extract",
  "habitat-graph-serve",
  "habitat-graph-source",
  "tempfile",
+ "tokio",
 ]
 
 [[package]]

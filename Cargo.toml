@@ -46,6 +46,7 @@ habitat-graph-build = { path = "crates/habitat-graph-build" }
 habitat-graph-analyze = { path = "crates/habitat-graph-analyze" }
 habitat-graph-export = { path = "crates/habitat-graph-export" }
 habitat-graph-serve = { path = "crates/habitat-graph-serve" }
+habitat-graph-daemon = { path = "crates/habitat-graph-daemon" }
 
 [profile.release]
 lto = "thin"

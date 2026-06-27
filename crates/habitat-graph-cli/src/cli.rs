@@ -43,6 +43,15 @@ enum Command {
         #[arg(long, default_value = "graphify-out/graph.json")]
         graph: PathBuf,
     },
+    /// Run the HTTP service (`/health`, `/query`, `/path`) over a graph until interrupted.
+    Serve {
+        /// Path to a node-link `graph.json`.
+        #[arg(long, default_value = "graphify-out/graph.json")]
+        graph: PathBuf,
+        /// Address to bind (host:port).
+        #[arg(long, default_value = "127.0.0.1:7878")]
+        addr: String,
+    },
     /// Exercise the engine on a tiny in-memory corpus (no I/O).
     SelfTest,
     /// Print environment + wiring diagnostics.
@@ -57,6 +66,7 @@ impl Cli {
             Command::Extract { dir, out } => commands::extract::run(&dir, &out),
             Command::Query { query, graph } => commands::query::run_query(&graph, &query),
             Command::Path { from, to, graph } => commands::query::run_path(&graph, &from, &to),
+            Command::Serve { graph, addr } => commands::serve::run(&graph, &addr),
             Command::SelfTest => commands::meta::self_test(),
             Command::Doctor => commands::meta::doctor(),
         }

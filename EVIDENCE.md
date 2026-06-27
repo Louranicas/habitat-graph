@@ -54,7 +54,8 @@ Each sealed phase records `claim | warrant | evidence`:
 - `habitat-graph-cli` (extract pipeline + meta) | [VBE] | dynamic Workflow (0 repair rounds); `extract` = detect→extract→build→analyze→export→write `graph.json`+`GRAPH_REPORT.md`; clap binary `habitat-graph`. **509 workspace tests** (cli 34). forbid(unsafe), no unwrap/expect/panic in command paths.
 - **G8 RUNTIME SMOKE — live binary** | [VBE] | `--version` ok; `self-test` → `self-test ok: 2 nodes`; `doctor` prints engine wiring; **`extract crates/habitat-graph-core/src` → 139 nodes / 48 edges / 97 communities**, valid NetworkX node-link `graph.json` (32K) + `GRAPH_REPORT.md`. **The tool is self-hosting — it extracts its own source.**
 - `habitat-graph-serve` query engine (load + query/path) | [VBE] | dynamic Workflow (0 repair rounds); `from_node_link` parses the node-link envelope back into a Graph (**round-trip with export proven**), `find_by_label` (case-insensitive substring, sorted), `shortest_path` (undirected BFS, deterministic, cycle-tested). **569 workspace tests** (serve 60). forbid(unsafe), no unwrap/expect in lib.
-- CLI/MCP parity + Python-graphify-retireable | _pending_ | _needs CLI query/path wiring + MCP/daemon transport (#10) + the parity gate (#4)_
+- `habitat-graph-daemon` HTTP service + `habitat-graph serve` | [VBE] | dynamic Workflow; axum `/health`+`/query`+`/path` over `Arc<Graph>` (pure handlers + tower-oneshot-tested router); cli `serve` runs it. **LIVE PROVEN**: bound `:7878`, served the 139-node graph — `/health`→`{nodes:139,edges:48,communities:97}`, `/query?q=Confidence`→4 JSON matches, `/path` correct. **725 workspace tests**.
+- CLI/MCP parity | _partial_ | query/path/serve work end-to-end; the rmcp MCP transport (Claude-Code organ) folds with the salsa warm-DB evolution.
 
 ### D6 Habitat (P5) — PENDING
 - arc-graph reproduces arc-coherence set + flags severed ear | _pending_

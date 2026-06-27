@@ -23,6 +23,8 @@ habitat-graph-build = { workspace = true }
 habitat-graph-analyze = { workspace = true }
 habitat-graph-export = { workspace = true }
 habitat-graph-serve = { workspace = true }
+habitat-graph-daemon = { workspace = true }
+tokio = { workspace = true }
 
 [dev-dependencies]
 tempfile = "3"
