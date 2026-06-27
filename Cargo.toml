@@ -7,6 +7,7 @@ members = [
     "crates/habitat-graph-cache",
     "crates/habitat-graph-source",
     "crates/habitat-graph-extract",
+    "crates/habitat-graph-build",
 ]
 
 [workspace.package]
@@ -24,6 +25,7 @@ thiserror = "2"
 blake3 = "1"
 ignore = "0.4"
 rayon = "1"
+indexmap = "2"
 tree-sitter = "0.22"
 tree-sitter-rust = "0.21"
 habitat-graph-core = { path = "crates/habitat-graph-core" }

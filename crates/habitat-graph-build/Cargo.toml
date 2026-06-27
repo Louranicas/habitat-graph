@@ -1,0 +1,15 @@
+[package]
+name = "habitat-graph-build"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+rust-version.workspace = true
+description = "Aggregates per-file extractions into the interned habitat-graph knowledge graph (L4)."
+keywords = ["graph", "knowledge-graph", "intern", "dedup"]
+categories = ["development-tools"]
+
+[dependencies]
+habitat-graph-core = { workspace = true }
+indexmap = { workspace = true }

@@ -41,8 +41,9 @@ Each sealed phase records `claim | warrant | evidence`:
 - parity (node/edge CONTENT vs goldens) | _pending_ | _needs the Python extractor (#15 — the committed goldens are Python) + the fixtures adapter → first parity gate. See `ai_docs/06_PARITY_INTEL`._
 - *Note (standards):* detect meets the ≥50/module floor; ingest/manifest (18/22) are simple leaf functions at their meaningful-coverage level — padding to 50 would be filler, violating the harder anti-test-fitting rule. The count floor is enforced on substantive modules at release-eligibility (DDF G4).
 
-### D3 Graph (P2) — PENDING
-- Leiden community parity | _pending_ | _label-permutation equivalent_
+### D3 Graph (P2) — IN PROGRESS (build/L4 done; analyze/L5 Leiden pending)
+- `habitat-graph-build` (assemble/dedup/merge) | [VBE] | dynamic Workflow (forge fibers + judges, 0 repair rounds); `assemble` interns RawNode labels→NodeId (IndexMap first-seen; dangling-edge drop) → `core::Graph`; `dedup` (by id / by src,tgt,relation); `merge` by-label re-intern + edge remap. Re-gated authoritatively + closed judge contract gaps (merge tool_version a-wins, generated_at fallback, inputs concat). **347 workspace tests** (build 78). forbid(unsafe), no unwrap/expect in lib.
+- Leiden community parity | _pending_ | _next: `habitat-graph-analyze` (Leiden) + centrality + patterns_
 
 ### D4 Output (P3) — PENDING
 - exporter parity | _pending_ | _json/html/svg/graphml/cypher/obsidian vs goldens_
