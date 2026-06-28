@@ -1,0 +1,91 @@
+# ci.yml — machine-enforced 4-stage quality gate for habitat-graph
+# Triggers: push/PR to main.
+# Stages (must all pass in order):
+#   1. fmt        cargo fmt --all --check
+#   2. check      cargo check --workspace
+#   3a. clippy    -D warnings
+#   3b. pedantic  -D warnings -W clippy::pedantic
+#   4. test       cargo test --workspace --all-targets
+#   5. deny       cargo deny check  (policy: deny.toml)
+#   6. audit      cargo audit       (RUSTSEC advisory DB)
+
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+env:
+  CARGO_TERM_COLOR: always
+  # Pin target dir so caching is deterministic; matches local gate convention.
+  CARGO_TARGET_DIR: ./target
+
+jobs:
+  gate:
+    name: 4-stage quality gate
+    runs-on: ubuntu-latest
+
+    steps:
+      # ── Checkout ────────────────────────────────────────────────────────────
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      # ── Toolchain ────────────────────────────────────────────────────────────
+      - name: Install Rust stable with rustfmt + clippy
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+
+      # ── Cargo cache ──────────────────────────────────────────────────────────
+      - name: Cache cargo registry and build artifacts
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry/index/
+            ~/.cargo/registry/cache/
+            ~/.cargo/git/db/
+            ./target/
+          key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-cargo-
+
+      # ── Extra tooling ─────────────────────────────────────────────────────────
+      - name: Install cargo-deny
+        uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-deny
+
+      - name: Install cargo-audit
+        uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-audit
+
+      # ── Stage 1 — format ─────────────────────────────────────────────────────
+      - name: "Stage 1 — fmt (cargo fmt --all --check)"
+        run: cargo fmt --all --check
+
+      # ── Stage 2 — compilation check ───────────────────────────────────────────
+      - name: "Stage 2 — check (cargo check --workspace)"
+        run: cargo check --workspace
+
+      # ── Stage 3a — clippy -D warnings ────────────────────────────────────────
+      - name: "Stage 3a — clippy -D warnings"
+        run: cargo clippy --workspace --all-targets -- -D warnings
+
+      # ── Stage 3b — clippy pedantic ───────────────────────────────────────────
+      - name: "Stage 3b — clippy pedantic (-W clippy::pedantic)"
+        run: cargo clippy --workspace --all-targets -- -D warnings -W clippy::pedantic
+
+      # ── Stage 4 — tests ───────────────────────────────────────────────────────
+      - name: "Stage 4 — test (cargo test --workspace --all-targets)"
+        run: cargo test --workspace --all-targets
+
+      # ── Stage 5 — dependency policy ───────────────────────────────────────────
+      - name: "Stage 5 — cargo deny check"
+        run: cargo deny check
+
+      # ── Stage 6 — security audit ──────────────────────────────────────────────
+      - name: "Stage 6 — cargo audit"
+        run: cargo audit
