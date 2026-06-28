@@ -157,6 +157,38 @@ fn build_adjacency(graph: &Graph) -> HashMap<NodeId, Vec<(String, NodeId)>> {
     adj
 }
 
+/// Keeps only characters safe for an unquoted YAML scalar / tag token (alphanumeric plus `._-`).
+///
+/// Prevents a crafted path segment in `crate:`/`crate/<x>` from injecting a YAML mapping artifact
+/// or breaking the `tags: [...]` array (STRIDE-T hardening).
+fn yaml_token(s: &str) -> String {
+    s.chars()
+        .filter(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '-'))
+        .collect()
+}
+
+/// Escapes a string for embedding inside a double-quoted YAML scalar.
+///
+/// Escapes backslash and double-quote (after [`display_safe`] has already removed control/bidi
+/// codepoints) so a `"` in a path cannot close the quoted scalar early and corrupt the frontmatter
+/// (STRIDE-T hardening).
+fn yaml_dq(s: &str) -> String {
+    s.replace('\\', "\\\\").replace('"', "\\\"")
+}
+
+/// Sanitises an edge relation for use as a Dataview inline-field key (`relation:: [[..]]`).
+///
+/// Applies [`display_safe`] (neutralising Trojan-Source bidi overrides and control characters),
+/// then strips the metacharacters that would break the field or inject a spurious wikilink
+/// (`[`, `]`, `:`) (STRIDE-T hardening — closes the raw-`relation` boundary that `node.label`
+/// already guards).
+fn field_key(relation: &str) -> String {
+    display_safe(relation)
+        .chars()
+        .filter(|c| !matches!(c, '[' | ']' | ':'))
+        .collect()
+}
+
 /// Renders the Markdown content for one node note — YAML frontmatter (for Dataview / Juggl / the
 /// graph-view colour groups) + a `## Links` section whose edges are Dataview inline fields
 /// (`relation:: [[target]]`, also consumed by Breadcrumbs) so each typed edge is queryable.
@@ -168,7 +200,7 @@ fn render_node_note(
     node_to_comm: &HashMap<NodeId, CommunityId>,
 ) -> String {
     let safe_label = display_safe(&node.label);
-    let krate = crate_of(&node.source_file);
+    let krate = yaml_token(&crate_of(&node.source_file));
     let lang = lang_of(&node.source_file);
     let line = node.source_location.start_line;
     let degree = adj.get(&node.id).map_or(0, Vec::len);
@@ -181,7 +213,11 @@ fn render_node_note(
     }
     let _ = writeln!(content, "crate: {krate}");
     let _ = writeln!(content, "lang: {lang}");
-    let _ = writeln!(content, "file: \"{}\"", display_safe(&node.source_file));
+    let _ = writeln!(
+        content,
+        "file: \"{}\"",
+        yaml_dq(&display_safe(&node.source_file))
+    );
     let _ = writeln!(content, "line: {line}");
     let _ = writeln!(content, "degree: {degree}");
     // Tags drive graph-view colour groups (`tag:#crate/<name>`) + Dataview `FROM #community/<n>`.
@@ -204,8 +240,11 @@ fn render_node_note(
             let neighbour_label = label_map.get(neighbour_id).map_or("", String::as_str);
             let safe_neighbour = display_safe(neighbour_label);
             // `relation:: [[x]]` = a Dataview inline field (queryable typed edge) + Breadcrumbs relation.
+            // `relation` is attacker-influenced → field_key strips bidi/controls + `[`/`]`/`:` so it
+            // cannot inject a spurious wikilink or break the field (STRIDE-T, parity with node.label).
             // write! on String is infallible (OOM is the only failure, which aborts).
-            let _ = writeln!(content, "- {relation}:: [[{safe_neighbour}]]");
+            let safe_relation = field_key(relation);
+            let _ = writeln!(content, "- {safe_relation}:: [[{safe_neighbour}]]");
         }
     }
     content
@@ -786,6 +825,80 @@ mod tests {
         assert!(
             alpha_pos > c0_pos && alpha_pos < unclust_pos,
             "alpha should be under community c0"
+        );
+    }
+
+    // ── Security-hardening regression tests (S1008901 PB security sweep) ──────────
+
+    #[test]
+    fn field_key_strips_wikilink_injection_brackets() {
+        let out = super::field_key("]] [[INJECTED]] x");
+        assert!(!out.contains('['), "field_key must strip '[': {out}");
+        assert!(!out.contains(']'), "field_key must strip ']': {out}");
+    }
+
+    #[test]
+    fn field_key_neutralises_trojan_source_bidi() {
+        // U+202E RIGHT-TO-LEFT OVERRIDE must never reach the rendered vault.
+        let out = super::field_key("calls\u{202e}evil");
+        assert!(
+            !out.contains('\u{202e}'),
+            "bidi override must be removed: {out:?}"
+        );
+    }
+
+    #[test]
+    fn field_key_preserves_ordinary_relations() {
+        assert_eq!(super::field_key("imports_from"), "imports_from");
+        assert_eq!(super::field_key("calls"), "calls");
+    }
+
+    #[test]
+    fn yaml_dq_escapes_quote_and_backslash() {
+        assert_eq!(super::yaml_dq("a\"b\\c"), "a\\\"b\\\\c");
+    }
+
+    #[test]
+    fn yaml_token_strips_unsafe_yaml_chars() {
+        // ':' ',' ']' would break an unquoted scalar or the `tags: [...]` array.
+        assert_eq!(super::yaml_token("ev:il],x"), "evilx");
+        assert_eq!(super::yaml_token("my-crate_2.0"), "my-crate_2.0");
+    }
+
+    #[test]
+    fn render_vault_neutralises_hostile_relation_in_node_note() {
+        let mut g = Graph::new();
+        g.nodes.push(make_node(1, "alpha", "src/a.rs"));
+        g.nodes.push(make_node(2, "beta", "src/b.rs"));
+        g.edges.push(habitat_graph_core::Edge {
+            source: habitat_graph_core::NodeId::new(1),
+            target: habitat_graph_core::NodeId::new(2),
+            relation: "]] [[INJECTED]] x".to_owned(),
+            confidence: habitat_graph_core::Confidence::Extracted,
+        });
+        let joined: String = render_vault(&g.sorted())
+            .iter()
+            .map(|(_, c)| c.as_str())
+            .collect();
+        assert!(
+            !joined.contains("[[INJECTED"),
+            "wikilink injection via relation must be neutralised: {joined}"
+        );
+    }
+
+    #[test]
+    fn render_vault_escapes_quote_in_source_file_frontmatter() {
+        let mut g = Graph::new();
+        g.nodes
+            .push(make_node(1, "n", "src/a\"evil: true.rs"));
+        let joined: String = render_vault(&g.sorted())
+            .iter()
+            .map(|(_, c)| c.as_str())
+            .collect();
+        // The raw double-quote must be backslash-escaped inside the quoted YAML scalar.
+        assert!(
+            joined.contains("file: \"src/a\\\"evil: true.rs\""),
+            "source_file quote must be YAML-escaped: {joined}"
         );
     }
 }

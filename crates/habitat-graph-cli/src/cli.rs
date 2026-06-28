@@ -28,6 +28,18 @@ enum Command {
         /// this directory — open it with Obsidian's graph view for interactive interconnection.
         #[arg(long)]
         vault: Option<PathBuf>,
+        /// Also emit `graph.svg` (a deterministically laid-out drawing).
+        #[arg(long)]
+        svg: bool,
+        /// Also emit `graph.graphml` (Gephi/yEd import).
+        #[arg(long)]
+        graphml: bool,
+        /// Also emit `graph.cypher` (Neo4j import script).
+        #[arg(long)]
+        neo4j: bool,
+        /// Also emit a `wiki/` directory (one Markdown article per node + `index.md`).
+        #[arg(long)]
+        wiki: bool,
     },
     /// Search nodes whose label contains a substring (case-insensitive).
     Query {
@@ -73,8 +85,27 @@ impl Cli {
     #[must_use]
     pub fn run(self) -> u8 {
         match self.command {
-            Command::Extract { dir, out, vault } => {
-                commands::extract::run(&dir, &out, vault.as_deref())
+            Command::Extract {
+                dir,
+                out,
+                vault,
+                svg,
+                graphml,
+                neo4j,
+                wiki,
+            } => {
+                // Extra exporters requested → full path; otherwise the canonical no-opt `run`.
+                if svg || graphml || neo4j || wiki {
+                    let opts = commands::extract::ExtractOpts {
+                        svg,
+                        graphml,
+                        neo4j,
+                        wiki,
+                    };
+                    commands::extract::run_artifacts(&dir, &out, vault.as_deref(), opts)
+                } else {
+                    commands::extract::run(&dir, &out, vault.as_deref())
+                }
             }
             Command::Query { query, graph } => commands::query::run_query(&graph, &query),
             Command::Path { from, to, graph } => commands::query::run_path(&graph, &from, &to),

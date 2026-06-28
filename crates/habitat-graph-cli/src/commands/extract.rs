@@ -4,18 +4,40 @@ use std::path::Path;
 
 use habitat_graph_core::{GraphError, Result};
 
-/// Runs the extraction pipeline over `dir` and writes `graph.json` + `GRAPH_REPORT.md` +
-/// `graph.html` (a self-contained interactive viewer) into `out`.
+/// Optional PB exporter artifacts to emit alongside the always-written core artifacts.
+///
+/// All default to `false` (F13: human-facing exporters never burden the agent-critical path —
+/// `graph.json` + `GRAPH_REPORT.md` + `graph.html` are always written; these are opt-in).
+// A flat set of independent on/off CLI toggles is the natural representation here.
+#[allow(clippy::struct_excessive_bools)]
+#[derive(Debug, Default, Clone, Copy)]
+pub struct ExtractOpts {
+    /// Emit `graph.svg` (a deterministically laid-out drawing).
+    pub svg: bool,
+    /// Emit `graph.graphml` (Gephi/yEd import).
+    pub graphml: bool,
+    /// Emit `graph.cypher` (Neo4j import script).
+    pub neo4j: bool,
+    /// Emit a `wiki/` directory (one Markdown article per node + `index.md`).
+    pub wiki: bool,
+}
+
+/// Runs the extraction pipeline over `dir` and writes the core artifacts (`graph.json` +
+/// `GRAPH_REPORT.md` + `graph.html`) into `out`, with default (no extra) exporters.
 ///
 /// Returns a process exit code: `0` on success, `4` on any error (diagnostics to stderr).
-///
-/// On success, prints a one-line summary to stdout:
-/// ```text
-/// graph: N nodes, E edges, C communities -> <out>
-/// ```
 #[must_use]
 pub fn run(dir: &Path, out: &Path, vault: Option<&Path>) -> u8 {
-    match run_inner(dir, out, vault) {
+    run_artifacts(dir, out, vault, ExtractOpts::default())
+}
+
+/// Like [`run`], but additionally emits the opt-in PB exporter artifacts selected in `opts`
+/// (`--svg`/`--graphml`/`--neo4j`/`--wiki`).
+///
+/// On success, prints a one-line summary plus a line per extra artifact written.
+#[must_use]
+pub fn run_artifacts(dir: &Path, out: &Path, vault: Option<&Path>, opts: ExtractOpts) -> u8 {
+    match run_inner(dir, out, vault, opts) {
         Ok((n, e, c)) => {
             println!(
                 "graph: {n} nodes, {e} edges, {c} communities -> {}",
@@ -23,6 +45,18 @@ pub fn run(dir: &Path, out: &Path, vault: Option<&Path>) -> u8 {
             );
             if let Some(v) = vault {
                 println!("obsidian vault ({n} notes + _MOC) -> {}", v.display());
+            }
+            if opts.svg {
+                println!("svg -> {}", out.join("graph.svg").display());
+            }
+            if opts.graphml {
+                println!("graphml -> {}", out.join("graph.graphml").display());
+            }
+            if opts.neo4j {
+                println!("cypher -> {}", out.join("graph.cypher").display());
+            }
+            if opts.wiki {
+                println!("wiki ({n} articles + index) -> {}", out.join("wiki").display());
             }
             0
         }
@@ -42,7 +76,12 @@ pub fn run(dir: &Path, out: &Path, vault: Option<&Path>) -> u8 {
 /// Returns [`GraphError::Io`] if any filesystem operation fails: directory traversal,
 /// output-directory creation, or artifact write.  Propagates [`GraphError::Parse`] from the
 /// tree-sitter extractor and [`GraphError::Schema`] from JSON serialization.
-fn run_inner(dir: &Path, out: &Path, vault: Option<&Path>) -> Result<(usize, usize, usize)> {
+fn run_inner(
+    dir: &Path,
+    out: &Path,
+    vault: Option<&Path>,
+    opts: ExtractOpts,
+) -> Result<(usize, usize, usize)> {
     // Detect all Rust source files under `dir`, honoring .gitignore.
     let files = habitat_graph_source::detect(dir, &["rs"])?;
 
@@ -86,6 +125,31 @@ fn run_inner(dir: &Path, out: &Path, vault: Option<&Path>) -> Result<(usize, usi
         }
     }
 
+    // PB opt-in exporters (F13: never on the agent-critical path; written only when requested).
+    if opts.svg {
+        let svg = habitat_graph_export::render_svg(&graph);
+        std::fs::write(out.join("graph.svg"), svg.as_bytes())
+            .map_err(|e| GraphError::Io(e.to_string()))?;
+    }
+    if opts.graphml {
+        let graphml = habitat_graph_export::render_graphml(&graph);
+        std::fs::write(out.join("graph.graphml"), graphml.as_bytes())
+            .map_err(|e| GraphError::Io(e.to_string()))?;
+    }
+    if opts.neo4j {
+        let cypher = habitat_graph_export::render_cypher(&graph);
+        std::fs::write(out.join("graph.cypher"), cypher.as_bytes())
+            .map_err(|e| GraphError::Io(e.to_string()))?;
+    }
+    if opts.wiki {
+        let wiki_dir = out.join("wiki");
+        std::fs::create_dir_all(&wiki_dir).map_err(|e| GraphError::Io(e.to_string()))?;
+        for (filename, content) in habitat_graph_export::render_wiki(&graph) {
+            std::fs::write(wiki_dir.join(&filename), content.as_bytes())
+                .map_err(|e| GraphError::Io(format!("{filename}: {e}")))?;
+        }
+    }
+
     Ok(graph.counts())
 }
 
@@ -96,7 +160,7 @@ mod tests {
 
     use tempfile::TempDir;
 
-    use super::run;
+    use super::{run, run_artifacts, ExtractOpts};
 
     // ── Helpers ───────────────────────────────────────────────────────────────
 
@@ -489,5 +553,83 @@ mod tests {
         let json = read_graph_json(out.path());
         let node_count = count_str(&json, "\"id\":");
         assert_eq!(node_count, 1, "deeply nested .rs must be found");
+    }
+
+    // ── T21-T24: PB opt-in exporter flags emit their artifacts ───────────────
+
+    #[test]
+    fn svg_flag_emits_graph_svg() {
+        let src = TempDir::new().unwrap();
+        let out = TempDir::new().unwrap();
+        mk_file(src.path(), "lib.rs", "fn a() { b(); } fn b() {}");
+        let opts = ExtractOpts {
+            svg: true,
+            ..ExtractOpts::default()
+        };
+        assert_eq!(run_artifacts(src.path(), out.path(), None, opts), 0);
+        let svg = fs::read_to_string(out.path().join("graph.svg")).expect("graph.svg");
+        assert!(svg.starts_with("<svg"), "graph.svg must be an SVG: {svg:.60}");
+    }
+
+    #[test]
+    fn graphml_flag_emits_graph_graphml() {
+        let src = TempDir::new().unwrap();
+        let out = TempDir::new().unwrap();
+        mk_file(src.path(), "lib.rs", "fn a() {}");
+        let opts = ExtractOpts {
+            graphml: true,
+            ..ExtractOpts::default()
+        };
+        assert_eq!(run_artifacts(src.path(), out.path(), None, opts), 0);
+        let xml = fs::read_to_string(out.path().join("graph.graphml")).expect("graph.graphml");
+        assert!(xml.contains("<graphml"), "must be GraphML: {xml:.80}");
+    }
+
+    #[test]
+    fn neo4j_flag_emits_graph_cypher() {
+        let src = TempDir::new().unwrap();
+        let out = TempDir::new().unwrap();
+        mk_file(src.path(), "lib.rs", "fn a() {}");
+        let opts = ExtractOpts {
+            neo4j: true,
+            ..ExtractOpts::default()
+        };
+        assert_eq!(run_artifacts(src.path(), out.path(), None, opts), 0);
+        let cy = fs::read_to_string(out.path().join("graph.cypher")).expect("graph.cypher");
+        assert!(cy.contains("cypher export"), "must be a Cypher script: {cy:.80}");
+    }
+
+    #[test]
+    fn wiki_flag_emits_wiki_dir_with_index() {
+        let src = TempDir::new().unwrap();
+        let out = TempDir::new().unwrap();
+        mk_file(src.path(), "lib.rs", "fn a() {}");
+        let opts = ExtractOpts {
+            wiki: true,
+            ..ExtractOpts::default()
+        };
+        assert_eq!(run_artifacts(src.path(), out.path(), None, opts), 0);
+        assert!(
+            out.path().join("wiki").join("index.md").exists(),
+            "wiki/index.md must exist"
+        );
+    }
+
+    #[test]
+    fn default_run_emits_no_optional_artifacts() {
+        let src = TempDir::new().unwrap();
+        let out = TempDir::new().unwrap();
+        mk_file(src.path(), "lib.rs", "fn a() {}");
+        let _ = run(src.path(), out.path(), None);
+        assert!(!out.path().join("graph.svg").exists(), "no svg by default");
+        assert!(
+            !out.path().join("graph.graphml").exists(),
+            "no graphml by default"
+        );
+        assert!(
+            !out.path().join("graph.cypher").exists(),
+            "no cypher by default"
+        );
+        assert!(!out.path().join("wiki").exists(), "no wiki by default");
     }
 }

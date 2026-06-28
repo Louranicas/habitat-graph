@@ -4,7 +4,7 @@
 > **Live plan (next work):** [[14_PLAN_V3_UNIFIED_PARITY_AGENTIC_S1008901]] · matrix [[15_FEATURE_ASSIMILATION_MATRIX_S1008901]] · ops [[V3_LIVE_ORGAN_RUNBOOK_S1008901]] — full parity + agentic; each phase updates the ledger below.
 > Gold standard: deep-diff-forge `EVIDENCE.md`.
 
-**STATUS: BUILT + PUSHED (private) — 13-crate workspace, gate-green, 1536 all-targets tests / 0 failed; PA-1 GRAMMARS landed (S1008901): `extract::ast::{ts,js,go,text}` extractors, feature-gated (R9a), +303 tests over PA-1-prep — parity DEFERRED to C-G1, seal below. (PA-1 prep `main@29b1d15`: tree-sitter core 0.22.6→0.25.10 + LanguageFn · CI gate · parity baseline-ratchet.)**
+**STATUS: BUILT + PUSHED (private) — 13-crate workspace, gate-green, 1800 all-targets tests / 0 failed; ZERO-TOUCH CAMPAIGN in progress (S1008901): PA-1 grammars + PB exporters landed; PC→A3 queued; parity (C-G1) + A4 + live-deploy Luke-gated. Seals below.**
 D0→D6 + a semantic-backend crate + an MCP frontier organ are sealed below; D7 has pushed the repo
 private to GitHub and initialized the no-mistakes gate. Remaining (D7 tail, all gated on Luke @ 0.A,
 all one-way doors): OSS/public flip · GitLab mirror · `port-claim` + devenv deploy · crates.io. Plus
@@ -23,6 +23,11 @@ authoritatively in the main loop (never trusted from a builder's self-report).
 - taxonomy | [VBR] | graphify qualified-id, mirroring `ast/python.rs`: file node `B`, symbols `B_<sym>`, methods `B_<cls>_<method>`; edges `contains`/`method`/`inherits` (local/external split)/`imports_from`; never `calls`/`uses`. Go emits no `inherits` (Go has no inheritance). `text` (no grammar) emits the doc file node + ATX-heading nodes (`CommonMark` fence-aware) + relative-`.md` `references` edges — taxonomy **PROVISIONAL** pending the doc golden.
 - gate | [VBE] | authoritative main-loop re-gate (NOT a fiber self-report): check / clippy-D / pedantic / test all clean, **1536 tests / 0 failed** (+303 over PA-1-prep); per-module ts 69 · js 62 · go 55 · text 73 (all ≥50, judged meaningful by `forge-tester`). httpx parity baseline HELD (140/167). Single core `0.25.10` (ABI gate). Per-feature matrix + `--no-default-features` clean (2 text-dependent registry tests cfg-gated). `forbid(unsafe)` holds; zero lib `unwrap`/`expect`/`unsafe` across all new modules.
 - pins | [VBR] | `tree-sitter-typescript 0.23.2` (TS+TSX) · `tree-sitter-javascript 0.25.0` · `tree-sitter-go 0.25.0` (ABI matrix §6). **NEXT (Luke-gated): C-G1 golden-corpus sourcing → tiered 95/90 parity gate (FO-8).**
+
+### PB exporters — DONE (S1008901, FO-9 export half)
+- exporters | [VBE] | `export::{svg,graphml,cypher,wiki}` + shared `export::escape` (the single tested XML/Cypher escaping surface). Built via Workflow forge fibers + `forge-tester` + `forge-security-architect` + `agent-claim-verifier` (judges OUTSIDE the loop). svg = deterministic circular layout; graphml = Gephi/yEd; cypher = Neo4j `MERGE` (fixed `:REL` type, relation as escaped property — no identifier injection); wiki = per-node `node-{id}.md` + `index.md` (links always resolve via stable id).
+- security (STRIDE-T) | [VBE] | every attacker-influenced string (label/path/relation) escaped per output grammar. **Security sweep also caught + FIXED pre-existing `obsidian.rs` vulns:** Trojan-Source bidi + wikilink injection in raw `relation` (now `field_key`), YAML double-quote scalar breakout in `file:` (now `yaml_dq`), unquoted-scalar/tag injection from path segments (now `yaml_token`) — 7 regression tests added. `agent-claim-verifier` caught a graphml false-clean transient (warm-cache); final state re-gated clean on `cargo clean`.
+- gate | [VBE] | authoritative re-gate: check/clippy-D/pedantic/test clean, **1800 tests / 0 failed** (+264); per-module svg 54 · graphml 65 · cypher 60 · wiki 60 · escape 13 (all ≥50). httpx parity HELD. Determinism (R4) tested per exporter. CLI flags `--svg/--graphml/--neo4j/--wiki` wired into `extract` (F13: opt-in, off the agent-critical path).
 
 ## Warrant labels (from the gold standard)
 - `[VBE]` — verified by execution (real process; output + exit code asserted).
