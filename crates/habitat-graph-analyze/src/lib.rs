@@ -9,7 +9,13 @@
 pub mod centrality;
 pub mod cluster;
 pub mod confidence_gate;
+pub mod godnodes;
+pub mod questions;
+pub mod surprising;
 
 pub use centrality::degree_centrality;
 pub use cluster::detect_communities;
 pub use confidence_gate::trusted_subgraph;
+pub use godnodes::{god_nodes, GodNode};
+pub use questions::suggested_questions;
+pub use surprising::{surprising_connections, SurprisingConnection};

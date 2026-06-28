@@ -10,6 +10,7 @@
 #![forbid(unsafe_code)]
 #![warn(missing_docs)]
 
+pub mod benchmark;
 pub mod cypher;
 pub mod escape;
 pub mod graphml;
@@ -20,6 +21,7 @@ pub mod report;
 pub mod svg;
 pub mod wiki;
 
+pub use benchmark::{token_benchmark, TokenBenchmark};
 pub use cypher::render_cypher;
 pub use graphml::render_graphml;
 pub use html::render_html;
