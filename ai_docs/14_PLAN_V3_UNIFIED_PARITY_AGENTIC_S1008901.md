@@ -107,7 +107,11 @@ Everything else agentic (resources, token-budget, UDS, warm index, arc-telemetry
 
 ### 3.1 PA — Language breadth (the biggest visible gap) ★
 - **Scope (D-A, full):** all 11 grammars `ts js go java c cpp rb cs kt scala php` + doc nodes (`.md/.txt/.rst`). Existing: rust+python (`EVIDENCE.md:43-44`).
-- **PA-1 prep (✅ G-ABI resolved, [[abi-matrix-s1008901]]):** single core **0.25.x + tree-sitter-language 0.1**, all grammars at latest (Kotlin via `tree-sitter-kotlin-ng`, 0 defer). A one-time **core bump `0.22.6→0.25` + rust/python `LanguageFn` migration + re-parity** precedes the new grammars; then **source the golden corpora (C-G1)**. Both must be gate-green before the first new grammar lands.
+- **PA-1 prep (✅ G-ABI resolved, [[abi-matrix-s1008901]]) — ordered, on short-lived branches (LS-1):** core **0.25.x + tree-sitter-language 0.1**, all grammars latest (Kotlin via `tree-sitter-kotlin-ng`, 0 defer).
+  1. **Migration FIRST** (branch): bump `0.22.6→0.25` + rust/python `language()`→`LANGUAGE.into()` → **full gate + re-parity vs the pinned oracle** (any delta is ours, R3a) → fast-forward merge → both remotes. *Fallback (LS-4): core `0.24` — the `tree-sitter-language ^0.1` set still unifies; only rust/python pins differ. Reversible.*
+  2. **Golden-corpus sourcing (C-G1), in parallel:** license-clean representative TS/JS/Go repos → run the pinned graphify oracle → commit version-pinned goldens.
+  3. **PA-2 gate (R3):** verify `tree-sitter-kotlin-ng` provenance (maintenance + grammar fidelity vs upstream) before Kotlin lands.
+  #1 and #2 both gate-green before the first new grammar lands.
 - **Shape:** one `extract::ast::<lang>` impl + its `tree-sitter-<lang>` crate + a per-grammar pinned-oracle golden, behind the existing extension-dispatch registry (`extract/src/registry.rs:40-58`).
 - **Gate:** **§6 ABI matrix resolved first** (hard blocker); then per-grammar node≥80% + structural≥70% vs the committed golden; `forbid(unsafe)` holds (tree-sitter safe API); per-grammar completeness envelope present (§3.0).
 - **Method:** dynamic Workflow — one `forge-rust-coder-v4` fiber per language (collision-free, distinct files) + `forge-tester` parity judge **outside** the loop (the regime that built D2–D6).
@@ -179,6 +183,38 @@ Only if Luke flips (§7.1). `gh repo edit --visibility public` · crates.io publ
 - **Standalone-only push** — never the superproject (`feedback_morph_ir_engine_standalone_only`).
 
 ---
+
+## 5A. Engineering-rigor sweep — top-1% builder disciplines (logic sweep, S1008901)
+
+A final logic sweep of the whole plan against elite builder/developer practice. **Verdict: aligned; 5
+refinements (LS-1…LS-5) integrated below to close the last gap, plus the ground-truth discipline LS-D
+codified from G-ABI.**
+
+**Already embodied** (practice → home): gate-green per commit, ground-truth verified — `ls-remote==HEAD`,
+sha-not-mtime (§5, R10b) · tests-as-contract, meaningful-not-fitted, parity-as-regression (§5, R9b) ·
+judge-outside-the-loop, distrust self-reported done (§5, R12b) · determinism + reproducibility — R4,
+seeded Leiden, pinned oracle + exact-pinned deps (R3a, §6) · least-privilege / secure-by-default —
+forbid-unsafe, SSRF, DoS caps, `live-*` split, local-first, Trojan-Source guard (§1A, R8b, R11b) ·
+observability first-class (docs 18 + runbook) · reversibility / one-way-door gating (§7.1-7.2, runbook
+§9) · de-risk hardest-uncertainty-first (G-ABI front-loaded, factory-actual first) · both-frames NA
+discipline (§7B) · honest cost budgeting (C-1 golden pipeline, C-4 analyze cost) ·
+capacity/backpressure/failure-mode thinking (runbook §8/§10).
+
+**Refinements integrated (the sweep's findings):**
+
+| LS | Elite practice not yet codified | Integrated as |
+|---|---|---|
+| LS-1 | **Branch discipline for risky multi-commit units** — trunk-green-per-commit fits small changes; a core bump or a grammar wave is a multi-commit risky unit | each risky wave (the 0.25 migration, each grammar batch) on a **short-lived branch → full gate + parity → fast-forward merge → both remotes**; never a half-migrated trunk (folded into §3.1; §5) |
+| LS-2 | **CI as a standing machine-enforced gate** — local gate discipline is necessary, not sufficient | author a **CI workflow** (4-stage gate + parity harness + `cargo-deny`/`cargo-audit` + markdown-link check) as PA-1-prep infra; the gate stops being trust-based |
+| LS-3 | **Feature-matrix gating** — per-grammar + `live-*` flags are a combinatorial surface; a default build can pass while a combo breaks | gate **default · all-grammars · each `live-*` · `--all-features`**, not just default (extends §5) |
+| LS-4 | **Documented fallback for the migration risk** | if `0.25` migration is too disruptive to parity, the **fallback is core `0.24`** — the `tree-sitter-language ^0.1` set still unifies, only rust/python pins differ; reversible, recorded here + §3.1 |
+| LS-5 | **Perf as a gated budget** — FO-3 "flat latency as graph grows" is an assertion without a bench | add a **criterion bench** (warm-index query + token-budget pack); gate no-regression (lands A1) |
+
+**LS-D — ground-truth discipline (codified from G-ABI):** *a dependency's `.req` is a proxy; its
+`.kind` is ground truth — cargo never builds dev-deps of your deps, and `cargo-deny` can't see ABI.
+Verify `kind` + the real binding crate (`tree-sitter-language`, not `tree-sitter`) before declaring a
+version conflict.* A dependency-graph instance of `shortcut-over-ground-truth`; saved as memory
+`reference-dependency-kind-abi-ground-truth`.
 
 ## 6. The tree-sitter ABI matrix — PA's hard prerequisite (P1-G4, doc 09:35)
 
