@@ -1,5 +1,6 @@
 > Back to: [[CLAUDE.md]] · [[habitat-graph/README]] · [[EVIDENCE]] · **V3 corpus:** [[15_FEATURE_ASSIMILATION_MATRIX_S1008901]] · [[16_ARCHITECTURE_SCHEMATICS_V3_S1008901]] · [[17_CROSS_MODEL_AGENTIC_CONTRACT_S1008901]] · [[18_DIAGNOSTICS_OBSERVABILITY_V3_S1008901]] · [[19_PLAN_SCHEMATIC_MAP_S1008901]]
 > **Supersedes:** [[10_PLAN_V2_AGENT_FIRST_S1008796]] · [[08_GRAPHIFY_PARITY_PLAN_S1008796]] · **assimilates:** [[09_PARITY_PLAN_GAP_ANALYSIS_S1008796]] · **grounds on:** [[01_GRAPHIFY_EXEMPLAR_MAP]] · [[06_PARITY_INTEL]] · [[11_ARCHITECTURE_SCHEMATICS_S1008796]] · [[12_LLM_FRIENDLY_API_AND_UDS_S1008796]] · [[13_DIAGNOSTICS_AND_OBSERVABILITY_S1008796]]
+> **Resume (bidirectional):** new context window → type **"start coding"** — the workspace `CLAUDE.local.md` operating anchor (§ START CODING — habitat-graph V3) resumes here. First move = G-ABI (`abi-matrix-s1008901.md`).
 
 # habitat-graph — Plan v3: Unified Full-Parity + Agentic Roadmap (S1008901)
 
