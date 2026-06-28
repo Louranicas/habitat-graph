@@ -4,12 +4,19 @@
 > **Live plan (next work):** [[14_PLAN_V3_UNIFIED_PARITY_AGENTIC_S1008901]] · matrix [[15_FEATURE_ASSIMILATION_MATRIX_S1008901]] · ops [[V3_LIVE_ORGAN_RUNBOOK_S1008901]] — full parity + agentic; each phase updates the ledger below.
 > Gold standard: deep-diff-forge `EVIDENCE.md`.
 
-**STATUS: BUILT + PUSHED (private) — 13-crate workspace, gate-green, 1225 all-targets tests / 0 failed (S1008796).**
+**STATUS: BUILT + PUSHED (private) — 13-crate workspace, gate-green, 1233 all-targets tests / 0 failed; PA-1 PREP landed (S1008901, `main@29b1d15`): tree-sitter core 0.22.6→0.25.10 + LanguageFn migration · CI gate · parity baseline-ratchet — seal below.**
 D0→D6 + a semantic-backend crate + an MCP frontier organ are sealed below; D7 has pushed the repo
 private to GitHub and initialized the no-mistakes gate. Remaining (D7 tail, all gated on Luke @ 0.A,
 all one-way doors): OSS/public flip · GitLab mirror · `port-claim` + devenv deploy · crates.io. Plus
 D8 learning. Honesty rule: a claim with no warrant is not recorded here; every count below was re-run
 authoritatively in the main loop (never trusted from a builder's self-report).
+
+### PA-1 prep — DONE (S1008901, `main@29b1d15`, both remotes ground-truth-verified)
+- core migration | [VBE] | tree-sitter `0.22.6→0.25.10` (ABI 15) + `tree-sitter-language 0.1` + rust `0.24.2` / python `0.25.0`; 2 `LanguageFn` call-sites migrated (`ast/rust.rs`, `ast/python.rs`). Independently re-gated by `agent-claim-verifier` (no over-claim): **1233 tests / 0 failed**, clippy+pedantic clean. Single core proven: `cargo tree -p habitat-graph-extract -i tree-sitter` = exactly one `0.25.10` (LS-D).
+- parity HELD | [VBE] | httpx **140/144 nodes (97%), 167/174 structural (96%)** — identical per-relation counts to the D2 baseline; the workflow's "95% vs 96% regression" was a display *truncation* (edges unchanged, ground-truthed against `EVIDENCE.md:44`).
+- CI gate (LS-2) | [VBE] | `.github/workflows/ci.yml` (fmt→check→clippy-D→pedantic→test→deny→audit, injection-safe) + `deny.toml`. Machine-enforced on push/PR — the gate is no longer trust-based.
+- parity baseline-ratchet (LS-3) | [VBE] | `parity_httpx`/`parity_exporter` now gate on the pinned-oracle baseline (`≥140` nodes / `≥167` structural, R3a), not the loose `70/80` floor under which a large regression could hide; ratchet up on legitimate improvement.
+- G-ABI matrix | [VBR] | `ai_docs/abi-matrix-s1008901.md` (single core 0.25.x, all 13 grammars resolve via `tree-sitter-language`, 0 defer; Kotlin→`tree-sitter-kotlin-ng`). **NEXT: golden-corpus sourcing (C-G1, TS/JS/Go) → the grammar fan-out.**
 
 ## Warrant labels (from the gold standard)
 - `[VBE]` — verified by execution (real process; output + exit code asserted).
