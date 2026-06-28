@@ -8,6 +8,8 @@
 
 pub mod centrality;
 pub mod cluster;
+pub mod confidence_gate;
 
 pub use centrality::degree_centrality;
 pub use cluster::detect_communities;
+pub use confidence_gate::trusted_subgraph;

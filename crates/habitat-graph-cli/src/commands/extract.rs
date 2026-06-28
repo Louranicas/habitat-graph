@@ -91,8 +91,10 @@ fn run_inner(
     // Intern labels, resolve edges, dedup, and sort into a canonical graph.
     let mut graph = habitat_graph_build::assemble(extractions);
 
-    // Attach Leiden communities before the final sort pass.
-    graph.communities = habitat_graph_analyze::detect_communities(&graph);
+    // Attach Leiden communities before the final sort pass. F12: cluster on the TRUSTED subgraph
+    // only — INFERRED/AMBIGUOUS edges must not inflate degree or merge communities.
+    graph.communities =
+        habitat_graph_analyze::detect_communities(&habitat_graph_analyze::trusted_subgraph(&graph));
 
     // Re-sort to canonicalize the community list (idempotent on nodes/edges).
     let graph = graph.sorted();

@@ -2,7 +2,9 @@
 
 use std::collections::HashMap;
 
-use habitat_graph_core::{display_safe, sanitize_label, Graph, GraphError, NodeId, Result};
+use habitat_graph_core::{
+    display_safe, sanitize_label, Graph, GraphError, NodeId, Result, SCHEMA_VERSION,
+};
 use serde_json::Value;
 
 /// Renders `graph` as `NetworkX` node-link JSON.
@@ -91,10 +93,12 @@ pub fn to_node_link(graph: &Graph) -> Result<String> {
         })
         .collect();
 
+    // `schema_version` rides in the NetworkX graph-attributes object (P1-G12): it lets `update`
+    // detect a taxonomy mismatch against an older graph.json instead of silently merging.
     let envelope = serde_json::json!({
         "directed": true,
         "multigraph": false,
-        "graph": {},
+        "graph": { "schema_version": SCHEMA_VERSION },
         "nodes": nodes,
         "links": links,
     });
@@ -105,7 +109,9 @@ pub fn to_node_link(graph: &Graph) -> Result<String> {
 #[cfg(test)]
 mod tests {
     use super::to_node_link;
-    use habitat_graph_core::{Community, CommunityId, Confidence, Edge, Graph, Node, NodeId, Span};
+    use habitat_graph_core::{
+        Community, CommunityId, Confidence, Edge, Graph, Node, NodeId, Span, SCHEMA_VERSION,
+    };
 
     // ── helpers ──────────────────────────────────────────────────────────────
 
@@ -198,12 +204,16 @@ mod tests {
         assert_eq!(v["multigraph"], serde_json::Value::Bool(false));
     }
 
-    // ── 7: graph key is empty object ─────────────────────────────────────────
+    // ── 7: graph metadata carries the schema_version (P1-G12) ────────────────
 
     #[test]
-    fn graph_metadata_is_empty_object() {
+    fn graph_metadata_carries_schema_version() {
         let v = parse(&to_node_link(&Graph::new()).unwrap());
-        assert_eq!(v["graph"], serde_json::json!({}));
+        assert_eq!(
+            v["graph"],
+            serde_json::json!({ "schema_version": SCHEMA_VERSION })
+        );
+        assert_eq!(v["graph"]["schema_version"], SCHEMA_VERSION);
     }
 
     // ── 8: 2-node 1-edge → correct counts ───────────────────────────────────

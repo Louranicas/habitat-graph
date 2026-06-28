@@ -41,6 +41,14 @@ enum Command {
         #[arg(long)]
         wiki: bool,
     },
+    /// Incrementally rebuild the graph for a directory, reusing cached extractions.
+    Update {
+        /// Root directory to scan.
+        dir: PathBuf,
+        /// Output directory holding the existing `graph.json` to update.
+        #[arg(long, default_value = "graphify-out")]
+        out: PathBuf,
+    },
     /// Search nodes whose label contains a substring (case-insensitive).
     Query {
         /// Substring to search for.
@@ -107,6 +115,7 @@ impl Cli {
                     commands::extract::run(&dir, &out, vault.as_deref())
                 }
             }
+            Command::Update { dir, out } => commands::update::run(&dir, &out),
             Command::Query { query, graph } => commands::query::run_query(&graph, &query),
             Command::Path { from, to, graph } => commands::query::run_path(&graph, &from, &to),
             Command::Serve { graph, addr } => commands::serve::run(&graph, &addr),
