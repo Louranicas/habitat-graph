@@ -10,6 +10,7 @@
 - [[16_ARCHITECTURE_SCHEMATICS_V3_S1008901]] — target full-parity + agentic architecture (Mermaid)
 - [[17_CROSS_MODEL_AGENTIC_CONTRACT_S1008901]] — Claude 4.8+ / GPT-5.5+ agentic drive contract
 - [[18_DIAGNOSTICS_OBSERVABILITY_V3_S1008901]] — per-grammar / ABI / parity-regression / semantic diagnostics
+- [[19_PLAN_SCHEMATIC_MAP_S1008901]] — ratified plan as schematics (Mermaid + machine edge-lists + node-link plan-graph), LLM-optimized
 
 ## Notes
 - [[The 7 Most Powerful Use Cases of habitat-graph]]
