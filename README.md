@@ -21,6 +21,11 @@ local-first).
 
 | Doc | What |
 |---|---|
+| **[`ai_docs/14_PLAN_V3_UNIFIED_PARITY_AGENTIC_S1008901.md`](ai_docs/14_PLAN_V3_UNIFIED_PARITY_AGENTIC_S1008901.md)** | **★ LIVE PLAN (v3)** — full graphify parity + agentic/multi-model (Claude 4.8+/GPT-5.5+); supersedes 08+10 ([[14_PLAN_V3_UNIFIED_PARITY_AGENTIC_S1008901]]) |
+| [`ai_docs/15_FEATURE_ASSIMILATION_MATRIX_S1008901.md`](ai_docs/15_FEATURE_ASSIMILATION_MATRIX_S1008901.md) | **Feature matrix** — every graphify feature → home/status/phase/gate ([[15_FEATURE_ASSIMILATION_MATRIX_S1008901]]) |
+| [`ai_docs/16_ARCHITECTURE_SCHEMATICS_V3_S1008901.md`](ai_docs/16_ARCHITECTURE_SCHEMATICS_V3_S1008901.md) | **Schematics v3** — target full-parity + agentic architecture ([[16_ARCHITECTURE_SCHEMATICS_V3_S1008901]]) |
+| [`ai_docs/17_CROSS_MODEL_AGENTIC_CONTRACT_S1008901.md`](ai_docs/17_CROSS_MODEL_AGENTIC_CONTRACT_S1008901.md) | **Cross-model contract** — Claude 4.8+/GPT-5.5+ agentic drive ([[17_CROSS_MODEL_AGENTIC_CONTRACT_S1008901]]) |
+| [`ai_docs/18_DIAGNOSTICS_OBSERVABILITY_V3_S1008901.md`](ai_docs/18_DIAGNOSTICS_OBSERVABILITY_V3_S1008901.md) | **Diagnostics v3** — per-grammar/ABI/parity-regression/semantic observability ([[18_DIAGNOSTICS_OBSERVABILITY_V3_S1008901]]) |
 | [`EXECUTIVE_SUMMARY.md`](EXECUTIVE_SUMMARY.md) | **Start here** — one-page hub; thesis, the ask, at-a-glance, links to everything ([[EXECUTIVE_SUMMARY]]) |
 | [`docs/DEPLOYMENT_FRAMEWORK.md`](docs/DEPLOYMENT_FRAMEWORK.md) | **Capstone** — gold-standard (deep-diff-forge) deployment framework: gate stack G0–G10, deployment modes, maturity D0–D8, receipts, rollback, bidirectional doc map |
 | [`docs/MODULE_STRUCTURE_PLAN.md`](docs/MODULE_STRUCTURE_PLAN.md) | **Detailed module planning** — ~13 narrow crates (+ `cache` + `daemon`), charters (`src/` trees), dependency graph, forbidden deps, code-flow, testing gold standard |

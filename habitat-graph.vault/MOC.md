@@ -3,6 +3,14 @@
 > Embedded Obsidian vault for the `habitat-graph` repo. Open this folder as an Obsidian vault to
 > render the Mermaid + wikilinks. Canonical docs live in `../ai_docs/`, `../docs/`, `../runbooks/`.
 
+## ★ Live plan — V3 unified corpus (S1008901, full parity + agentic)
+> Authored 2026-06-28. Supersedes the v2/parity plans. Canonical in `../ai_docs/14…18`.
+- [[14_PLAN_V3_UNIFIED_PARITY_AGENTIC_S1008901]] — the live roadmap (parity first → agentic; dual DoD)
+- [[15_FEATURE_ASSIMILATION_MATRIX_S1008901]] — every graphify feature → home/status/phase/gate
+- [[16_ARCHITECTURE_SCHEMATICS_V3_S1008901]] — target full-parity + agentic architecture (Mermaid)
+- [[17_CROSS_MODEL_AGENTIC_CONTRACT_S1008901]] — Claude 4.8+ / GPT-5.5+ agentic drive contract
+- [[18_DIAGNOSTICS_OBSERVABILITY_V3_S1008901]] — per-grammar / ABI / parity-regression / semantic diagnostics
+
 ## Notes
 - [[The 7 Most Powerful Use Cases of habitat-graph]]
 - [[Leveraging Obsidian Graph View & Plugins]]

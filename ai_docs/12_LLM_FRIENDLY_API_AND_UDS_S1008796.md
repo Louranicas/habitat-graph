@@ -1,4 +1,4 @@
-> Back to: [[CLAUDE.md]] · [[habitat-graph/README]] · [[EVIDENCE]] · plan: [[10_PLAN_V2_AGENT_FIRST_S1008796]] · schematics: [[11_ARCHITECTURE_SCHEMATICS_S1008796]]
+> Back to: [[CLAUDE.md]] · [[habitat-graph/README]] · [[EVIDENCE]] · plan: [[10_PLAN_V2_AGENT_FIRST_S1008796]] · schematics: [[11_ARCHITECTURE_SCHEMATICS_S1008796]] · **v3 cross-model contract:** [[17_CROSS_MODEL_AGENTIC_CONTRACT_S1008901]] · **live plan:** [[14_PLAN_V3_UNIFIED_PARITY_AGENTIC_S1008901]]
 
 # habitat-graph — LLM-Friendly API + UNIX-Socket Design (S1008796)
 

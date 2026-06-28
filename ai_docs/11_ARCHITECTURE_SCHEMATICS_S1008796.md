@@ -1,4 +1,4 @@
-> Back to: [[CLAUDE.md]] · [[habitat-graph/README]] · [[EVIDENCE]] · plan: [[10_PLAN_V2_AGENT_FIRST_S1008796]] · API: [[12_LLM_FRIENDLY_API_AND_UDS_S1008796]]
+> Back to: [[CLAUDE.md]] · [[habitat-graph/README]] · [[EVIDENCE]] · plan: [[10_PLAN_V2_AGENT_FIRST_S1008796]] · API: [[12_LLM_FRIENDLY_API_AND_UDS_S1008796]] · **v3 target arch:** [[16_ARCHITECTURE_SCHEMATICS_V3_S1008901]] · **live plan:** [[14_PLAN_V3_UNIFIED_PARITY_AGENTIC_S1008901]]
 
 # habitat-graph — Architecture Schematics & Mappings (S1008796)
 

@@ -1,6 +1,7 @@
 # Deployment Evidence — habitat-graph
 
 > Back to: [[CLAUDE.md]] · [[habitat-graph/README]] · [[DEPLOYMENT_FRAMEWORK]]
+> **Live plan (next work):** [[14_PLAN_V3_UNIFIED_PARITY_AGENTIC_S1008901]] · matrix [[15_FEATURE_ASSIMILATION_MATRIX_S1008901]] — full parity + agentic; each phase updates the ledger below.
 > Gold standard: deep-diff-forge `EVIDENCE.md`.
 
 **STATUS: BUILT + PUSHED (private) — 13-crate workspace, gate-green, 1225 all-targets tests / 0 failed (S1008796).**

@@ -1,5 +1,7 @@
 > Back to: [[CLAUDE.md]] · [[habitat-graph/README]] · [[EVIDENCE]] · exemplar: [[01_GRAPHIFY_EXEMPLAR_MAP]] · vault: `habitat-graph.vault/Commands & graphify Comparison (S1008796)`
 
+> **⚠ SUPERSEDED (S1008901) by [[14_PLAN_V3_UNIFIED_PARITY_AGENTIC_S1008901]]** — its §A rows are **un-trimmed and promoted** into the live roadmap (PA–PE). Full per-feature mapping → [[15_FEATURE_ASSIMILATION_MATRIX_S1008901]]; §E DoD → doc 14 §1B (corrected envelope: `node≥80%+structural≥70%`, not byte-parity).
+
 # graphify Feature-Parity Plan (comprehensive) — S1008796
 
 **Goal:** close every gap between habitat-graph and `safishamsi/graphify` (feature set fetched live

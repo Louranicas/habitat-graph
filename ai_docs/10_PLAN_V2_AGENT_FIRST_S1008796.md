@@ -1,5 +1,7 @@
 > Back to: [[CLAUDE.md]] · [[habitat-graph/README]] · [[EVIDENCE]] · supersedes: [[08_GRAPHIFY_PARITY_PLAN_S1008796]] · assimilates: [[09_PARITY_PLAN_GAP_ANALYSIS_S1008796]] · integration: [[02_HABITAT_INTEGRATION]] · topology: [[HABITAT_LIVE_SERVICE_STACK_SCHEMATIC_S1008796]]
 
+> **⚠ SUPERSEDED (S1008901) by [[14_PLAN_V3_UNIFIED_PARITY_AGENTIC_S1008901]]** — Luke chose FULL parity + agentic (doc 10's grammar/exporter trims are reversed; parity now sequenced first). Retained as the canonical **Frame-B agent-first** source; its AGT-1…7 designs live on in Block 2 (A0–A3). Per-feature mapping → [[15_FEATURE_ASSIMILATION_MATRIX_S1008901]].
+
 # habitat-graph — Plan v2: Agent-First (Factory-Organ) Roadmap — S1008796
 
 > **THIS DOCUMENT SUPERSEDES `ai_docs/08_GRAPHIFY_PARITY_PLAN_S1008796.md`.**
