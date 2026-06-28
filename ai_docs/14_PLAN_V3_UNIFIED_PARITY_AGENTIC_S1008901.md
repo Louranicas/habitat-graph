@@ -235,6 +235,34 @@ sacred; all human/OSS breadth lives behind a seam that can never degrade it.*
 
 **Net structural change:** the roadmap block PA becomes **PA-1 → PA-2**; the parity gate is **tiered**; A4 (public flip + crates.io) is **removed from the live sequence** (latent, explicit-go only); the §7 ledger is now **closed** except where a future consumer reopens 7.5/R5b.
 
+## 7B. NON-ANTHROPOCENTRIC GAP PASS — the operate/inhabitant frame (S1008901)
+
+Docs 14–19 are written in the **constructor frame** (how to BUILD the organ — phases, gates,
+schematics, contracts). The frame not taken is the **operate/inhabitant frame** (what is the organ's
+LIFE once it runs autonomously in the factory, over time, under multi-agent load). *Both passes are
+the plan* (CLAUDE.local.md §3). The operate-frame artifact is the runbook
+([[V3_LIVE_ORGAN_RUNBOOK_S1008901]]); the gaps it surfaces that feed back to the BUILD:
+
+| NA | Frame-not-taken gap | Recommendation (build / ops landing) |
+|---|---|---|
+| NA-1 | freshness **signal** built (generation/stale) but no freshness **policy** | staleness policy: shelf-life + auto-rebuild cadence + served-stale contract — build: A1 generation-wait; ops: runbook §3 |
+| NA-2 | plan assumes **one** graph; factory = 20 services / many repos | **NEW DECISION 7.8 — organ cardinality** (below). Default single-repo until decided. |
+| NA-3 | read-optimized, but the agent's **own** perception-action loop is open (agent edits code → its map is stale w.r.t. its own action) | loop-closure contract: hook-triggered rebuild + a `generation` an agent can WAIT on — build: PC/A2; ops: runbook §4 |
+| NA-4 | organ is **inert-per-build** while every other substrate (POVM/RALPH/PV2) LEARNS | **SPIKE not commitment** — graph-as-learning-substrate (query-frequency weighting, decay, RALPH co-evolution). Gate on the signal-density law: prove the static read path insufficient first. |
+| NA-5 | build plan has **gates**; the live organ has **operations** (daemon lifecycle, soak, grammar hot-add, arming rituals, the organ's own incidents) — none exist for v3 surfaces | → **the runbook** ([[V3_LIVE_ORGAN_RUNBOOK_S1008901]]) |
+
+**Decision 7.8 — Organ cardinality (NEW, NA-2, none auto-decided):** one organ per repo (self-hosting
+default) · vs a **graph-of-graphs** with cross-repo edges · vs a per-service daemon **fleet**.
+*Recommend: single-repo organ now (the self-hosting proof, `EVIDENCE.md:58`); revisit graph-of-graphs
+when a concrete cross-repo agent need appears (e.g. an orchestrator decomposing a mission that spans
+services).* Lands A1/A2 + runbook §12.
+
+**Conventional residual gaps (Pass-1, build-frame refinements, non-blocking):** C-G1 golden-corpus
+sourcing (PA-1 prep) · C-G2 XM live-model harness lane (A3) · C-G3 `stable_id` cross-language
+signature normalization (A1) · C-G4 `schema_version` migration = rebuild-on-mismatch (PC) · C-G5
+arc declared-set ownership (A2) · C-G6 DONE acceptance protocol (A3) · C-G7 daemon capacity target
+(A1). Tracked here so they are not silently dropped.
+
 ## 8. Definition of Done — recap (dual, multi-model)
 
 - **Live (private organ):** §1A FO-1…FO-12 — full graphify feature coverage (grammars + exporters + lifecycle + analytics + semantic/MM) **+** agent-resourced, token-budgeted, warm, identity-stable, trust-bearing, atomic-reload serving with arc-graph telemetry live **+** driven by Claude 4.8+ and GPT-5.5+ (XM matrix green), gate-green on both remotes.

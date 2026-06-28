@@ -1,4 +1,4 @@
-> Back to: [[CLAUDE.md]] · [[habitat-graph/README]] · [[EVIDENCE]] · **plan:** [[14_PLAN_V3_UNIFIED_PARITY_AGENTIC_S1008901]] · **V3 corpus:** [[15_FEATURE_ASSIMILATION_MATRIX_S1008901]] · [[16_ARCHITECTURE_SCHEMATICS_V3_S1008901]] · [[17_CROSS_MODEL_AGENTIC_CONTRACT_S1008901]] · [[19_PLAN_SCHEMATIC_MAP_S1008901]]
+> Back to: [[CLAUDE.md]] · [[habitat-graph/README]] · [[EVIDENCE]] · **plan:** [[14_PLAN_V3_UNIFIED_PARITY_AGENTIC_S1008901]] · **V3 corpus:** [[15_FEATURE_ASSIMILATION_MATRIX_S1008901]] · [[16_ARCHITECTURE_SCHEMATICS_V3_S1008901]] · [[17_CROSS_MODEL_AGENTIC_CONTRACT_S1008901]] · [[19_PLAN_SCHEMATIC_MAP_S1008901]] · **ops runbook:** [[V3_LIVE_ORGAN_RUNBOOK_S1008901]]
 > **extends:** [[13_DIAGNOSTICS_AND_OBSERVABILITY_S1008796]] (agent/operator self-describe, arc-graph telemetry) — this doc adds the **full-parity diagnostics** (per-grammar, ABI, parity-regression, semantic/DoS).
 
 # habitat-graph — Diagnostics & Observability v3 (full-parity surface, S1008901)
