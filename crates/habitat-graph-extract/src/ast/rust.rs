@@ -149,7 +149,7 @@ impl Extractor for RustExtractor {
     fn extract(&self, path: &Path, source: &[u8]) -> Result<Extraction> {
         let mut parser = tree_sitter::Parser::new();
         parser
-            .set_language(&tree_sitter_rust::language())
+            .set_language(&tree_sitter_rust::LANGUAGE.into())
             .map_err(|e| GraphError::Parse {
                 file: path.display().to_string(),
                 message: e.to_string(),

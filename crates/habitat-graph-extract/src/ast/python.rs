@@ -261,7 +261,7 @@ impl Extractor for PythonExtractor {
 
         let mut parser = tree_sitter::Parser::new();
         parser
-            .set_language(&tree_sitter_python::language())
+            .set_language(&tree_sitter_python::LANGUAGE.into())
             .map_err(|e| GraphError::Parse {
                 file: source_file.clone(),
                 message: e.to_string(),
