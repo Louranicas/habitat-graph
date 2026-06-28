@@ -21,13 +21,28 @@ pub trait Extractor: Send + Sync {
     fn extract(&self, path: &Path, source: &[u8]) -> Result<Extraction>;
 }
 
-/// Returns the set of registered extractors (currently: Rust).
+/// Returns the set of registered extractors.
+///
+/// `rust` and `python` are always present (the proven parity baseline). The PA-1 grammars
+/// (`ts`/`js`/`go`/`text`) are added only when their feature is enabled (R9a), so the registry
+/// reflects exactly the languages the build was compiled for.
 #[must_use]
 pub fn registered_extractors() -> Vec<Box<dyn Extractor>> {
-    vec![
-        Box::new(crate::ast::rust::RustExtractor) as Box<dyn Extractor>,
-        Box::new(crate::ast::python::PythonExtractor) as Box<dyn Extractor>,
-    ]
+    // `mut` is unused only in the degenerate `--no-default-features` build with no PA-1 grammar.
+    #[allow(unused_mut)]
+    let mut extractors: Vec<Box<dyn Extractor>> = vec![
+        Box::new(crate::ast::rust::RustExtractor),
+        Box::new(crate::ast::python::PythonExtractor),
+    ];
+    #[cfg(feature = "ts")]
+    extractors.push(Box::new(crate::ast::ts::TsExtractor));
+    #[cfg(feature = "js")]
+    extractors.push(Box::new(crate::ast::js::JsExtractor));
+    #[cfg(feature = "go")]
+    extractors.push(Box::new(crate::ast::go::GoExtractor));
+    #[cfg(feature = "text")]
+    extractors.push(Box::new(crate::ast::text::TextExtractor));
+    extractors
 }
 
 /// Reads and extracts every file in `files`, dispatching by extension, in parallel.
@@ -122,8 +137,10 @@ mod tests {
 
     #[test]
     fn registered_extractor_does_not_handle_unknown_extensions() {
+        // Extensions no registered extractor claims. NB: `md`/`txt` are now handled by the `text`
+        // extractor (PA-1), so the unknown set uses formats with no extractor: config/lockfiles.
         let extractors = registered_extractors();
-        for ext in &["md", "txt", "toml", "json"] {
+        for ext in &["toml", "json", "yaml", "lock"] {
             for e in &extractors {
                 assert!(
                     !e.extensions().contains(ext),
@@ -184,12 +201,19 @@ mod tests {
 
     // ── extract_files: skipping logic ─────────────────────────────────────────
 
+    #[cfg(feature = "text")]
     #[test]
-    fn extract_md_file_is_skipped() {
+    fn extract_md_file_is_extracted_by_text_extractor() {
+        // PA-1 (S1008901): the `text` extractor now handles Markdown, so a `.md` file is extracted
+        // (yielding at least its file node) rather than silently skipped as before any doc grammar.
         let dir = TempDir::new().unwrap();
         let p = write_file(&dir, "README.md", "# Habitat Graph");
-        let result = extract_files(&[p]).expect("md skip must not error");
-        assert!(result.is_empty(), ".md file must be silently skipped");
+        let result = extract_files(&[p]).expect("md must extract");
+        assert_eq!(
+            result.len(),
+            1,
+            ".md must now be extracted by the text extractor"
+        );
     }
 
     #[test]
@@ -203,15 +227,22 @@ mod tests {
         );
     }
 
+    #[cfg(feature = "text")]
     #[test]
-    fn extract_mixed_rs_and_md_only_rs_files_extracted() {
+    fn extract_mixed_rs_md_and_noext_extracts_code_and_docs_only() {
+        // PA-1 (S1008901): `.rs` (rust) and `.md` (text) are both extracted; a file with no matching
+        // extension (Justfile) is still silently skipped.
         let dir = TempDir::new().unwrap();
         let rs1 = write_file(&dir, "a.rs", "fn alpha() {}");
         let rs2 = write_file(&dir, "b.rs", "fn beta() {}");
         let md = write_file(&dir, "README.md", "# Notes");
         let noext = write_file(&dir, "Justfile", "gate:\n\tcargo check");
         let result = extract_files(&[rs1, rs2, md, noext]).expect("mixed batch must succeed");
-        assert_eq!(result.len(), 2, "only the 2 .rs files must be extracted");
+        assert_eq!(
+            result.len(),
+            3,
+            "2 .rs + 1 .md extracted; the no-extension Justfile is skipped"
+        );
     }
 
     // ── extract_files: error propagation ──────────────────────────────────────

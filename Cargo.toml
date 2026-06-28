@@ -39,6 +39,10 @@ tree-sitter = "0.25"
 tree-sitter-language = "0.1"
 tree-sitter-rust = "0.24.2"
 tree-sitter-python = "0.25.0"
+# PA-1 grammar fan-out (S1008901, ABI matrix §6 — single core 0.25.x; all bind tree-sitter-language ^0.1)
+tree-sitter-typescript = "0.23.2" # provides TS + TSX (two LanguageFn exports)
+tree-sitter-javascript = "0.25.0"
+tree-sitter-go = "0.25.0"
 clap = { version = "4", features = ["derive"] }
 axum = "0.8"
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "net"] }

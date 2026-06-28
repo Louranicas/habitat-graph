@@ -4,7 +4,7 @@
 > **Live plan (next work):** [[14_PLAN_V3_UNIFIED_PARITY_AGENTIC_S1008901]] · matrix [[15_FEATURE_ASSIMILATION_MATRIX_S1008901]] · ops [[V3_LIVE_ORGAN_RUNBOOK_S1008901]] — full parity + agentic; each phase updates the ledger below.
 > Gold standard: deep-diff-forge `EVIDENCE.md`.
 
-**STATUS: BUILT + PUSHED (private) — 13-crate workspace, gate-green, 1233 all-targets tests / 0 failed; PA-1 PREP landed (S1008901, `main@29b1d15`): tree-sitter core 0.22.6→0.25.10 + LanguageFn migration · CI gate · parity baseline-ratchet — seal below.**
+**STATUS: BUILT + PUSHED (private) — 13-crate workspace, gate-green, 1536 all-targets tests / 0 failed; PA-1 GRAMMARS landed (S1008901): `extract::ast::{ts,js,go,text}` extractors, feature-gated (R9a), +303 tests over PA-1-prep — parity DEFERRED to C-G1, seal below. (PA-1 prep `main@29b1d15`: tree-sitter core 0.22.6→0.25.10 + LanguageFn · CI gate · parity baseline-ratchet.)**
 D0→D6 + a semantic-backend crate + an MCP frontier organ are sealed below; D7 has pushed the repo
 private to GitHub and initialized the no-mistakes gate. Remaining (D7 tail, all gated on Luke @ 0.A,
 all one-way doors): OSS/public flip · GitLab mirror · `port-claim` + devenv deploy · crates.io. Plus
@@ -17,6 +17,12 @@ authoritatively in the main loop (never trusted from a builder's self-report).
 - CI gate (LS-2) | [VBE] | `.github/workflows/ci.yml` (fmt→check→clippy-D→pedantic→test→deny→audit, injection-safe) + `deny.toml`. Machine-enforced on push/PR — the gate is no longer trust-based.
 - parity baseline-ratchet (LS-3) | [VBE] | `parity_httpx`/`parity_exporter` now gate on the pinned-oracle baseline (`≥140` nodes / `≥167` structural, R3a), not the loose `70/80` floor under which a large regression could hide; ratchet up on legitimate improvement.
 - G-ABI matrix | [VBR] | `ai_docs/abi-matrix-s1008901.md` (single core 0.25.x, all 13 grammars resolve via `tree-sitter-language`, 0 defer; Kotlin→`tree-sitter-kotlin-ng`). **NEXT: golden-corpus sourcing (C-G1, TS/JS/Go) → the grammar fan-out.**
+
+### PA-1 grammars — DONE (S1008901, parity DEFERRED to C-G1)
+- extractors | [VBE] | `extract::ast::{ts,js,go,text}` + shared `ast::util`, feature-gated per-grammar (R9a; `default=[ts,js,go,text]`, each `--features <g>` slim-buildable; rust/python stay unconditional). Built via Workflow forge fibers + judges OUTSIDE the loop; **`agent-claim-verifier` caught GO self-reporting GREEN while package-scope pedantic was RED** (a transient sibling `js.rs` `doc_markdown` during a concurrent-write window — the `false-clean` scar, cited by name) → fixed; no fiber self-report was trusted.
+- taxonomy | [VBR] | graphify qualified-id, mirroring `ast/python.rs`: file node `B`, symbols `B_<sym>`, methods `B_<cls>_<method>`; edges `contains`/`method`/`inherits` (local/external split)/`imports_from`; never `calls`/`uses`. Go emits no `inherits` (Go has no inheritance). `text` (no grammar) emits the doc file node + ATX-heading nodes (`CommonMark` fence-aware) + relative-`.md` `references` edges — taxonomy **PROVISIONAL** pending the doc golden.
+- gate | [VBE] | authoritative main-loop re-gate (NOT a fiber self-report): check / clippy-D / pedantic / test all clean, **1536 tests / 0 failed** (+303 over PA-1-prep); per-module ts 69 · js 62 · go 55 · text 73 (all ≥50, judged meaningful by `forge-tester`). httpx parity baseline HELD (140/167). Single core `0.25.10` (ABI gate). Per-feature matrix + `--no-default-features` clean (2 text-dependent registry tests cfg-gated). `forbid(unsafe)` holds; zero lib `unwrap`/`expect`/`unsafe` across all new modules.
+- pins | [VBR] | `tree-sitter-typescript 0.23.2` (TS+TSX) · `tree-sitter-javascript 0.25.0` · `tree-sitter-go 0.25.0` (ABI matrix §6). **NEXT (Luke-gated): C-G1 golden-corpus sourcing → tiered 95/90 parity gate (FO-8).**
 
 ## Warrant labels (from the gold standard)
 - `[VBE]` — verified by execution (real process; output + exit code asserted).

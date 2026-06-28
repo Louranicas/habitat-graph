@@ -17,6 +17,20 @@ rayon = { workspace = true }
 tree-sitter = { workspace = true }
 tree-sitter-rust = { workspace = true }
 tree-sitter-python = { workspace = true }
+# PA-1 grammars — feature-gated (R9a): compiled only when their feature is enabled.
+tree-sitter-typescript = { workspace = true, optional = true }
+tree-sitter-javascript = { workspace = true, optional = true }
+tree-sitter-go = { workspace = true, optional = true }
+
+[features]
+# Default build carries the full PA-1 factory-language set; each grammar is independently
+# gateable (R9a: `--no-default-features --features go` compiles only the Go extractor).
+# rust + python remain unconditional (the proven parity baseline).
+default = ["ts", "js", "go", "text"]
+ts = ["dep:tree-sitter-typescript"]
+js = ["dep:tree-sitter-javascript"]
+go = ["dep:tree-sitter-go"]
+text = [] # internal markdown/plaintext extractor — no grammar dependency (ABI matrix §3)
 
 [dev-dependencies]
 tempfile = "3"
