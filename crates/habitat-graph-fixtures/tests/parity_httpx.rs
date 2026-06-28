@@ -10,6 +10,11 @@ use std::path::PathBuf;
 
 use habitat_graph_fixtures::{classify, from_core, from_golden};
 
+/// Pinned-oracle baseline (R3a): the verified-good httpx coverage. Any drop is OUR regression
+/// (the graphify oracle is pinned). Ratchet UP when extraction legitimately improves (LS-3).
+const HTTPX_NODE_BASELINE: usize = 140; // 140/144 golden (97%)
+const HTTPX_STRUCT_BASELINE: usize = 167; // 167/174 golden (96%)
+
 fn httpx_dir() -> PathBuf {
     PathBuf::from(format!(
         "{}/../../tests/fixtures/goldens/httpx",
@@ -34,7 +39,7 @@ fn httpx_structural_parity() {
     let report = classify(&ours, &golden);
 
     let node_total = golden.nodes.len().max(1);
-    let node_pct = report.nodes_matched * 100 / node_total;
+    let node_pct = (report.nodes_matched * 100 + node_total / 2) / node_total; // rounded, not truncated
     eprintln!("\n=== httpx parity ===");
     eprintln!(
         "NODES: {}/{} golden ids covered ({node_pct}%), {} extra",
@@ -63,16 +68,21 @@ fn httpx_structural_parity() {
         }
     }
     let struct_total = structural_total.max(1);
-    let struct_pct = structural_matched * 100 / struct_total;
+    let struct_pct = (structural_matched * 100 + struct_total / 2) / struct_total; // rounded
     eprintln!("STRUCTURAL coverage: {structural_matched}/{structural_total} ({struct_pct}%)\n");
 
-    // Content-equivalence thresholds (integer ratios — no float casts).
+    // Regression gate (LS-3): assert against the PINNED-ORACLE BASELINE, not a loose floor.
+    // The graphify oracle is pinned (R3a), so any drop in matched coverage is OUR regression.
+    // The old 80%/70% floor let a large regression hide (167->122 would still pass); these
+    // baselines fail on ANY drop. Ratchet UP when extraction legitimately improves.
     assert!(
-        report.nodes_matched * 100 >= golden.nodes.len() * 80,
-        "node coverage {node_pct}% should be >= 80%"
+        report.nodes_matched >= HTTPX_NODE_BASELINE,
+        "node coverage REGRESSED: {}/{} ({node_pct}%) < pinned baseline {HTTPX_NODE_BASELINE} — reconcile (R3a) or ratchet",
+        report.nodes_matched,
+        golden.nodes.len()
     );
     assert!(
-        structural_matched * 100 >= structural_total * 70,
-        "structural-edge coverage {struct_pct}% should be >= 70%"
+        structural_matched >= HTTPX_STRUCT_BASELINE,
+        "structural coverage REGRESSED: {structural_matched}/{structural_total} ({struct_pct}%) < pinned baseline {HTTPX_STRUCT_BASELINE} (R3a)"
     );
 }

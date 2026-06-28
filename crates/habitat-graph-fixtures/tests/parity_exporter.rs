@@ -9,6 +9,11 @@ use std::path::PathBuf;
 
 use habitat_graph_fixtures::{classify, from_core, from_golden};
 
+/// Pinned-oracle baseline (R3a): the verified-good httpx coverage; export+round-trip must not drop
+/// below it. Ratchet UP when extraction legitimately improves (LS-3).
+const HTTPX_NODE_BASELINE: usize = 140; // 140/144 golden (97%)
+const HTTPX_STRUCT_BASELINE: usize = 167; // 167/174 golden (96%)
+
 fn httpx_dir() -> PathBuf {
     PathBuf::from(format!(
         "{}/../../tests/fixtures/goldens/httpx",
@@ -47,7 +52,7 @@ fn httpx_exporter_round_trip_parity() {
     let report = classify(&ours, &golden);
 
     let node_total = golden.nodes.len().max(1);
-    let node_pct = report.nodes_matched * 100 / node_total;
+    let node_pct = (report.nodes_matched * 100 + node_total / 2) / node_total; // rounded
 
     eprintln!("\n=== httpx exporter round-trip parity (D4) ===");
     eprintln!(
@@ -77,17 +82,20 @@ fn httpx_exporter_round_trip_parity() {
             structural_total += g.len();
         }
     }
-    let struct_pct = structural_matched * 100 / structural_total.max(1);
+    let struct_total = structural_total.max(1);
+    let struct_pct = (structural_matched * 100 + struct_total / 2) / struct_total; // rounded
     eprintln!("STRUCTURAL coverage: {structural_matched}/{structural_total} ({struct_pct}%)\n");
 
-    // Thresholds match the D2 extraction parity gate — export+round-trip must not
-    // degrade coverage below what extraction alone established.
+    // Regression gate (LS-3): export+round-trip must not drop below the PINNED-ORACLE baseline
+    // (R3a). Same baselines as the D2 extraction gate — a round-trip that loses an edge fails here.
     assert!(
-        report.nodes_matched * 100 >= golden.nodes.len() * 80,
-        "node coverage {node_pct}% should be >= 80% after export+round-trip"
+        report.nodes_matched >= HTTPX_NODE_BASELINE,
+        "node coverage REGRESSED after round-trip: {}/{} ({node_pct}%) < baseline {HTTPX_NODE_BASELINE} (R3a)",
+        report.nodes_matched,
+        golden.nodes.len()
     );
     assert!(
-        structural_matched * 100 >= structural_total * 70,
-        "structural-edge coverage {struct_pct}% should be >= 70% after export+round-trip"
+        structural_matched >= HTTPX_STRUCT_BASELINE,
+        "structural coverage REGRESSED after round-trip: {structural_matched}/{structural_total} ({struct_pct}%) < baseline {HTTPX_STRUCT_BASELINE} (R3a)"
     );
 }
