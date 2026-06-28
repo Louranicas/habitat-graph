@@ -1,4 +1,4 @@
-> Back to: [[CLAUDE.md]] · [[habitat-graph/README]] · [[EVIDENCE]] · **gate owner:** [[14_PLAN_V3_UNIFIED_PARITY_AGENTIC_S1008901]] §6 (G-ABI) · **schematic:** [[16_ARCHITECTURE_SCHEMATICS_V3_S1008901]] §3 · **feature matrix:** [[15_FEATURE_ASSIMILATION_MATRIX_S1008901]] §B · **diagnostics:** [[18_DIAGNOSTICS_OBSERVABILITY_V3_S1008901]] §2 (abi health field)
+> Back to: [[CLAUDE.md]] · [[habitat-graph/README]] · [[EVIDENCE]] · **gate owner:** [[14_PLAN_V3_UNIFIED_PARITY_AGENTIC_S1008901]] §6 (G-ABI) · **schematic:** [[16_ARCHITECTURE_SCHEMATICS_V3_S1008901]] §3 · **feature matrix:** [[15_FEATURE_ASSIMILATION_MATRIX_S1008901]] §B · **diagnostics:** [[18_DIAGNOSTICS_OBSERVABILITY_V3_S1008901]] §2 (abi health field) · **ops:** [[V3_LIVE_ORGAN_RUNBOOK_S1008901]] §4 (grammar ops)
 
 # G-ABI — tree-sitter core-ABI Matrix (S1008901)
 

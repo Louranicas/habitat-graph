@@ -41,12 +41,12 @@ Status verified against `EVIDENCE.md` + source ([VBE] where the gate has run).
 | G6 | cpp | `.cc .cpp .hpp` | `extract::ast::cpp` | ❌ | ″ | source + pin |
 | G7 | ruby | `.rb` | `extract::ast::ruby` | ❌ | ″ | source + pin |
 | G8 | c# | `.cs` | `extract::ast::csharp` | ❌ | ″ | source + pin |
-| G9 | kotlin | `.kt .kts` | `extract::ast::kotlin` | ❌ | ″ | source + pin |
+| G9 | kotlin | `.kt .kts` | `extract::ast::kotlin` (crate **`tree-sitter-kotlin-ng` 1.1.0** — substitutes abandoned `tree-sitter-kotlin`, [[abi-matrix-s1008901]] §4) | ❌ | ″ | source + pin |
 | G10 | scala | `.scala` | `extract::ast::scala` | ❌ | ″ | source + pin |
 | G11 | php | `.php` | `extract::ast::php` | ❌ | ″ | source + pin |
 | G12 | docs | `.md .txt .rst` | `extract::ast::text` (heading/section nodes) | ❌ | node parity + feeds retrieval | small md golden |
 
-> **Prerequisite G-ABI** ([[14_PLAN_V3_UNIFIED_PARITY_AGENTIC_S1008901]] §6): the `tree-sitter` core ABI matrix MUST close before any of G1–G11 is committed — see [[16_ARCHITECTURE_SCHEMATICS_V3_S1008901]] §3.
+> **✅ G-ABI RESOLVED** ([[abi-matrix-s1008901]] · [[14_PLAN_V3_UNIFIED_PARITY_AGENTIC_S1008901]] §6): single core **tree-sitter 0.25.x (ABI 15) + tree-sitter-language 0.1**; all 13 grammars resolve **at latest** (each grammar's `tree-sitter` core req is `kind=dev`, not a consumer constraint — the shared `kind=normal` dep is `tree-sitter-language ^0.1`). **0 pins-older · 0 vendor · 0 defer.** PA-1 prep adds: bump core `0.22.6→0.25` + migrate the built rust/python extractors to the `LANGUAGE: LanguageFn` API + re-run their parity. Pin set in the matrix.
 > **Per-grammar seam (§3.0):** each grammar ships its **completeness envelope** (`edge_classes_emitted/omitted`, `node_coverage_pct`) so no agent decides on a silently-partial grammar — see [[18_DIAGNOSTICS_OBSERVABILITY_V3_S1008901]] §2.
 
 ### B.1 The per-grammar golden pipeline (C-1 — the larger half, doc 09:27)

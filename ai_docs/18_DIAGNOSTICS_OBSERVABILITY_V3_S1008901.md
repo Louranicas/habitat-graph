@@ -39,9 +39,9 @@ wiring decision on an 88%-supported grammar as if it were the 97% Python path.
 
 `doctor --json` surfaces the resolved ABI posture so the operator sees drift before a grammar silently breaks:
 ```json
-"abi": { "tree_sitter_core": "0.x (ABI 14)",
-  "grammars": {"ts":"aligned","go":"aligned","scala":"pinned@<v>","php":"DEFERRED:abi15-conflict"},
-  "deferred": ["php"] }     // no silent drop — a deferred grammar is reported, not hidden
+"abi": { "tree_sitter_core": "0.25.x (ABI 15)", "tree_sitter_language": "0.1",
+  "grammars": {"ts":"aligned","js":"aligned","go":"aligned","scala":"aligned","kotlin":"substituted(kotlin-ng)"},
+  "substituted": ["kotlin→kotlin-ng"], "deferred": [] }     // resolved S1008901 (abi-matrix-s1008901); no silent drop
 ```
 Ties to [[16_ARCHITECTURE_SCHEMATICS_V3_S1008901]] §3. A grammar listed `DEFERRED` here is a tracked §7 decision, not a gap.
 

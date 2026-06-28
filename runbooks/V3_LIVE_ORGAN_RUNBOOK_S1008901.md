@@ -86,6 +86,8 @@ An agent that edits code then immediately re-queries the graph may read a map th
 
 ## 4. Grammar operations (the v3 PA surface)
 
+> **ABI baseline (✅ G-ABI resolved, [[abi-matrix-s1008901]]):** single core **tree-sitter 0.25.x (ABI 15) + tree-sitter-language 0.1**; all 13 grammars at latest; **Kotlin = `tree-sitter-kotlin-ng`** (abandoned `tree-sitter-kotlin` caps at core <0.23). A grammar's own `tree-sitter` req is `kind=dev` — ignore it; the consumer constraint is `tree-sitter-language ^0.1`. **`cargo tree -p habitat-graph-extract -i tree-sitter` MUST show exactly one core.** (Built rust/python migrated 0.22.6→0.25 `LanguageFn` as PA-1 prep.)
+
 | Op | Procedure |
 |---|---|
 | **Hot-add a grammar** | enable its `--feature <lang>` (R9a), rebuild, re-run `parity_<lang>` vs the **pinned** golden; if PASS at its tier (95/90 factory-critical, 80/70 tail) ship; the `maturity` field flips to `stable` |

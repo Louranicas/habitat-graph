@@ -103,6 +103,8 @@ flowchart LR
 
 ## 3. The tree-sitter ABI matrix (G-ABI — PA's hard prerequisite)
 
+> **✅ RESOLVED (S1008901) → [[abi-matrix-s1008901]].** Outcome: single core **tree-sitter 0.25.x (ABI 15) + tree-sitter-language 0.1**; the apparent per-grammar core conflict was a `kind=dev` artifact (test-only, not built downstream) — the real `kind=normal` dep `tree-sitter-language ^0.1` is shared by all modern grammars, so they unify. **0 pins-older · 0 vendor · 0 defer** (Kotlin → maintained `tree-sitter-kotlin-ng`). The schematic below is the general decision procedure; the live result is the matrix.
+
 ```mermaid
 flowchart TB
   subgraph problem["the constraint"]

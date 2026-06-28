@@ -107,6 +107,7 @@ Everything else agentic (resources, token-budget, UDS, warm index, arc-telemetry
 
 ### 3.1 PA — Language breadth (the biggest visible gap) ★
 - **Scope (D-A, full):** all 11 grammars `ts js go java c cpp rb cs kt scala php` + doc nodes (`.md/.txt/.rst`). Existing: rust+python (`EVIDENCE.md:43-44`).
+- **PA-1 prep (✅ G-ABI resolved, [[abi-matrix-s1008901]]):** single core **0.25.x + tree-sitter-language 0.1**, all grammars at latest (Kotlin via `tree-sitter-kotlin-ng`, 0 defer). A one-time **core bump `0.22.6→0.25` + rust/python `LanguageFn` migration + re-parity** precedes the new grammars; then **source the golden corpora (C-G1)**. Both must be gate-green before the first new grammar lands.
 - **Shape:** one `extract::ast::<lang>` impl + its `tree-sitter-<lang>` crate + a per-grammar pinned-oracle golden, behind the existing extension-dispatch registry (`extract/src/registry.rs:40-58`).
 - **Gate:** **§6 ABI matrix resolved first** (hard blocker); then per-grammar node≥80% + structural≥70% vs the committed golden; `forbid(unsafe)` holds (tree-sitter safe API); per-grammar completeness envelope present (§3.0).
 - **Method:** dynamic Workflow — one `forge-rust-coder-v4` fiber per language (collision-free, distinct files) + `forge-tester` parity judge **outside** the loop (the regime that built D2–D6).
