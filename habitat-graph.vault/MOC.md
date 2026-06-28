@@ -12,6 +12,7 @@
 - [[18_DIAGNOSTICS_OBSERVABILITY_V3_S1008901]] — per-grammar / ABI / parity-regression / semantic diagnostics
 - [[19_PLAN_SCHEMATIC_MAP_S1008901]] — ratified plan as schematics (Mermaid + machine edge-lists + node-link plan-graph), LLM-optimized
 - [[V3_LIVE_ORGAN_RUNBOOK_S1008901]] — **operate-frame runbook** (NA pass): freshness/loop-closure policy · grammar ops · live-actuation · incident playbooks · capacity · fleet
+- [[abi-matrix-s1008901]] — **G-ABI gate PASS**: tree-sitter core 0.25.x, all 13 grammars resolve (0 defer; Kotlin via kotlin-ng); the matrix that unblocks PA-1
 
 ## Notes
 - [[The 7 Most Powerful Use Cases of habitat-graph]]

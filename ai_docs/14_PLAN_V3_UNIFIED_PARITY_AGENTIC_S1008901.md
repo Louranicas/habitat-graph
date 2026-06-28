@@ -185,6 +185,8 @@ Only if Luke flips (§7.1). `gh repo edit --visibility public` · crates.io publ
 
 **Gate G-ABI (blocks PA):** produce a compatibility matrix `(grammar crate × tree-sitter core ABI × last-compatible version)` for all 11 grammars; pick a single core ABI that satisfies the maximal set; for any grammar that cannot align, record the resolution (pin an older grammar release, vendor, or defer that one grammar to A4 with a logged reason — **no silent drop**). Output: `ai_docs/abi-matrix-s1008901.md` + a `deny.toml`/`Cargo.toml` pin set. Detailed schematic: [[16_ARCHITECTURE_SCHEMATICS_V3_S1008901]] §3.
 
+**✅ RESOLVED (S1008901): [[abi-matrix-s1008901]] — PASS.** The premise was half-wrong in an instructive way: the grammars' `tree-sitter` core reqs are **`kind=dev`** (test-only, not built downstream); the real **`kind=normal`** dep is **`tree-sitter-language ^0.1`**, shared by ALL modern grammars — so they unify under any modern core. → standardize core **0.25.x (ABI 15)** + take every grammar at latest stable; **0 pins-older · 0 vendor · 0 defer** (Kotlin via the maintained `tree-sitter-kotlin-ng` fork, logged). One-time cost: bump core `0.22.6→0.25` + migrate the existing rust/python extractors from `language()` to the `LANGUAGE: LanguageFn` API + re-run their parity gates. **PA-1 unblocked.**
+
 ---
 
 ## 7. Decisions for Luke @ 0.A (the ledger — none auto-decided)
