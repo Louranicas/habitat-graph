@@ -16,6 +16,7 @@ pub mod load;
 pub mod mcp;
 pub mod query;
 pub mod resources;
+pub mod xm_bridge;
 
 pub use budget::{estimate_tokens, pack};
 pub use explain::explain;
@@ -25,3 +26,6 @@ pub use load::from_node_link;
 pub use mcp::handle_jsonrpc;
 pub use query::{find_by_label, shortest_path};
 pub use resources::{resources_list, resources_read};
+pub use xm_bridge::{
+    capabilities, mcp_tools_to_openai_functions, openai_function_call_to_mcp, Capabilities,
+};

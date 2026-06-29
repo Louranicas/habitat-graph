@@ -20,6 +20,7 @@
 #![warn(missing_docs)]
 
 pub mod arc_graph;
+pub mod arc_telemetry;
 pub mod bridge;
 pub mod memory;
 pub mod obsidian_protocol;
