@@ -61,7 +61,24 @@ pub fn handle_jsonrpc(graph: &Graph, request: &str) -> String {
         "initialize" => initialize_response(&id),
         "tools/list" => tools_list_response(&id),
         "tools/call" => tools_call(graph, &id, value.get("params")),
+        "resources/list" => ok_response(&id, crate::resources::resources_list(graph)),
+        "resources/read" => resources_read_response(graph, &id, value.get("params")),
         other => error_response(&id, METHOD_NOT_FOUND, &format!("method not found: {other}")),
+    }
+}
+
+/// Dispatches `resources/read`: extracts the `uri` param and renders the resource (or an error).
+fn resources_read_response(graph: &Graph, id: &Value, params: Option<&Value>) -> String {
+    let Some(uri) = params.and_then(|p| p.get("uri")).and_then(Value::as_str) else {
+        return error_response(
+            id,
+            INVALID_PARAMS,
+            "invalid params: resources/read requires a string `uri`",
+        );
+    };
+    match crate::resources::resources_read(graph, uri) {
+        Ok(result) => ok_response(id, result),
+        Err(msg) => error_response(id, INVALID_PARAMS, &format!("invalid params: {msg}")),
     }
 }
 
@@ -87,7 +104,7 @@ fn initialize_response(id: &Value) -> String {
         id,
         json!({
             "protocolVersion": MCP_PROTOCOL_VERSION,
-            "capabilities": { "tools": {} },
+            "capabilities": { "tools": {}, "resources": {} },
             "serverInfo": { "name": SERVER_NAME, "version": env!("CARGO_PKG_VERSION") },
         }),
     )
@@ -106,7 +123,10 @@ fn tool_descriptors() -> Value {
             "description": "Search graph nodes whose label contains a substring (case-insensitive).",
             "inputSchema": {
                 "type": "object",
-                "properties": { "query": { "type": "string", "description": "substring to match against node labels" } },
+                "properties": {
+                    "query": { "type": "string", "description": "substring to match against node labels" },
+                    "max_tokens": { "type": "integer", "description": "optional token budget; packs the most relevant matches within it (top match never dropped)" }
+                },
                 "required": ["query"]
             }
         },
@@ -159,20 +179,42 @@ fn tool_query(graph: &Graph, id: &Value, args: &Value) -> String {
         return tool_text_result(id, &format!("no nodes match {needle:?}"));
     }
     let total = matches.len();
-    let mut out = format!("{total} node(s) match {needle:?}:\n");
-    for node in matches.iter().take(MAX_QUERY_RESULTS) {
-        let _ = writeln!(
-            out,
-            "  - {} [{}:{}]",
-            display_safe(&node.label),
-            node.source_file,
-            node.source_location.start_line
-        );
-    }
-    if total > MAX_QUERY_RESULTS {
-        let _ = writeln!(out, "  … {} more (showing first {MAX_QUERY_RESULTS})", total - MAX_QUERY_RESULTS);
-    }
-    tool_text_result(id, &out)
+    let header = format!("{total} node(s) match {needle:?}:\n");
+    let lines: Vec<String> = matches
+        .iter()
+        .take(MAX_QUERY_RESULTS)
+        .map(|node| {
+            format!(
+                "  - {} [{}:{}]\n",
+                display_safe(&node.label),
+                node.source_file,
+                node.source_location.start_line
+            )
+        })
+        .collect();
+
+    // FO-2: when the caller passes a token budget, pack the most-relevant matches within it
+    // (the top match is the seed and is never dropped); otherwise use the fixed result cap.
+    let text = if let Some(max_tokens) = args.get("max_tokens").and_then(Value::as_u64) {
+        let budget = usize::try_from(max_tokens).unwrap_or(usize::MAX);
+        let seed = lines.first().map(String::as_str);
+        let rest = if lines.is_empty() { &[][..] } else { &lines[1..] };
+        crate::budget::pack(&header, seed, rest, budget)
+    } else {
+        let mut out = header;
+        for line in &lines {
+            out.push_str(line);
+        }
+        if total > MAX_QUERY_RESULTS {
+            let _ = writeln!(
+                out,
+                "  … {} more (showing first {MAX_QUERY_RESULTS})",
+                total - MAX_QUERY_RESULTS
+            );
+        }
+        out
+    };
+    tool_text_result(id, &text)
 }
 
 /// `graph_path` tool: shortest undirected path between two labels.
@@ -508,5 +550,59 @@ mod tests {
         let req = json!({ "jsonrpc": "2.0", "id": 1, "method": "tools/call", "params": { "name": "graph_health" } });
         let resp = call(&sample_graph(), &req.to_string());
         assert_eq!(resp["result"]["isError"], false);
+    }
+
+    // ── A0 front door: resources + token-budget wiring (integration) ──────────
+
+    #[test]
+    fn initialize_advertises_resources_capability() {
+        let req = json!({ "jsonrpc": "2.0", "id": 1, "method": "initialize" });
+        let resp = call(&sample_graph(), &req.to_string());
+        assert!(
+            resp["result"]["capabilities"].get("resources").is_some(),
+            "initialize must advertise the resources capability"
+        );
+    }
+
+    #[test]
+    fn resources_list_advertises_report_and_schema() {
+        let req = json!({ "jsonrpc": "2.0", "id": 1, "method": "resources/list" });
+        let s = call(&sample_graph(), &req.to_string()).to_string();
+        assert!(s.contains("habitat-graph://report"), "report resource missing: {s}");
+        assert!(s.contains("habitat-graph://schema"), "schema resource missing: {s}");
+    }
+
+    #[test]
+    fn resources_read_schema_succeeds() {
+        let req = json!({ "jsonrpc": "2.0", "id": 1, "method": "resources/read", "params": { "uri": "habitat-graph://schema" } });
+        let s = call(&sample_graph(), &req.to_string()).to_string();
+        assert!(s.contains("schema_version"), "schema text missing: {s}");
+    }
+
+    #[test]
+    fn resources_read_unknown_uri_is_error() {
+        let req = json!({ "jsonrpc": "2.0", "id": 1, "method": "resources/read", "params": { "uri": "habitat-graph://nope" } });
+        let resp = call(&sample_graph(), &req.to_string());
+        assert!(resp.get("error").is_some(), "unknown resource must error");
+    }
+
+    #[test]
+    fn resources_read_missing_uri_is_invalid_params() {
+        let req = json!({ "jsonrpc": "2.0", "id": 1, "method": "resources/read", "params": {} });
+        let resp = call(&sample_graph(), &req.to_string());
+        assert_eq!(resp["error"]["code"], -32602);
+    }
+
+    #[test]
+    fn graph_query_with_max_tokens_packs_within_budget() {
+        // Many matches + a tiny budget → the packed output notes the omissions (FO-2 wiring).
+        let mut g = Graph::new();
+        for i in 1..=30_u32 {
+            g.nodes.push(node(i, &format!("match_node_{i}")));
+        }
+        let resp = tool_call(&g, 1, "graph_query", json!({ "query": "match_node", "max_tokens": 5 }));
+        let s = resp.to_string();
+        assert!(s.contains("match"), "seed/header must be present: {s}");
+        assert!(s.contains("omitted"), "a tiny budget must omit candidates: {s}");
     }
 }

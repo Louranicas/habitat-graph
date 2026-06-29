@@ -8,10 +8,14 @@
 #![forbid(unsafe_code)]
 #![warn(missing_docs)]
 
+pub mod budget;
 pub mod load;
 pub mod mcp;
 pub mod query;
+pub mod resources;
 
+pub use budget::{estimate_tokens, pack};
 pub use load::from_node_link;
 pub use mcp::handle_jsonrpc;
 pub use query::{find_by_label, shortest_path};
+pub use resources::{resources_list, resources_read};
