@@ -28,6 +28,10 @@ pub const SERVER_NAME: &str = "habitat-graph";
 /// a silent cap).
 pub const MAX_QUERY_RESULTS: usize = 50;
 
+/// Maximum accepted `graph_query` needle length in bytes — a defense-in-depth cap so an untrusted
+/// client cannot force pathological per-request work with an enormous query string.
+pub const MAX_QUERY_LEN: usize = 256;
+
 /// JSON-RPC parse-error code.
 const PARSE_ERROR: i64 = -32700;
 /// JSON-RPC method-not-found code.
@@ -58,7 +62,7 @@ pub fn handle_jsonrpc(graph: &Graph, request: &str) -> String {
     };
     let method = value.get("method").and_then(Value::as_str).unwrap_or_default();
     match method {
-        "initialize" => initialize_response(&id),
+        "initialize" => initialize_response(graph, &id),
         "tools/list" => tools_list_response(&id),
         "tools/call" => tools_call(graph, &id, value.get("params")),
         "resources/list" => ok_response(&id, crate::resources::resources_list(graph)),
@@ -99,13 +103,15 @@ fn error_response(id: &Value, code: i64, message: &str) -> String {
 }
 
 /// The `initialize` handshake result.
-fn initialize_response(id: &Value) -> String {
+fn initialize_response(graph: &Graph, id: &Value) -> String {
     ok_response(
         id,
         json!({
             "protocolVersion": MCP_PROTOCOL_VERSION,
             "capabilities": { "tools": {}, "resources": {} },
             "serverInfo": { "name": SERVER_NAME, "version": env!("CARGO_PKG_VERSION") },
+            // FO-5: content-addressed generation id — the client's cache key for this graph state.
+            "generation": crate::generation::generation_id(graph),
         }),
     )
 }
@@ -174,6 +180,13 @@ fn tool_query(graph: &Graph, id: &Value, args: &Value) -> String {
             "invalid params: graph_query requires a string `query`",
         );
     };
+    if needle.len() > MAX_QUERY_LEN {
+        return error_response(
+            id,
+            INVALID_PARAMS,
+            &format!("invalid params: query exceeds {MAX_QUERY_LEN} bytes"),
+        );
+    }
     let matches = find_by_label(graph, needle);
     if matches.is_empty() {
         return tool_text_result(id, &format!("no nodes match {needle:?}"));
@@ -604,5 +617,14 @@ mod tests {
         let s = resp.to_string();
         assert!(s.contains("match"), "seed/header must be present: {s}");
         assert!(s.contains("omitted"), "a tiny budget must omit candidates: {s}");
+    }
+
+    #[test]
+    fn graph_query_over_length_needle_is_invalid_params() {
+        // DoS defense-in-depth: an oversized query string is rejected, not processed.
+        let huge = "x".repeat(super::MAX_QUERY_LEN + 1);
+        let resp = tool_call(&sample_graph(), 1, "graph_query", json!({ "query": huge }));
+        // tool-level invalid-args surfaces as a JSON-RPC error.
+        assert!(resp.get("error").is_some(), "over-length query must be rejected: {resp}");
     }
 }

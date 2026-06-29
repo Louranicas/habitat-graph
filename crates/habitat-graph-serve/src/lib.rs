@@ -9,12 +9,16 @@
 #![warn(missing_docs)]
 
 pub mod budget;
+pub mod generation;
+pub mod index;
 pub mod load;
 pub mod mcp;
 pub mod query;
 pub mod resources;
 
 pub use budget::{estimate_tokens, pack};
+pub use generation::generation_id;
+pub use index::LabelIndex;
 pub use load::from_node_link;
 pub use mcp::handle_jsonrpc;
 pub use query::{find_by_label, shortest_path};

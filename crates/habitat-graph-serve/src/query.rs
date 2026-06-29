@@ -12,14 +12,17 @@ use habitat_graph_core::{Graph, Node, NodeId};
 /// [`str::to_lowercase`], matching the same rules as the rest of the habitat toolchain.
 #[must_use]
 pub fn find_by_label<'a>(graph: &'a Graph, needle: &str) -> Vec<&'a Node> {
-    let needle_lower = needle.to_lowercase();
-    let mut result: Vec<&'a Node> = graph
-        .nodes
-        .iter()
-        .filter(|node| node.label.to_lowercase().contains(&needle_lower))
-        .collect();
-    result.sort_by_key(|node| node.id);
-    result
+    // Resolve via the warm [`LabelIndex`](crate::index::LabelIndex) (FO-3). The index is built
+    // per-call here; the warm daemon (FO-6) holds one index across queries to realise the
+    // O(n)→sublinear win. The id set + ascending-`NodeId` order are unchanged.
+    let index = crate::index::LabelIndex::build(graph);
+    let by_id: std::collections::HashMap<NodeId, &'a Node> =
+        graph.nodes.iter().map(|node| (node.id, node)).collect();
+    index
+        .find(needle)
+        .into_iter()
+        .filter_map(|id| by_id.get(&id).copied())
+        .collect()
 }
 
 /// Returns the shortest path (as a sequence of [`NodeId`]s) between the first nodes whose labels

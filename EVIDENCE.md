@@ -4,7 +4,7 @@
 > **Live plan (next work):** [[14_PLAN_V3_UNIFIED_PARITY_AGENTIC_S1008901]] · matrix [[15_FEATURE_ASSIMILATION_MATRIX_S1008901]] · ops [[V3_LIVE_ORGAN_RUNBOOK_S1008901]] — full parity + agentic; each phase updates the ledger below.
 > Gold standard: deep-diff-forge `EVIDENCE.md`.
 
-**STATUS: BUILT + PUSHED (private) — 13-crate workspace, gate-green, 2300 all-targets tests / 0 failed; ZERO-TOUCH CAMPAIGN in progress (S1008901): PA-1 grammars + PB exporters + PC-core + PD analytics + A0 front door landed; PC-tail (watch/hook/install/add/mode-deep) · PE · A1 · A2 · A3 queued; parity (C-G1) + A4 + live-deploy Luke-gated. Seals below.**
+**STATUS: BUILT + PUSHED (private) — 13-crate workspace, gate-green, 2426 all-targets tests / 0 failed; ZERO-TOUCH CAMPAIGN in progress (S1008901): PA-1 grammars + PB exporters + PC-core + PD analytics + A0 front door + A1-warm (index+generation) landed; A1-tail (content-IDs FO-4 · UDS daemon FO-6) · PC-tail · PE · A2 · A3 queued; parity (C-G1) + A4 + live-deploy Luke-gated. Seals below.**
 D0→D6 + a semantic-backend crate + an MCP frontier organ are sealed below; D7 has pushed the repo
 private to GitHub and initialized the no-mistakes gate. Remaining (D7 tail, all gated on Luke @ 0.A,
 all one-way doors): OSS/public flip · GitLab mirror · `port-claim` + devenv deploy · crates.io. Plus
@@ -47,6 +47,12 @@ authoritatively in the main loop (never trusted from a builder's self-report).
 - token-budget (FO-2) | [VBE] | `serve::budget` — `pack(header, seed, candidates, max_tokens)` (seed never dropped, relevance-ordered, truncation note) + `estimate_tokens` (deterministic `ceil(bytes/4)`, byte-counted UTF-8, no tokenizer dep). **Wired live into `graph_query`** (`max_tokens` arg) at scaffold time so it is never a dead/fail-open module. 62 tests + 1 mcp integration test.
 - security | [VBE] | **`forge-security-architect` caught a real HIGH:** `render_report`/`render_node` embedded `source_file` RAW (attacker-influenced via `from_node_link`), bypassing `display_safe` — a Trojan-Source/ANSI/markdown-break vector the module's own doc falsely claimed it neutralised. Fixed: both sites `display_safe(&node.source_file)` + a bidi/ESC regression test. The `{label}`/`{id}` URI segments verified logical-key-only (no path traversal).
 - gate | [VBE] | authoritative COLD re-gate (`cargo clean -p`, defeats stale-fingerprint): check/clippy-D/pedantic/test clean, **2300 tests / 0 failed** (+144). httpx parity HELD. `forbid(unsafe)`, zero lib `unwrap`/`expect`/`unsafe`. Rogue-commit guard held (HEAD frozen; no fiber commit).
+
+### A1-warm — DONE (S1008901, FO-3 + FO-5)
+- warm index (FO-3) | [VBE] | `serve::index::LabelIndex` — a **trigram inverted index** (char-based, Unicode-safe): build extracts 3-grams → sorted posting lists; find intersects the needle's trigrams then verifies exact containment (trigrams over-approximate). Needles <3 chars / empty fall back to a scan. **Correctness proven by a brute-force-equivalence oracle** (index.find == naive scan over ~60 graph/needle shapes). `find_by_label` now delegates to it (live caller; the warm-hold O(n)→sublinear win lands with the FO-6 daemon). 65 tests.
+- generation id (FO-5) | [VBE] | `serve::generation::generation_id` — blake3 content hash over **canonical** (sorted, length-prefixed, domain-separated) nodes+edges+communities, so the id changes on ANY content change and is insertion-order independent + concatenation-collision-safe. Wired into the MCP `initialize` handshake (the client's cache key). 60 tests.
+- security | [VBE] | `forge-security-architect` PASS (no blocker); flagged an unbounded-needle DoS at the MCP boundary → **hardened** with `MAX_QUERY_LEN` (256-byte cap on `graph_query`, +test). Per-call index rebuild noted as the documented FO-6 deferral (the daemon holds the index warm).
+- gate | [VBE] | authoritative COLD re-gate: check/clippy-D/pedantic/test clean, **2426 tests / 0 failed** (+126). httpx parity HELD. `forbid(unsafe)`, zero lib `unwrap`/`expect`/`unsafe`. Rogue-commit guard held (HEAD frozen).
 
 ## Warrant labels (from the gold standard)
 - `[VBE]` — verified by execution (real process; output + exit code asserted).
