@@ -10,5 +10,7 @@
 
 pub mod handlers;
 pub mod server;
+pub mod uds;
 
 pub use server::{build_router, run_server};
+pub use uds::{serve_uds, WarmState};
