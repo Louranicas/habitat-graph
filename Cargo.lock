@@ -726,6 +726,7 @@ dependencies = [
 name = "habitat-graph-core"
 version = "0.0.0"
 dependencies = [
+ "blake3",
  "serde",
  "serde_json",
  "thiserror",

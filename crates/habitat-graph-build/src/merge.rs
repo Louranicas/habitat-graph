@@ -1,8 +1,8 @@
 //! Merge two graphs (incremental-rebuild support).
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
-use habitat_graph_core::{Edge, Graph, Manifest, Node, NodeId};
+use habitat_graph_core::{content_id, Edge, Graph, Manifest, Node, NodeId};
 use indexmap::IndexMap;
 
 /// Merges two [`Graph`]s whose [`NodeId`] spaces are **independent** into one coherent graph.
@@ -48,7 +48,9 @@ pub fn merge(a: Graph, b: Graph) -> Graph {
 
     let capacity = a_nodes.len().saturating_add(b_nodes.len());
     let mut label_to_new_id: IndexMap<String, NodeId> = IndexMap::with_capacity(capacity);
-    let mut next_id: u32 = 0_u32;
+    // Content-addressed ids (FO-4): every label maps to content_id(label) so a merge produces the
+    // SAME ids as a full assemble of the same labels — incremental update == full rebuild (R4).
+    let mut used_ids: HashSet<u32> = HashSet::with_capacity(capacity);
     let mut merged_nodes: Vec<Node> = Vec::with_capacity(capacity);
 
     // Per-graph remaps: (original NodeId) → (new merged NodeId).
@@ -57,13 +59,13 @@ pub fn merge(a: Graph, b: Graph) -> Graph {
 
     // Walk a first: its nodes (and its version of shared labels) take priority.
     for node in &a_nodes {
-        let new_id = intern_label(&mut label_to_new_id, &mut next_id, &mut merged_nodes, node);
+        let new_id = intern_label(&mut label_to_new_id, &mut used_ids, &mut merged_nodes, node);
         a_remap.insert(node.id, new_id);
     }
 
     // Walk b second: new labels get fresh ids; existing labels reuse a's id.
     for node in &b_nodes {
-        let new_id = intern_label(&mut label_to_new_id, &mut next_id, &mut merged_nodes, node);
+        let new_id = intern_label(&mut label_to_new_id, &mut used_ids, &mut merged_nodes, node);
         b_remap.insert(node.id, new_id);
     }
 
@@ -131,7 +133,7 @@ pub fn merge(a: Graph, b: Graph) -> Graph {
 /// Returns the [`NodeId`] associated with `node.label` in the merged graph.
 fn intern_label(
     label_to_new_id: &mut IndexMap<String, NodeId>,
-    next_id: &mut u32,
+    used_ids: &mut HashSet<u32>,
     merged_nodes: &mut Vec<Node>,
     node: &Node,
 ) -> NodeId {
@@ -139,8 +141,12 @@ fn intern_label(
     match label_to_new_id.entry(node.label.clone()) {
         Entry::Occupied(e) => *e.get(),
         Entry::Vacant(e) => {
-            let new_id = NodeId::new(*next_id);
-            *next_id = next_id.saturating_add(1);
+            // Content-addressed id (FO-4): content_id(label), probing forward on a u32 collision.
+            let mut raw = content_id(&node.label);
+            while !used_ids.insert(raw) {
+                raw = raw.wrapping_add(1);
+            }
+            let new_id = NodeId::new(raw);
             let _ = e.insert(new_id);
             merged_nodes.push(Node {
                 id: new_id,
@@ -156,8 +162,8 @@ fn intern_label(
 #[cfg(test)]
 mod tests {
     use habitat_graph_core::{
-        Community, CommunityId, Confidence, Edge, Graph, InputRecord, Node, NodeId, Span,
-        SCHEMA_VERSION,
+        content_id, Community, CommunityId, Confidence, Edge, Graph, InputRecord, Node, NodeId,
+        Span, SCHEMA_VERSION,
     };
 
     use super::merge;
@@ -524,19 +530,23 @@ mod tests {
         assert_eq!(result.schema, SCHEMA_VERSION);
     }
 
-    // 20. Large original NodeIds in b are reassigned to small ids in the merged space.
+    // 20. Original NodeIds in b are reassigned to content-addressed ids (FO-4).
     #[test]
-    fn merge_b_node_ids_reassigned_to_fresh_sequence() {
+    fn merge_b_node_ids_reassigned_to_content_ids() {
         let mut b = Graph::new();
         b.nodes.push(node(1_000, "P", "b.rs"));
         b.nodes.push(node(2_000, "Q", "b.rs"));
         b.edges.push(edge(1_000, 2_000, "link"));
 
         let result = merge(Graph::new(), b);
-        // New ids start from 0; must not retain the large original ids.
+        // FO-4: ids are reassigned to content_id(label) — NOT the arbitrary input ids — so a merge
+        // produces the same ids as a full assemble of the same labels.
+        for n in &result.nodes {
+            assert_eq!(n.id.get(), content_id(&n.label), "id must be content_id(label)");
+        }
         assert!(
-            result.nodes.iter().all(|n| n.id.get() < 100),
-            "ids must be reassigned to a compact sequence"
+            result.nodes.iter().all(|n| n.id.get() != 1_000 && n.id.get() != 2_000),
+            "original input ids must not be retained"
         );
         assert_eq!(result.counts().1, 1, "edge must survive remapping");
     }

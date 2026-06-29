@@ -58,9 +58,49 @@ id_type!(
     "c"
 );
 
+/// Derives a content-addressed `u32` id from a node label (the first 4 bytes of `blake3(label)`,
+/// little-endian).
+///
+/// Content-addressing makes a node's id a pure function of its label, so adding or removing one
+/// symbol does **not** renumber the others — `graph.json` diffs stay minimal (R4) and the 3-way
+/// merge driver stays stable across rebuilds. Two distinct labels can (astronomically rarely, for
+/// in-scope graph sizes) collide in `u32`; the assembler resolves a collision by probing forward
+/// deterministically, so the function itself need not be injective.
+#[must_use]
+pub fn content_id(label: &str) -> u32 {
+    let hash = blake3::hash(label.as_bytes());
+    let b = hash.as_bytes();
+    u32::from_le_bytes([b[0], b[1], b[2], b[3]])
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn content_id_is_deterministic() {
+        assert_eq!(content_id("HttpClient"), content_id("HttpClient"));
+    }
+
+    #[test]
+    fn content_id_distinguishes_labels() {
+        // Different labels almost never collide; these two do not.
+        assert_ne!(content_id("alpha"), content_id("beta"));
+    }
+
+    #[test]
+    fn content_id_is_label_order_independent() {
+        // The id depends only on the label, not on when it was first seen — the FO-4 property.
+        let a = content_id("zzz_last");
+        let b = content_id("aaa_first");
+        assert_eq!(a, content_id("zzz_last"));
+        assert_eq!(b, content_id("aaa_first"));
+    }
+
+    #[test]
+    fn content_id_empty_label_is_stable() {
+        assert_eq!(content_id(""), content_id(""));
+    }
 
     #[test]
     fn new_and_get_roundtrip() {

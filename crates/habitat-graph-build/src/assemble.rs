@@ -8,9 +8,11 @@
 //! in an un-scanned file or was filtered out. Callers that need to preserve such edges should
 //! ensure every referenced label appears in at least one extraction.
 
+use std::collections::HashSet;
+
 use indexmap::{map::Entry, IndexMap};
 
-use habitat_graph_core::{Edge, Extraction, Graph, Node, NodeId};
+use habitat_graph_core::{content_id, Edge, Extraction, Graph, Node, NodeId};
 
 /// Assembles per-file extractions into a deterministic [`Graph`].
 ///
@@ -41,19 +43,20 @@ use habitat_graph_core::{Edge, Extraction, Graph, Node, NodeId};
 // breaking API change, so we suppress the pedantic lint here.
 #[allow(clippy::needless_pass_by_value)]
 pub fn assemble(extractions: Vec<Extraction>) -> Graph {
-    // Phase 1: intern RawNode labels → NodeId.
-    // IndexMap preserves insertion order, giving the same id sequence for the same input.
+    // Phase 1: intern RawNode labels → NodeId (content-addressed, FO-4).
+    // Each label's id is `content_id(label)` — a pure function of the label — so adding or removing
+    // one symbol does not renumber the others (minimal graph.json diffs, stable merge driver, R4).
+    // `used_ids` resolves the astronomically-rare u32 collision by probing forward deterministically.
     let mut interner: IndexMap<String, NodeId> = IndexMap::new();
     let mut graph = Graph::new();
-    let mut next_index: u32 = 0;
+    let mut used_ids: HashSet<u32> = HashSet::new();
 
     for extraction in &extractions {
         for raw_node in &extraction.nodes {
             // The Entry API avoids a double-lookup: `entry` checks and potentially inserts in
             // one operation.  Occupied → duplicate label, skip silently.
             if let Entry::Vacant(slot) = interner.entry(raw_node.label.clone()) {
-                let id = NodeId::new(next_index);
-                next_index += 1;
+                let id = NodeId::new(assign_unique_content_id(&raw_node.label, &mut used_ids));
                 slot.insert(id);
                 graph.nodes.push(Node {
                     id,
@@ -88,9 +91,25 @@ pub fn assemble(extractions: Vec<Extraction>) -> Graph {
     crate::dedup(graph).sorted()
 }
 
+/// Returns a unique content-addressed id for `label`, probing forward on a `u32` collision.
+///
+/// The base id is [`content_id`]; if it is already taken (a hash collision between two distinct
+/// labels — vanishingly rare for in-scope graph sizes), the next free value is used. Probing is
+/// deterministic, so the same set of labels always yields the same id assignment (R4). `used` is
+/// updated with the chosen id.
+fn assign_unique_content_id(label: &str, used: &mut HashSet<u32>) -> u32 {
+    let mut id = content_id(label);
+    while !used.insert(id) {
+        id = id.wrapping_add(1);
+    }
+    id
+}
+
 #[cfg(test)]
 mod tests {
-    use habitat_graph_core::{Confidence, Extraction, RawEdge, RawNode, Span, SCHEMA_VERSION};
+    use habitat_graph_core::{
+        content_id, Confidence, Extraction, RawEdge, RawNode, Span, SCHEMA_VERSION,
+    };
 
     use super::assemble;
 
@@ -194,23 +213,27 @@ mod tests {
         assert_eq!(g.nodes[0].source_location, span1);
     }
 
-    // ── 7. NodeId assigned in first-seen order ────────────────────────────────
+    // ── 7. NodeId is content-addressed (FO-4) ─────────────────────────────────
 
     #[test]
-    fn node_ids_assigned_in_first_seen_order() {
+    fn node_ids_are_content_addressed() {
         let e1 = extraction(
             &[raw_node("First", "a.rs"), raw_node("Second", "b.rs")],
             &[],
         );
         let e2 = extraction(&[raw_node("Third", "c.rs")], &[]);
         let g = assemble(vec![e1, e2]);
-        // sorted() orders by id; ids must be 0 → First, 1 → Second, 2 → Third.
-        let pairs: Vec<(u32, &str)> = g
-            .nodes
-            .iter()
-            .map(|n| (n.id.get(), n.label.as_str()))
-            .collect();
-        assert_eq!(pairs, vec![(0, "First"), (1, "Second"), (2, "Third")]);
+        // FO-4: each node's id is content_id(label), independent of first-seen order, so adding a
+        // symbol never renumbers the others. All three labels are present with their content ids.
+        for n in &g.nodes {
+            assert_eq!(n.id.get(), content_id(&n.label), "id must be content_id(label)");
+        }
+        let labels: std::collections::BTreeSet<&str> =
+            g.nodes.iter().map(|n| n.label.as_str()).collect();
+        assert_eq!(
+            labels,
+            ["First", "Second", "Third"].into_iter().collect()
+        );
     }
 
     // ── 8. edge with unknown target is dropped ────────────────────────────────
@@ -299,20 +322,26 @@ mod tests {
 
     #[test]
     fn output_nodes_sorted_by_id() {
-        // Three separate extractions → ids 0,1,2 in first-seen order; sorted() keeps them that way.
+        // sorted() orders nodes by id ascending — the R4 invariant — regardless of the (now
+        // content-addressed) id values. Assert the ordering, not specific magic ids.
         let e1 = extraction(&[raw_node("C", "c.rs")], &[]);
         let e2 = extraction(&[raw_node("A", "a.rs")], &[]);
         let e3 = extraction(&[raw_node("B", "b.rs")], &[]);
         let g = assemble(vec![e1, e2, e3]);
         let ids: Vec<u32> = g.nodes.iter().map(|n| n.id.get()).collect();
-        assert_eq!(ids, vec![0, 1, 2]);
+        let mut sorted = ids.clone();
+        sorted.sort_unstable();
+        assert_eq!(ids, sorted, "nodes must be sorted by id ascending");
+        assert_eq!(g.nodes.len(), 3);
     }
 
     // ── 15. output edges sorted by (source, target, relation) ─────────────────
 
     #[test]
     fn output_edges_sorted_by_tuple() {
-        // Nodes: A=0, B=1, C=2.  Edges emitted in reverse sort order.
+        // Edges emitted out of order must come out canonically sorted by (source, target,
+        // relation). The id values are content-addressed (FO-4), so assert the SORT invariant
+        // holds rather than specific magic ids.
         let e = extraction(
             &[
                 raw_node("A", "a.rs"),
@@ -326,15 +355,16 @@ mod tests {
             ],
         );
         let g = assemble(vec![e]);
-        // Canonical order: (0,1,"defines"), (0,2,"calls"), (1,2,"uses")
         let tuples: Vec<(u32, u32, &str)> = g
             .edges
             .iter()
             .map(|e| (e.source.get(), e.target.get(), e.relation.as_str()))
             .collect();
+        let mut sorted = tuples.clone();
+        sorted.sort_unstable();
         assert_eq!(
-            tuples,
-            vec![(0, 1, "defines"), (0, 2, "calls"), (1, 2, "uses")]
+            tuples, sorted,
+            "edges must be canonically sorted by (source, target, relation)"
         );
     }
 
@@ -468,10 +498,10 @@ mod tests {
         assert_eq!(g.edges[0].relation, "ok");
     }
 
-    // ── 25. zero-based monotone id assignment confirmed via label map ──────────
+    // ── 25. content-addressed id assignment confirmed via label map ────────────
 
     #[test]
-    fn node_ids_are_zero_based_monotone() {
+    fn node_ids_match_content_id_per_label() {
         let e = extraction(
             &[
                 raw_node("Z", "z.rs"),
@@ -486,8 +516,37 @@ mod tests {
             .iter()
             .map(|n| (n.label.as_str(), n.id.get()))
             .collect();
-        assert_eq!(by_label["Z"], 0, "first seen label gets id 0");
-        assert_eq!(by_label["Y"], 1, "second seen label gets id 1");
-        assert_eq!(by_label["X"], 2, "third seen label gets id 2");
+        // FO-4: each label maps to content_id(label), not a first-seen sequence number.
+        assert_eq!(by_label["Z"], content_id("Z"));
+        assert_eq!(by_label["Y"], content_id("Y"));
+        assert_eq!(by_label["X"], content_id("X"));
+    }
+
+    // ── 26. content-addressing is stable under symbol addition (the FO-4 win) ──
+
+    #[test]
+    fn adding_a_symbol_does_not_renumber_others() {
+        let before = assemble(vec![extraction(
+            &[raw_node("Keep", "a.rs"), raw_node("Also", "b.rs")],
+            &[],
+        )]);
+        let after = assemble(vec![extraction(
+            &[
+                raw_node("Keep", "a.rs"),
+                raw_node("New", "c.rs"),
+                raw_node("Also", "b.rs"),
+            ],
+            &[],
+        )]);
+        let id_of = |g: &habitat_graph_core::Graph, label: &str| -> u32 {
+            g.nodes
+                .iter()
+                .find(|n| n.label == label)
+                .map_or(u32::MAX, |n| n.id.get())
+        };
+        // "Keep" and "Also" retain their exact ids even though "New" was inserted between them —
+        // the property sequential numbering could not provide.
+        assert_eq!(id_of(&before, "Keep"), id_of(&after, "Keep"));
+        assert_eq!(id_of(&before, "Also"), id_of(&after, "Also"));
     }
 }

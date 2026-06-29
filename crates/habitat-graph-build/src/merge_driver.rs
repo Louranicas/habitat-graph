@@ -28,7 +28,7 @@
 
 use std::collections::{HashMap, HashSet};
 
-use habitat_graph_core::{Community, CommunityId, Edge, Graph, Manifest, Node, NodeId};
+use habitat_graph_core::{content_id, Community, CommunityId, Edge, Graph, Manifest, Node, NodeId};
 
 /// Deterministically 3-way-merges `ours` and `theirs` against their common ancestor `base`.
 ///
@@ -191,12 +191,17 @@ fn select_winning_nodes<'a>(
 #[must_use]
 fn assign_node_ids(nodes: Vec<Node>) -> (Vec<Node>, HashMap<String, NodeId>) {
     let mut label_to_new_id: HashMap<String, NodeId> = HashMap::with_capacity(nodes.len());
-    let mut next_id: u32 = 0;
+    // Content-addressed ids (FO-4): a merged graph.json carries the SAME ids a fresh assemble would
+    // give the surviving labels, probing forward on the rare u32 collision.
+    let mut used_ids: HashSet<u32> = HashSet::with_capacity(nodes.len());
     let updated: Vec<Node> = nodes
         .into_iter()
         .map(|mut node| {
-            let new_id = NodeId::new(next_id);
-            next_id = next_id.saturating_add(1);
+            let mut raw = content_id(&node.label);
+            while !used_ids.insert(raw) {
+                raw = raw.wrapping_add(1);
+            }
+            let new_id = NodeId::new(raw);
             label_to_new_id.insert(node.label.clone(), new_id);
             node.id = new_id;
             node
@@ -356,7 +361,7 @@ fn merge_manifest(ours: &Manifest, theirs: &Manifest) -> Manifest {
 #[cfg(test)]
 mod tests {
     use habitat_graph_core::{
-        Community, CommunityId, Confidence, Edge, Graph, InputRecord, Node, NodeId, Span,
+        content_id, Community, CommunityId, Confidence, Edge, Graph, InputRecord, Node, NodeId, Span,
     };
 
     use super::merge3;
@@ -546,14 +551,19 @@ mod tests {
         assert_eq!(m.nodes.len(), 0);
     }
 
-    // 14. Fresh NodeIds start at 0 and are assigned sequentially.
+    // 14. Fresh NodeIds are content-addressed (FO-4) — a merged graph matches a fresh assemble.
     #[test]
-    fn node_ids_assigned_from_zero_sequentially() {
+    fn node_ids_assigned_content_addressed() {
         let ours = nodes_graph(&[(99, "A"), (100, "B"), (101, "C")]);
         let m = merge3(&Graph::new(), &ours, &Graph::new());
-        let ids: Vec<u32> = m.nodes.iter().map(|n| n.id.get()).collect();
-        assert!(ids.iter().all(|&id| id < 10), "ids must be reassigned from 0");
-        assert_eq!(ids, vec![0, 1, 2]);
+        // FO-4: each surviving node's id is content_id(label), NOT the arbitrary input id.
+        for n in &m.nodes {
+            assert_eq!(n.id.get(), content_id(&n.label), "id must be content_id(label)");
+        }
+        assert!(
+            m.nodes.iter().all(|n| ![99, 100, 101].contains(&n.id.get())),
+            "original input ids must not be retained"
+        );
     }
 
     // 15. Output nodes are sorted by id ascending (canonical R4 order).
