@@ -12,9 +12,11 @@ pub mod ingest;
 pub mod manifest;
 #[cfg(feature = "pdf")]
 pub mod pdf;
+pub mod ssrf;
 
 pub use detect::detect;
 pub use ingest::read_local;
 pub use manifest::build_manifest;
+pub use ssrf::ip_is_blocked;
 #[cfg(feature = "pdf")]
 pub use pdf::extract_text;
