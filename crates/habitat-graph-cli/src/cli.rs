@@ -97,6 +97,18 @@ enum Command {
         #[arg(long, default_value = ".")]
         repo: PathBuf,
     },
+    /// Register habitat-graph as an MCP server (prints the config, or merges with `--write`).
+    InstallMcp {
+        /// Path to the `graph.json` the MCP server should serve.
+        #[arg(long, default_value = "graphify-out/graph.json")]
+        graph: PathBuf,
+        /// Server name to register under `mcpServers`.
+        #[arg(long, default_value = commands::install_mcp::DEFAULT_SERVER_NAME)]
+        name: String,
+        /// Merge into this config file instead of printing the block to stdout.
+        #[arg(long)]
+        write: Option<PathBuf>,
+    },
     /// Exercise the engine on a tiny in-memory corpus (no I/O).
     SelfTest,
     /// Print environment + wiring diagnostics.
@@ -139,6 +151,9 @@ impl Cli {
                 commands::merge_driver::run_merge_driver(&base, &ours, &theirs)
             }
             Command::InstallMergeDriver { repo } => commands::merge_driver::install(&repo),
+            Command::InstallMcp { graph, name, write } => {
+                commands::install_mcp::run(&graph, &name, write.as_deref())
+            }
             Command::SelfTest => commands::meta::self_test(),
             Command::Doctor => commands::meta::doctor(),
         }

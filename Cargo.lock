@@ -718,6 +718,7 @@ dependencies = [
  "habitat-graph-extract",
  "habitat-graph-serve",
  "habitat-graph-source",
+ "serde_json",
  "tempfile",
  "tokio",
 ]
