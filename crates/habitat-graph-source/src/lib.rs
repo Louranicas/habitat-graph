@@ -10,7 +10,11 @@
 pub mod detect;
 pub mod ingest;
 pub mod manifest;
+#[cfg(feature = "pdf")]
+pub mod pdf;
 
 pub use detect::detect;
 pub use ingest::read_local;
 pub use manifest::build_manifest;
+#[cfg(feature = "pdf")]
+pub use pdf::extract_text;

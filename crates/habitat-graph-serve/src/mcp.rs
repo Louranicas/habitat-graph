@@ -152,6 +152,15 @@ fn tool_descriptors() -> Value {
             "name": "graph_health",
             "description": "Report graph statistics: node, edge, and community counts.",
             "inputSchema": { "type": "object", "properties": {} }
+        },
+        {
+            "name": "graph_explain",
+            "description": "Explain a concept: summarise nodes matching it and their graph neighbourhood (local-first, no LLM).",
+            "inputSchema": {
+                "type": "object",
+                "properties": { "concept": { "type": "string", "description": "concept/label substring to explain" } },
+                "required": ["concept"]
+            }
         }
     ])
 }
@@ -167,6 +176,7 @@ fn tools_call(graph: &Graph, id: &Value, params: Option<&Value>) -> String {
         "graph_query" => tool_query(graph, id, &args),
         "graph_path" => tool_path(graph, id, &args),
         "graph_health" => tool_health(graph, id),
+        "graph_explain" => tool_explain(graph, id, &args),
         other => error_response(id, INVALID_PARAMS, &format!("invalid params: unknown tool {other}")),
     }
 }
@@ -228,6 +238,25 @@ fn tool_query(graph: &Graph, id: &Value, args: &Value) -> String {
         out
     };
     tool_text_result(id, &text)
+}
+
+/// `graph_explain` tool: a local-first structural explanation of a concept (no LLM call).
+fn tool_explain(graph: &Graph, id: &Value, args: &Value) -> String {
+    let Some(concept) = args.get("concept").and_then(Value::as_str) else {
+        return error_response(
+            id,
+            INVALID_PARAMS,
+            "invalid params: graph_explain requires a string `concept`",
+        );
+    };
+    if concept.len() > MAX_QUERY_LEN {
+        return error_response(
+            id,
+            INVALID_PARAMS,
+            &format!("invalid params: concept exceeds {MAX_QUERY_LEN} bytes"),
+        );
+    }
+    tool_text_result(id, &crate::explain::explain(graph, concept))
 }
 
 /// `graph_path` tool: shortest undirected path between two labels.
@@ -383,12 +412,16 @@ mod tests {
     }
 
     #[test]
-    fn tools_list_advertises_three_tools() {
+    fn tools_list_advertises_the_four_tools() {
         let req = json!({ "jsonrpc": "2.0", "id": 1, "method": "tools/list" });
         let resp = call(&sample_graph(), &req.to_string());
         let tools = resp["result"]["tools"].as_array().expect("tools array");
         let names: Vec<&str> = tools.iter().filter_map(|t| t["name"].as_str()).collect();
-        assert_eq!(names, ["graph_query", "graph_path", "graph_health"]);
+        // graph_explain (PE) added alongside the original three.
+        assert_eq!(
+            names,
+            ["graph_query", "graph_path", "graph_health", "graph_explain"]
+        );
     }
 
     #[test]
@@ -626,5 +659,18 @@ mod tests {
         let resp = tool_call(&sample_graph(), 1, "graph_query", json!({ "query": huge }));
         // tool-level invalid-args surfaces as a JSON-RPC error.
         assert!(resp.get("error").is_some(), "over-length query must be rejected: {resp}");
+    }
+
+    #[test]
+    fn graph_explain_summarises_a_concept() {
+        let resp = tool_call(&sample_graph(), 1, "graph_explain", json!({ "concept": "Alpha" }));
+        let s = resp.to_string();
+        assert!(s.contains("Alpha"), "explain must mention the matched concept: {s}");
+    }
+
+    #[test]
+    fn graph_explain_missing_concept_is_invalid_params() {
+        let resp = tool_call(&sample_graph(), 1, "graph_explain", json!({}));
+        assert_eq!(resp["error"]["code"], -32602);
     }
 }

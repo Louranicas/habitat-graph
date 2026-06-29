@@ -9,6 +9,7 @@
 #![warn(missing_docs)]
 
 pub mod budget;
+pub mod explain;
 pub mod generation;
 pub mod index;
 pub mod load;
@@ -17,6 +18,7 @@ pub mod query;
 pub mod resources;
 
 pub use budget::{estimate_tokens, pack};
+pub use explain::explain;
 pub use generation::generation_id;
 pub use index::LabelIndex;
 pub use load::from_node_link;

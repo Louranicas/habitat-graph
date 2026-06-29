@@ -4,7 +4,7 @@
 > **Live plan (next work):** [[14_PLAN_V3_UNIFIED_PARITY_AGENTIC_S1008901]] · matrix [[15_FEATURE_ASSIMILATION_MATRIX_S1008901]] · ops [[V3_LIVE_ORGAN_RUNBOOK_S1008901]] — full parity + agentic; each phase updates the ledger below.
 > Gold standard: deep-diff-forge `EVIDENCE.md`.
 
-**STATUS: BUILT + PUSHED (private) — 13-crate workspace, gate-green, 2426 all-targets tests / 0 failed; ZERO-TOUCH CAMPAIGN in progress (S1008901): PA-1 grammars + PB exporters + PC-core + PD analytics + A0 front door + A1-warm (index+generation) landed; A1-tail (content-IDs FO-4 · UDS daemon FO-6) · PC-tail · PE · A2 · A3 queued; parity (C-G1) + A4 + live-deploy Luke-gated. Seals below.**
+**STATUS: BUILT + PUSHED (private) — 13-crate workspace, gate-green, 2555 all-targets tests / 0 failed; ZERO-TOUCH CAMPAIGN in progress (S1008901): PA-1 + PB + PC-core + PD + A0 + A1-warm + PE-semantic landed (deps-approved full build); A1-tail (content-IDs FO-4 · UDS FO-6) · PC-tail · A2 · A3 queued; parity (C-G1) + A4 + LIVE actuation Luke-gated. Seals below.**
 D0→D6 + a semantic-backend crate + an MCP frontier organ are sealed below; D7 has pushed the repo
 private to GitHub and initialized the no-mistakes gate. Remaining (D7 tail, all gated on Luke @ 0.A,
 all one-way doors): OSS/public flip · GitLab mirror · `port-claim` + devenv deploy · crates.io. Plus
@@ -53,6 +53,11 @@ authoritatively in the main loop (never trusted from a builder's self-report).
 - generation id (FO-5) | [VBE] | `serve::generation::generation_id` — blake3 content hash over **canonical** (sorted, length-prefixed, domain-separated) nodes+edges+communities, so the id changes on ANY content change and is insertion-order independent + concatenation-collision-safe. Wired into the MCP `initialize` handshake (the client's cache key). 60 tests.
 - security | [VBE] | `forge-security-architect` PASS (no blocker); flagged an unbounded-needle DoS at the MCP boundary → **hardened** with `MAX_QUERY_LEN` (256-byte cap on `graph_query`, +test). Per-call index rebuild noted as the documented FO-6 deferral (the daemon holds the index warm).
 - gate | [VBE] | authoritative COLD re-gate: check/clippy-D/pedantic/test clean, **2426 tests / 0 failed** (+126). httpx parity HELD. `forbid(unsafe)`, zero lib `unwrap`/`expect`/`unsafe`. Rogue-commit guard held (HEAD frozen).
+
+### PE-semantic — DONE (S1008901, FO-10 partial; deps-approved)
+- pdf ingestion | [VBE] | `source::pdf::extract_text` (feature `pdf`, off by default, `pdf-extract 0.12`): size cap (`MAX_PDF_BYTES`) BEFORE parse + **`std::panic::catch_unwind`** converting `pdf-extract`'s internal panics (malformed/encrypted PDFs) into `GraphError::Parse` — a hostile PDF returns an error, never crashes the process. Local-first (no network). 65 tests incl. a genuine panic-safety test (a no-MediaBox PDF that triggers a real upstream panic). **Honesty fix:** docstring corrected — the cap bounds *input* not *decompressed output* (decompression-bomb residual risk documented; run under an OS memory budget for untrusted bulk input).
+- explain | [VBE] | `serve::explain` — local-first structural concept summary (matched nodes + outbound/inbound relations + community, all `display_safe`'d, deterministic, **no LLM/network call**). Wired as the MCP `graph_explain` tool. 62 tests. (The `Backend::extract_semantic` Noop-default seam already provides FO-10's optional LLM-routed semantic-extract; live LLM routing stays gated.)
+- gate | [VBE] | authoritative COLD re-gate (`--all-features` exercises `pdf`): check/clippy-D/pedantic/test clean, **2555 tests / 0 failed** (+129). httpx parity HELD. `forbid(unsafe)`, zero lib `unwrap`/`expect`/`unsafe`. Both PE security findings non-blocking (decompression-bomb + time-bound = risk register; honesty fix applied). Rogue-commit guard held.
 
 ## Warrant labels (from the gold standard)
 - `[VBE]` — verified by execution (real process; output + exit code asserted).
