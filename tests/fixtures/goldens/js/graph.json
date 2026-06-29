@@ -1,0 +1,269 @@
+{
+  "directed": true,
+  "graph": {},
+  "links": [
+    {
+      "confidence": "EXTRACTED",
+      "relation": "method",
+      "source": "sample_dog",
+      "target": "sample_dog_speak"
+    },
+    {
+      "confidence": "EXTRACTED",
+      "relation": "method",
+      "source": "sample_dog",
+      "target": "sample_dog_constructor"
+    },
+    {
+      "confidence": "EXTRACTED",
+      "relation": "method",
+      "source": "sample_dog",
+      "target": "sample_dog_fetch"
+    },
+    {
+      "confidence": "EXTRACTED",
+      "relation": "method",
+      "source": "sample_dog",
+      "target": "sample_dog_validate"
+    },
+    {
+      "confidence": "EXTRACTED",
+      "relation": "method",
+      "source": "sample_eventbus",
+      "target": "sample_eventbus_constructor"
+    },
+    {
+      "confidence": "EXTRACTED",
+      "relation": "method",
+      "source": "sample_eventbus",
+      "target": "sample_eventbus_publish"
+    },
+    {
+      "confidence": "EXTRACTED",
+      "relation": "method",
+      "source": "sample_eventbus",
+      "target": "sample_eventbus_unsubscribe"
+    },
+    {
+      "confidence": "EXTRACTED",
+      "relation": "method",
+      "source": "sample_eventbus",
+      "target": "sample_eventbus_subscribe"
+    },
+    {
+      "confidence": "EXTRACTED",
+      "relation": "contains",
+      "source": "sample",
+      "target": "sample_dog"
+    },
+    {
+      "confidence": "EXTRACTED",
+      "relation": "contains",
+      "source": "sample",
+      "target": "sample_parsequery"
+    },
+    {
+      "confidence": "EXTRACTED",
+      "relation": "contains",
+      "source": "sample",
+      "target": "sample_eventbus"
+    },
+    {
+      "confidence": "EXTRACTED",
+      "relation": "contains",
+      "source": "sample",
+      "target": "sample_validatename"
+    },
+    {
+      "confidence": "EXTRACTED",
+      "relation": "contains",
+      "source": "sample",
+      "target": "sample_formatdate"
+    },
+    {
+      "confidence": "EXTRACTED",
+      "relation": "contains",
+      "source": "sample",
+      "target": "sample_animal"
+    },
+    {
+      "confidence": "EXTRACTED",
+      "relation": "contains",
+      "source": "sample",
+      "target": "sample_createid"
+    },
+    {
+      "confidence": "EXTRACTED",
+      "relation": "inherits",
+      "source": "sample_animal",
+      "target": "sample_dog"
+    },
+    {
+      "confidence": "EXTRACTED",
+      "relation": "method",
+      "source": "sample_animal",
+      "target": "sample_animal_speak"
+    },
+    {
+      "confidence": "EXTRACTED",
+      "relation": "method",
+      "source": "sample_animal",
+      "target": "sample_animal_tostring"
+    },
+    {
+      "confidence": "EXTRACTED",
+      "relation": "method",
+      "source": "sample_animal",
+      "target": "sample_animal_create"
+    },
+    {
+      "confidence": "EXTRACTED",
+      "relation": "method",
+      "source": "sample_animal",
+      "target": "sample_animal_constructor"
+    }
+  ],
+  "multigraph": false,
+  "nodes": [
+    {
+      "community": 0,
+      "id": "sample_dog",
+      "label": "sample_dog",
+      "source_file": "/home/louranicas/claude-code-workspace/habitat-graph/crates/habitat-graph-cli/../../tests/fixtures/goldens/js/raw/sample.js",
+      "source_location": "L51"
+    },
+    {
+      "community": 1,
+      "id": "sample_parsequery",
+      "label": "sample_parsequery",
+      "source_file": "/home/louranicas/claude-code-workspace/habitat-graph/crates/habitat-graph-cli/../../tests/fixtures/goldens/js/raw/sample.js",
+      "source_location": "L24"
+    },
+    {
+      "community": 0,
+      "id": "sample_dog_speak",
+      "label": "sample_dog_speak",
+      "source_file": "/home/louranicas/claude-code-workspace/habitat-graph/crates/habitat-graph-cli/../../tests/fixtures/goldens/js/raw/sample.js",
+      "source_location": "L56"
+    },
+    {
+      "community": 2,
+      "id": "sample_eventbus",
+      "label": "sample_eventbus",
+      "source_file": "/home/louranicas/claude-code-workspace/habitat-graph/crates/habitat-graph-cli/../../tests/fixtures/goldens/js/raw/sample.js",
+      "source_location": "L71"
+    },
+    {
+      "community": 3,
+      "id": "sample_animal_speak",
+      "label": "sample_animal_speak",
+      "source_file": "/home/louranicas/claude-code-workspace/habitat-graph/crates/habitat-graph-cli/../../tests/fixtures/goldens/js/raw/sample.js",
+      "source_location": "L36"
+    },
+    {
+      "community": 2,
+      "id": "sample_eventbus_constructor",
+      "label": "sample_eventbus_constructor",
+      "source_file": "/home/louranicas/claude-code-workspace/habitat-graph/crates/habitat-graph-cli/../../tests/fixtures/goldens/js/raw/sample.js",
+      "source_location": "L72"
+    },
+    {
+      "community": 0,
+      "id": "sample_dog_constructor",
+      "label": "sample_dog_constructor",
+      "source_file": "/home/louranicas/claude-code-workspace/habitat-graph/crates/habitat-graph-cli/../../tests/fixtures/goldens/js/raw/sample.js",
+      "source_location": "L52"
+    },
+    {
+      "community": 1,
+      "id": "sample",
+      "label": "sample",
+      "source_file": "/home/louranicas/claude-code-workspace/habitat-graph/crates/habitat-graph-cli/../../tests/fixtures/goldens/js/raw/sample.js",
+      "source_location": "L1"
+    },
+    {
+      "community": 2,
+      "id": "sample_eventbus_publish",
+      "label": "sample_eventbus_publish",
+      "source_file": "/home/louranicas/claude-code-workspace/habitat-graph/crates/habitat-graph-cli/../../tests/fixtures/goldens/js/raw/sample.js",
+      "source_location": "L82"
+    },
+    {
+      "community": 1,
+      "id": "sample_validatename",
+      "label": "sample_validatename",
+      "source_file": "/home/louranicas/claude-code-workspace/habitat-graph/crates/habitat-graph-cli/../../tests/fixtures/goldens/js/raw/sample.js",
+      "source_location": "L16"
+    },
+    {
+      "community": 1,
+      "id": "sample_formatdate",
+      "label": "sample_formatdate",
+      "source_file": "/home/louranicas/claude-code-workspace/habitat-graph/crates/habitat-graph-cli/../../tests/fixtures/goldens/js/raw/sample.js",
+      "source_location": "L22"
+    },
+    {
+      "community": 2,
+      "id": "sample_eventbus_unsubscribe",
+      "label": "sample_eventbus_unsubscribe",
+      "source_file": "/home/louranicas/claude-code-workspace/habitat-graph/crates/habitat-graph-cli/../../tests/fixtures/goldens/js/raw/sample.js",
+      "source_location": "L87"
+    },
+    {
+      "community": 3,
+      "id": "sample_animal",
+      "label": "sample_animal",
+      "source_file": "/home/louranicas/claude-code-workspace/habitat-graph/crates/habitat-graph-cli/../../tests/fixtures/goldens/js/raw/sample.js",
+      "source_location": "L30"
+    },
+    {
+      "community": 3,
+      "id": "sample_animal_tostring",
+      "label": "sample_animal_tostring",
+      "source_file": "/home/louranicas/claude-code-workspace/habitat-graph/crates/habitat-graph-cli/../../tests/fixtures/goldens/js/raw/sample.js",
+      "source_location": "L40"
+    },
+    {
+      "community": 3,
+      "id": "sample_animal_create",
+      "label": "sample_animal_create",
+      "source_file": "/home/louranicas/claude-code-workspace/habitat-graph/crates/habitat-graph-cli/../../tests/fixtures/goldens/js/raw/sample.js",
+      "source_location": "L44"
+    },
+    {
+      "community": 1,
+      "id": "sample_createid",
+      "label": "sample_createid",
+      "source_file": "/home/louranicas/claude-code-workspace/habitat-graph/crates/habitat-graph-cli/../../tests/fixtures/goldens/js/raw/sample.js",
+      "source_location": "L12"
+    },
+    {
+      "community": 2,
+      "id": "sample_eventbus_subscribe",
+      "label": "sample_eventbus_subscribe",
+      "source_file": "/home/louranicas/claude-code-workspace/habitat-graph/crates/habitat-graph-cli/../../tests/fixtures/goldens/js/raw/sample.js",
+      "source_location": "L77"
+    },
+    {
+      "community": 0,
+      "id": "sample_dog_fetch",
+      "label": "sample_dog_fetch",
+      "source_file": "/home/louranicas/claude-code-workspace/habitat-graph/crates/habitat-graph-cli/../../tests/fixtures/goldens/js/raw/sample.js",
+      "source_location": "L60"
+    },
+    {
+      "community": 0,
+      "id": "sample_dog_validate",
+      "label": "sample_dog_validate",
+      "source_file": "/home/louranicas/claude-code-workspace/habitat-graph/crates/habitat-graph-cli/../../tests/fixtures/goldens/js/raw/sample.js",
+      "source_location": "L64"
+    },
+    {
+      "community": 3,
+      "id": "sample_animal_constructor",
+      "label": "sample_animal_constructor",
+      "source_file": "/home/louranicas/claude-code-workspace/habitat-graph/crates/habitat-graph-cli/../../tests/fixtures/goldens/js/raw/sample.js",
+      "source_location": "L31"
+    }
+  ]
+}

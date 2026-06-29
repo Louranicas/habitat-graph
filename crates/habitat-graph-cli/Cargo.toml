@@ -26,6 +26,20 @@ habitat-graph-serve = { workspace = true }
 habitat-graph-daemon = { workspace = true }
 serde_json = { workspace = true }
 tokio = { workspace = true }
+# PC-tail lifecycle features — feature-gated to keep the default binary dep-light
+notify = { version = "6", optional = true }
+ureq = { version = "2", optional = true }
+# Optional: pull in the L8 habitat wiring crate so the watch loop can push arc deltas.
+habitat-graph-habitat = { workspace = true, optional = true }
+
+[features]
+# Enable filesystem-change watching via the `notify` crate.
+watch = ["dep:notify"]
+# Enable HTTP fetching for `add <URL>` via `ureq`.
+live = ["dep:ureq"]
+# Enable delta-push to PV2/:8132 + POVM/:8125 after each watch rebuild.
+# Activates the habitat L8 crate with its `live-bridges` sub-feature (ureq + backend/net).
+live-bridges = ["dep:habitat-graph-habitat", "habitat-graph-habitat/live-bridges"]
 
 [dev-dependencies]
 tempfile = "3"

@@ -12,7 +12,7 @@
 //! [`SphereRegistrar`] is the boundary trait that decouples the community→sphere mapping from
 //! its transport. [`RecordingRegistrar`] is the thread-safe in-memory double for tests (no
 //! network, no I/O). The concrete live HTTP adapter ([`HttpRegistrar`]) lives behind
-//! `#[cfg(feature = "live")]` and POSTs JSON to the PV2 Kuramoto sphere endpoint at
+//! `#[cfg(feature = "live-bridges")]` and POSTs JSON to the PV2 Kuramoto sphere endpoint at
 //! `http://localhost:8132`.
 //!
 //! [`CommunityId`]: habitat_graph_core::CommunityId
@@ -190,7 +190,7 @@ pub fn register_all<R: SphereRegistrar>(r: &R, communities: &[Community]) -> Res
 // ─── Live adapter (feature = "live") ─────────────────────────────────────────
 
 /// Default base URL for the PV2 Kuramoto sphere HTTP API.
-#[cfg(feature = "live")]
+#[cfg(feature = "live-bridges")]
 const PV2_BASE_URL: &str = "http://localhost:8132";
 
 /// HTTP registrar that POSTs sphere registration payloads to the PV2 Kuramoto endpoint.
@@ -206,12 +206,12 @@ const PV2_BASE_URL: &str = "http://localhost:8132";
 ///
 /// Use [`HttpRegistrar::new`] for the default PV2 instance (`http://localhost:8132`) or
 /// [`HttpRegistrar::with_base_url`] for staging and integration-test environments.
-#[cfg(feature = "live")]
+#[cfg(feature = "live-bridges")]
 pub struct HttpRegistrar {
     base_url: String,
 }
 
-#[cfg(feature = "live")]
+#[cfg(feature = "live-bridges")]
 impl HttpRegistrar {
     /// Creates an [`HttpRegistrar`] targeting the default PV2 endpoint (`http://localhost:8132`).
     #[must_use]
@@ -237,14 +237,14 @@ impl HttpRegistrar {
     }
 }
 
-#[cfg(feature = "live")]
+#[cfg(feature = "live-bridges")]
 impl Default for HttpRegistrar {
     fn default() -> Self {
         Self::new()
     }
 }
 
-#[cfg(feature = "live")]
+#[cfg(feature = "live-bridges")]
 impl SphereRegistrar for HttpRegistrar {
     fn register(&self, reg: &SphereRegistration) -> Result<()> {
         let body = serde_json::json!({
@@ -802,7 +802,7 @@ mod tests {
     // without making any network connections.
 
     /// `HttpRegistrar::new()` must target the canonical PV2 spheres endpoint.
-    #[cfg(feature = "live")]
+    #[cfg(feature = "live-bridges")]
     #[test]
     fn http_registrar_new_has_default_endpoint() {
         let r = super::HttpRegistrar::new();
@@ -813,7 +813,7 @@ mod tests {
     }
 
     /// `HttpRegistrar::with_base_url` must override the base URL used in `endpoint_url()`.
-    #[cfg(feature = "live")]
+    #[cfg(feature = "live-bridges")]
     #[test]
     fn http_registrar_with_base_url_builds_custom_endpoint() {
         let r = super::HttpRegistrar::with_base_url("http://staging:9132");
@@ -824,7 +824,7 @@ mod tests {
     }
 
     /// `default()` and `new()` must produce the same endpoint.
-    #[cfg(feature = "live")]
+    #[cfg(feature = "live-bridges")]
     #[test]
     fn http_registrar_default_eq_new_endpoint() {
         let via_new = super::HttpRegistrar::new();
@@ -837,7 +837,7 @@ mod tests {
     }
 
     /// `HttpRegistrar` must be `Send + Sync` for concurrent sphere registration.
-    #[cfg(feature = "live")]
+    #[cfg(feature = "live-bridges")]
     #[test]
     fn http_registrar_is_send_sync() {
         fn assert_send_sync<T: Send + Sync>() {}
@@ -845,7 +845,7 @@ mod tests {
     }
 
     /// The endpoint URL always ends with `/api/spheres/register`.
-    #[cfg(feature = "live")]
+    #[cfg(feature = "live-bridges")]
     #[test]
     fn http_registrar_endpoint_url_always_ends_with_register_path() {
         let r = super::HttpRegistrar::with_base_url("http://any-host:1234");

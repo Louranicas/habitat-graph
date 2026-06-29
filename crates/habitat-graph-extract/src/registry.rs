@@ -42,6 +42,22 @@ pub fn registered_extractors() -> Vec<Box<dyn Extractor>> {
     extractors.push(Box::new(crate::ast::go::GoExtractor));
     #[cfg(feature = "text")]
     extractors.push(Box::new(crate::ast::text::TextExtractor));
+    #[cfg(feature = "c")]
+    extractors.push(Box::new(crate::ast::c::CExtractor));
+    #[cfg(feature = "cpp")]
+    extractors.push(Box::new(crate::ast::cpp::CppExtractor));
+    #[cfg(feature = "java")]
+    extractors.push(Box::new(crate::ast::java::JavaExtractor));
+    #[cfg(feature = "ruby")]
+    extractors.push(Box::new(crate::ast::ruby::RubyExtractor));
+    #[cfg(feature = "scala")]
+    extractors.push(Box::new(crate::ast::scala::ScalaExtractor));
+    #[cfg(feature = "csharp")]
+    extractors.push(Box::new(crate::ast::csharp::CsharpExtractor));
+    #[cfg(feature = "kotlin")]
+    extractors.push(Box::new(crate::ast::kotlin::KotlinExtractor));
+    #[cfg(feature = "php")]
+    extractors.push(Box::new(crate::ast::php::PhpExtractor));
     extractors
 }
 

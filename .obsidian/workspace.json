@@ -1,0 +1,220 @@
+{
+  "main": {
+    "id": "239a8085afed9297",
+    "type": "split",
+    "children": [
+      {
+        "id": "d0a2b28aa73486d7",
+        "type": "tabs",
+        "children": [
+          {
+            "id": "cccb8cbc5eadf2d7",
+            "type": "leaf",
+            "state": {
+              "type": "empty",
+              "state": {},
+              "icon": "lucide-file",
+              "title": "New tab"
+            }
+          }
+        ]
+      }
+    ],
+    "direction": "vertical"
+  },
+  "left": {
+    "id": "0483492c41b431d1",
+    "type": "split",
+    "children": [
+      {
+        "id": "5a82f499350a7993",
+        "type": "tabs",
+        "children": [
+          {
+            "id": "7ba1337bc5535d53",
+            "type": "leaf",
+            "state": {
+              "type": "file-explorer",
+              "state": {
+                "sortOrder": "alphabetical",
+                "autoReveal": false
+              },
+              "icon": "lucide-folder-closed",
+              "title": "Files"
+            }
+          },
+          {
+            "id": "bdd20f71557decc7",
+            "type": "leaf",
+            "state": {
+              "type": "search",
+              "state": {
+                "query": "",
+                "matchingCase": false,
+                "explainSearch": false,
+                "collapseAll": false,
+                "extraContext": false,
+                "sortOrder": "alphabetical"
+              },
+              "icon": "lucide-search",
+              "title": "Search"
+            }
+          },
+          {
+            "id": "ecdff8bf1758a280",
+            "type": "leaf",
+            "state": {
+              "type": "bookmarks",
+              "state": {},
+              "icon": "lucide-bookmark",
+              "title": "Bookmarks"
+            }
+          }
+        ]
+      }
+    ],
+    "direction": "horizontal",
+    "width": 300
+  },
+  "right": {
+    "id": "6dc257c0b3606fb9",
+    "type": "split",
+    "children": [
+      {
+        "id": "6e0a38587f2da92b",
+        "type": "tabs",
+        "children": [
+          {
+            "id": "044ef9c3f791c329",
+            "type": "leaf",
+            "state": {
+              "type": "backlink",
+              "state": {
+                "file": "CLAUDE.md",
+                "collapseAll": false,
+                "extraContext": false,
+                "sortOrder": "alphabetical",
+                "showSearch": false,
+                "searchQuery": "",
+                "backlinkCollapsed": false,
+                "unlinkedCollapsed": true
+              },
+              "icon": "links-coming-in",
+              "title": "Backlinks for CLAUDE"
+            }
+          },
+          {
+            "id": "7d5041666a9324dc",
+            "type": "leaf",
+            "state": {
+              "type": "outgoing-link",
+              "state": {
+                "file": "CLAUDE.md",
+                "linksCollapsed": false,
+                "unlinkedCollapsed": true
+              },
+              "icon": "links-going-out",
+              "title": "Outgoing links from CLAUDE"
+            }
+          },
+          {
+            "id": "b324b5d6030129ab",
+            "type": "leaf",
+            "state": {
+              "type": "tag",
+              "state": {
+                "sortOrder": "frequency",
+                "useHierarchy": true,
+                "showSearch": false,
+                "searchQuery": ""
+              },
+              "icon": "lucide-tags",
+              "title": "Tags"
+            }
+          },
+          {
+            "id": "87216e78a0fbc1e3",
+            "type": "leaf",
+            "state": {
+              "type": "all-properties",
+              "state": {
+                "sortOrder": "frequency",
+                "showSearch": false,
+                "searchQuery": ""
+              },
+              "icon": "lucide-archive",
+              "title": "All properties"
+            }
+          },
+          {
+            "id": "3e89a3c73a799284",
+            "type": "leaf",
+            "state": {
+              "type": "outline",
+              "state": {
+                "file": "CLAUDE.md",
+                "followCursor": false,
+                "showSearch": false,
+                "searchQuery": ""
+              },
+              "icon": "lucide-list",
+              "title": "Outline of CLAUDE"
+            }
+          }
+        ]
+      }
+    ],
+    "direction": "horizontal",
+    "width": 300,
+    "collapsed": true
+  },
+  "left-ribbon": {
+    "hiddenItems": {
+      "switcher:Open quick switcher": false,
+      "graph:Open graph view": false,
+      "canvas:Create new canvas": false,
+      "daily-notes:Open today's daily note": false,
+      "templates:Insert template": false,
+      "command-palette:Open command palette": false,
+      "bases:Create new base": false
+    }
+  },
+  "active": "cccb8cbc5eadf2d7",
+  "lastOpenFiles": [
+    "habitat-graph.vault/The 7 Most Powerful Use Cases of habitat-graph.md",
+    "target/release/deps/habitat_graph_extract-ff8cf598bd95014d",
+    "target/release/deps/rustcYvyUZb/libtempfile-76af6c24b3b86fd5.rlib",
+    "target/release/deps/rustcYvyUZb/libtree_sitter_language-2f631892533e29bb.rlib",
+    "target/release/deps/rustcYvyUZb/libregex_syntax-f80948997656d9f8.rlib",
+    "target/release/deps/rustcYvyUZb/libaho_corasick-2bd704e8b6c72ccf.rlib",
+    "target/release/deps/rustcYvyUZb/libregex_automata-c0132d04565d163e.rlib",
+    "target/release/deps/rustcYvyUZb/libregex-632c121211498d62.rlib",
+    "target/release/deps/rustcYvyUZb/libtree_sitter-27329e63abc3ac7b.rlib",
+    "target/release/deps/rustcYvyUZb/libtree_sitter_python-a8afcc181014e5ad.rlib",
+    "target/release/deps/rustcYvyUZb/libtree_sitter_rust-69d040914d4f446e.rlib",
+    "habitat-graph.vault/MOC.md",
+    "habitat-graph.vault/Leveraging Obsidian Graph View & Plugins.md",
+    "habitat-graph.vault/graphify Feature-Parity Plan.md",
+    "habitat-graph.vault/Discoveries, Learnings & Power Use-Cases (S1008796).md",
+    "habitat-graph.vault/Commands & graphify Comparison (S1008796).md",
+    "runbooks/V3_LIVE_ORGAN_RUNBOOK_S1008901.md",
+    "runbooks/PARITY_RUNBOOK.md",
+    "runbooks/MIGRATION_RUNBOOK.md",
+    "runbooks/INCIDENT_RUNBOOK.md",
+    "runbooks/DEPLOY_RUNBOOK.md",
+    "runbooks/COMMANDS.md",
+    "CLAUDE.md",
+    "EVIDENCE.md",
+    "README.md",
+    "ULTRAMAP.md",
+    "EXECUTIVE_SUMMARY.md",
+    "fixtures/worked/js/GRAPH_REPORT.md",
+    "fixtures/worked/ts/GRAPH_REPORT.md",
+    "ai_docs/13_DIAGNOSTICS_AND_OBSERVABILITY_S1008796.md",
+    "ai_docs/12_LLM_FRIENDLY_API_AND_UDS_S1008796.md",
+    "ai_docs/11_ARCHITECTURE_SCHEMATICS_S1008796.md",
+    "ai_docs/10_PLAN_V2_AGENT_FIRST_S1008796.md",
+    "ai_docs/09_PARITY_PLAN_GAP_ANALYSIS_S1008796.md",
+    "ai_docs/08_GRAPHIFY_PARITY_PLAN_S1008796.md"
+  ]
+}

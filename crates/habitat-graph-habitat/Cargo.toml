@@ -23,5 +23,15 @@ ureq = { version = "2", optional = true }
 
 [features]
 default = []
-# Concrete live adapters: rusqlite → injection.db, ureq → PV2/TIERWRIGHT/cc-health HTTP.
-live = ["dep:rusqlite", "dep:ureq", "habitat-graph-backend/net"]
+# Fine-grained live adapters — all OFF by default (fail-closed) so the OSS build stays
+# network-free and dep-light.  Select exactly the subsystems you need:
+#
+#   live-memory   = rusqlite  → injection.db causal-chains + POVM pathway writes
+#   live-bridges  = ureq + backend/net → PV2 (:8132) + POVM (:8125) HTTP pushes
+#   live-semantic = backend/net → TIERWRIGHT (:8201) LLM semantic-extraction HTTP
+#
+# `live` is a backward-compat alias that enables all three at once.
+live-memory  = ["dep:rusqlite"]
+live-bridges = ["dep:ureq", "habitat-graph-backend/net"]
+live-semantic = ["habitat-graph-backend/net"]
+live = ["live-memory", "live-bridges", "live-semantic"]

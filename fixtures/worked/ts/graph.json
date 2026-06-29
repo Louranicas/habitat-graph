@@ -1,0 +1,9 @@
+{
+  "directed": true,
+  "graph": {
+    "schema_version": "habitat-graph.graph.v0"
+  },
+  "links": [],
+  "multigraph": false,
+  "nodes": []
+}

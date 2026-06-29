@@ -1,0 +1,42 @@
+{
+  "directed": true,
+  "multigraph": false,
+  "graph": {},
+  "nodes": [
+    {"id": "sample",             "label": "sample.go",            "file_type": "code"},
+    {"id": "sample_animal",      "label": "Animal",               "file_type": "code"},
+    {"id": "sample_cat",         "label": "Cat",                  "file_type": "code"},
+    {"id": "sample_cat_name",    "label": "Cat.Name",             "file_type": "code"},
+    {"id": "sample_cat_sound",   "label": "Cat.Sound",            "file_type": "code"},
+    {"id": "sample_dog",         "label": "Dog",                  "file_type": "code"},
+    {"id": "sample_dog_name",    "label": "Dog.Name",             "file_type": "code"},
+    {"id": "sample_dog_setage",  "label": "Dog.SetAge",           "file_type": "code"},
+    {"id": "sample_dog_sound",   "label": "Dog.Sound",            "file_type": "code"},
+    {"id": "sample_main",        "label": "main",                 "file_type": "code"},
+    {"id": "sample_makesound",   "label": "MakeSound",            "file_type": "code"},
+    {"id": "sample_newcat",      "label": "NewCat",               "file_type": "code"},
+    {"id": "sample_newdog",      "label": "NewDog",               "file_type": "code"},
+    {"id": "sample_newserver",   "label": "NewServer",            "file_type": "code"},
+    {"id": "sample_server",      "label": "Server",               "file_type": "code"},
+    {"id": "sample_server_start","label": "Server.Start",         "file_type": "code"},
+    {"id": "sample_server_stop", "label": "Server.Stop",          "file_type": "code"}
+  ],
+  "links": [
+    {"source": "sample",        "target": "sample_animal",       "relation": "contains"},
+    {"source": "sample",        "target": "sample_cat",          "relation": "contains"},
+    {"source": "sample",        "target": "sample_dog",          "relation": "contains"},
+    {"source": "sample",        "target": "sample_main",         "relation": "contains"},
+    {"source": "sample",        "target": "sample_makesound",    "relation": "contains"},
+    {"source": "sample",        "target": "sample_newcat",       "relation": "contains"},
+    {"source": "sample",        "target": "sample_newdog",       "relation": "contains"},
+    {"source": "sample",        "target": "sample_newserver",    "relation": "contains"},
+    {"source": "sample",        "target": "sample_server",       "relation": "contains"},
+    {"source": "sample_cat",    "target": "sample_cat_name",     "relation": "method"},
+    {"source": "sample_cat",    "target": "sample_cat_sound",    "relation": "method"},
+    {"source": "sample_dog",    "target": "sample_dog_name",     "relation": "method"},
+    {"source": "sample_dog",    "target": "sample_dog_setage",   "relation": "method"},
+    {"source": "sample_dog",    "target": "sample_dog_sound",    "relation": "method"},
+    {"source": "sample_server", "target": "sample_server_start", "relation": "method"},
+    {"source": "sample_server", "target": "sample_server_stop",  "relation": "method"}
+  ]
+}

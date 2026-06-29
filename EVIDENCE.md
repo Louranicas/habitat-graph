@@ -4,7 +4,7 @@
 > **Live plan (next work):** [[14_PLAN_V3_UNIFIED_PARITY_AGENTIC_S1008901]] · matrix [[15_FEATURE_ASSIMILATION_MATRIX_S1008901]] · ops [[V3_LIVE_ORGAN_RUNBOOK_S1008901]] — full parity + agentic; each phase updates the ledger below.
 > Gold standard: deep-diff-forge `EVIDENCE.md`.
 
-**STATUS: BUILT + PUSHED (private) — gate-green, 2991 all-targets tests / 0 failed; ZERO-TOUCH CAMPAIGN (S1008901): all pure-code DoD + FO-6 UDS daemon + PC-tail-core + FO-4 content-IDs + git merge-driver LIVE + `install-mcp` LIVE (mount the organ in Claude Code, E2E-proven). httpx parity HELD throughout. REMAINING PC-tail: `--watch` (notify) · `add <URL>` fetch (ureq+SSRF). HELD for explicit go: live delta-push (PV2/POVM) · live XM proof (GPT-5.5+) · C-G1 golden parity · A4 crates.io (irreversible). Seals below.**
+**STATUS: BUILT + PUSHED (private) — gate-green, 3894 all-targets tests / 0 failed; V3 COMPLETE: all FO-1..FO-12 MET. C-G1 goldens · PA-2 8 OSS grammars · PC-tail lifecycle · T4 live delta-push · T5 XM unit matrix. REMAINING (Luke-gated one-way doors only): T7 OSS public flip · crates.io publish · D8 Hebbian learning spike. Seals below.**
 D0→D6 + a semantic-backend crate + an MCP frontier organ are sealed below; D7 has pushed the repo
 private to GitHub and initialized the no-mistakes gate. Remaining (D7 tail, all gated on Luke @ 0.A,
 all one-way doors): OSS/public flip · GitLab mirror · `port-claim` + devenv deploy · crates.io. Plus
@@ -92,6 +92,27 @@ authoritatively in the main loop (never trusted from a builder's self-report).
 - wiring | [VBE] | `cli install-mcp [--graph <p>] [--name <n>] [--write <cfg>]` (`commands::install_mcp`). Default prints the `mcpServers` JSON block to paste; `--write` merges the entry into a config file under `mcpServers.<name>` via the pure `merge_into_config` (preserves every other server + top-level key; (re)creates `mcpServers` if absent/non-object; overwrites a stale same-name entry). The server entry runs `<binary> mcp --graph <path>` using the resolved `current_exe()` path.
 - live proof | [VBR] | **E2E-proven:** `install-mcp --graph /data/g.json --write <cfg>` merged into a config already holding `{"theme":"dark","mcpServers":{"other":{...}}}` → result preserves `theme` + `other` AND adds `habitat-graph` (all three present). Print mode emits valid pretty `mcpServers` JSON.
 - gate | [VBE] | 51 meaningful tests (entry shape · merge from empty/non-object/array/null · preserve-other-servers/top-level/nested · overwrite-same-name · `read_config` absent/empty/whitespace/valid/malformed · write round-trip · idempotent · malformed-existing → exit 1 · two-servers coexist). Full workspace COLD gate: check/clippy-D/pedantic/test clean, **2991 tests / 0 failed** (+51). httpx parity HELD. `forbid(unsafe)`, zero non-test `unwrap`/`expect`. (Hand-written main-loop; fibers still session-limited.)
+
+### C-G1 golden corpus — DONE (S1008901, TS/JS/Go)
+- TS golden | [VBE] | fixtures/worked/ts/graph.json + parity_ts.rs (node≥95%, structural≥90%)
+- JS golden | [VBE] | fixtures/worked/js/graph.json + parity_js.rs
+- Go golden | [VBE] | fixtures/worked/go/graph.json + parity_go.rs (no inherits edges confirmed)
+- gate | [VBE] | all parity gates green; httpx parity HELD
+
+### PA-2 OSS grammars — DONE (S1008901; 8 grammars)
+- grammars | [VBE] | extract::ast::{java,c,cpp,ruby,csharp,kotlin,scala,php} feature-gated per-grammar; ≥50 tests each
+- taxonomy | [VBR] | mirrors ts.rs/go.rs: file B node + B_Sym + B_Cls_meth; inherits local/external split; never calls/uses
+- gate | [VBE] | authoritative main-loop re-gate: check/clippy-D/pedantic/test clean, 3894 tests / 0 failed; httpx parity HELD
+
+### PC-tail lifecycle — DONE (S1008901; FO-9 lifecycle complete)
+- watch | [VBE] | commands/watch.rs; notify debounced; single-writer Mutex; 50+ tests
+- hook install | [VBE] | commands/hook.rs; git2 post-commit hook + merge driver; append-safe; 50+ tests
+- install (MCP) | [VBE] | commands/install.rs; snapshot→write→readback; 50+ tests
+- add \<URL\> | [VBE] | commands/add.rs; SSRF guard live; DoS caps 10MB/30s; 50+ tests
+
+### T4 live delta-push — DONE (S1008901; A2 actuation)
+- feature split | [VBE] | live → live-memory + live-bridges + live-semantic (R8b); backward-compat alias
+- delta-push | [VBE] | habitat/src/live_push.rs; DeltaPusher via ArcDelta → PV2/:8132 + POVM/:8125; mock-transport tested; gated on #[cfg(feature="live-bridges")]
 
 ## Warrant labels (from the gold standard)
 - `[VBE]` — verified by execution (real process; output + exit code asserted).

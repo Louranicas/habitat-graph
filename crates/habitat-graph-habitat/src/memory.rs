@@ -247,12 +247,12 @@ pub fn persist_graph_summary<S: MemorySink>(
 ///     PRIMARY KEY (namespace, from_key, to_key)
 /// );
 /// ```
-#[cfg(feature = "live")]
+#[cfg(feature = "live-memory")]
 pub struct SqliteSink {
     conn: Mutex<rusqlite::Connection>,
 }
 
-#[cfg(feature = "live")]
+#[cfg(feature = "live-memory")]
 impl SqliteSink {
     /// Opens (or creates) `injection.db` at `db_path` and applies the DDL migrations.
     ///
@@ -285,7 +285,7 @@ impl SqliteSink {
     }
 }
 
-#[cfg(feature = "live")]
+#[cfg(feature = "live-memory")]
 impl MemorySink for SqliteSink {
     fn write_causal_chain(&self, row: &CausalChainRow) -> Result<()> {
         let guard = self
@@ -1098,21 +1098,21 @@ mod tests {
     // — no external service is required, no filesystem is touched.
     // -----------------------------------------------------------------------
 
-    #[cfg(feature = "live")]
+    #[cfg(feature = "live-memory")]
     fn in_memory_sqlite_sink() -> super::SqliteSink {
         super::SqliteSink::new(":memory:")
             .expect("bundled rusqlite must open an in-memory DB without I/O")
     }
 
     /// Opening an in-memory `SqliteSink` must succeed.
-    #[cfg(feature = "live")]
+    #[cfg(feature = "live-memory")]
     #[test]
     fn sqlite_sink_opens_in_memory_db() {
         let _ = in_memory_sqlite_sink();
     }
 
     /// Write then read back a causal chain row — full roundtrip must preserve every field.
-    #[cfg(feature = "live")]
+    #[cfg(feature = "live-memory")]
     #[test]
     fn sqlite_sink_write_and_read_back_roundtrip_preserves_all_fields() {
         let sink = in_memory_sqlite_sink();
@@ -1131,7 +1131,7 @@ mod tests {
     }
 
     /// Reading a label that was never written must return `None` (not an error).
-    #[cfg(feature = "live")]
+    #[cfg(feature = "live-memory")]
     #[test]
     fn sqlite_sink_read_back_none_for_missing_label() {
         let sink = in_memory_sqlite_sink();
@@ -1140,7 +1140,7 @@ mod tests {
     }
 
     /// Writing the same label twice must honour last-write-wins (INSERT OR REPLACE).
-    #[cfg(feature = "live")]
+    #[cfg(feature = "live-memory")]
     #[test]
     fn sqlite_sink_overwrite_same_label_last_write_wins() {
         let sink = in_memory_sqlite_sink();
@@ -1166,7 +1166,7 @@ mod tests {
     }
 
     /// `write_pathway` must succeed for a basic `PovmPathway`.
-    #[cfg(feature = "live")]
+    #[cfg(feature = "live-memory")]
     #[test]
     fn sqlite_sink_write_pathway_succeeds() {
         let sink = in_memory_sqlite_sink();
@@ -1180,7 +1180,7 @@ mod tests {
     }
 
     /// `persist_graph_summary` over a real `SqliteSink` must complete the no-risk-write roundtrip.
-    #[cfg(feature = "live")]
+    #[cfg(feature = "live-memory")]
     #[test]
     fn sqlite_sink_persist_graph_summary_roundtrip() {
         let sink = in_memory_sqlite_sink();
@@ -1206,7 +1206,7 @@ mod tests {
     }
 
     /// The no-risk-write verification path: every field read back from `SQLite` must match written.
-    #[cfg(feature = "live")]
+    #[cfg(feature = "live-memory")]
     #[test]
     fn sqlite_sink_no_risk_write_verification_passes() {
         let sink = in_memory_sqlite_sink();
@@ -1229,7 +1229,7 @@ mod tests {
     }
 
     /// `SqliteSink` must be `Send + Sync` so it can be used across threads.
-    #[cfg(feature = "live")]
+    #[cfg(feature = "live-memory")]
     #[test]
     fn sqlite_sink_is_send_sync() {
         fn assert_send_sync<T: Send + Sync>() {}

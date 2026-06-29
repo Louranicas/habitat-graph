@@ -22,6 +22,8 @@
 pub mod arc_graph;
 pub mod arc_telemetry;
 pub mod bridge;
+#[cfg(feature = "live-bridges")]
+pub mod live_push;
 pub mod memory;
 pub mod obsidian_protocol;
 pub mod orchestrator_pipe;

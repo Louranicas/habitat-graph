@@ -109,10 +109,60 @@ enum Command {
         #[arg(long)]
         write: Option<PathBuf>,
     },
+    /// Auto-discover the Claude MCP config and register habitat-graph (snapshot-write-readback safe).
+    Install {
+        /// Path to the `graph.json` the MCP server should serve.
+        #[arg(long, default_value = "graphify-out/graph.json")]
+        graph: PathBuf,
+        /// Print what would be written without touching disk.
+        #[arg(long)]
+        dry_run: bool,
+        /// Override the config path instead of auto-discovering it.
+        #[arg(long)]
+        config_path: Option<PathBuf>,
+    },
+    /// Install git lifecycle hooks (post-commit rebuild and/or merge driver).
+    Hook {
+        #[command(subcommand)]
+        action: HookAction,
+    },
+    /// Watch source files for changes and rebuild the graph automatically (requires --features watch).
+    Watch {
+        /// Root directory to watch.
+        dir: PathBuf,
+        /// Output directory for `graph.json`.
+        #[arg(long, default_value = commands::watch::DEFAULT_OUT)]
+        out: PathBuf,
+    },
+    /// Fetch a remote source file and merge it into the graph (requires --features live).
+    Add {
+        /// URL to fetch.  Must be `http://` or `https://` and must not target private/internal IPs.
+        url: String,
+        /// Output `graph.json` to merge the new nodes into.
+        #[arg(long, default_value = "graphify-out/graph.json")]
+        out: PathBuf,
+    },
     /// Exercise the engine on a tiny in-memory corpus (no I/O).
     SelfTest,
     /// Print environment + wiring diagnostics.
     Doctor,
+}
+
+/// Sub-actions for the `hook` subcommand.
+#[derive(Subcommand, Debug)]
+pub enum HookAction {
+    /// Install a post-commit hook that regenerates the graph after every commit.
+    Install {
+        /// Directory to start the git repo search from.
+        #[arg(long, default_value = ".")]
+        dir: PathBuf,
+    },
+    /// Register the habitat-graph merge driver in `.git/config` and `.gitattributes`.
+    InstallMergeDriver {
+        /// Directory to start the git repo search from.
+        #[arg(long, default_value = ".")]
+        dir: PathBuf,
+    },
 }
 
 impl Cli {
@@ -154,6 +204,19 @@ impl Cli {
             Command::InstallMcp { graph, name, write } => {
                 commands::install_mcp::run(&graph, &name, write.as_deref())
             }
+            Command::Install {
+                graph,
+                dry_run,
+                config_path,
+            } => commands::install::run(&graph, config_path.as_deref(), dry_run),
+            Command::Hook { action } => match action {
+                HookAction::Install { dir } => commands::hook::run_install(&dir),
+                HookAction::InstallMergeDriver { dir } => {
+                    commands::hook::run_install_merge_driver(&dir)
+                }
+            },
+            Command::Watch { dir, out } => commands::watch::run(&dir, &out),
+            Command::Add { url, out } => commands::add::run(&url, &out),
             Command::SelfTest => commands::meta::self_test(),
             Command::Doctor => commands::meta::doctor(),
         }

@@ -10,14 +10,11 @@
 
 [advisories]
 version = 2
-# Hard-deny known CVEs; warn on unmaintained/yanked/notices so the gate stays
-# informative without blocking day-to-day dev on transitive unmaintained crates.
-vulnerability = "deny"
-unmaintained  = "warn"
-yanked        = "warn"
-notice        = "warn"
-# Add RUSTSEC-YYYY-NNNN entries here only when the advisory is confirmed
-# irrelevant to this workspace (with a comment explaining why).
+# v2 schema: vulnerability key removed (CVEs always denied); unmaintained is a
+# scope selector; yanked is a lint level. Add RUSTSEC-YYYY-NNNN to ignore[]
+# only when the advisory is confirmed irrelevant to this workspace.
+unmaintained  = "all"
+yanked        = "deny"
 ignore = []
 
 [licenses]
@@ -32,10 +29,9 @@ allow = [
     "BSD-2-Clause",
     "BSD-3-Clause",
     "ISC",
-    "Unicode-DFS-2016",
+    "Unicode-3.0",
     "Zlib",
     "CC0-1.0",
-    "OpenSSL",
 ]
 # Minimum confidence that a detected licence matches the declared SPDX expression.
 confidence-threshold = 0.8
@@ -45,8 +41,9 @@ exceptions = []
 # Warn (not deny) on duplicate major versions during the migration phase.
 # Promote to "deny" once the dep tree is stable.
 multiple-versions = "warn"
-# Wildcard deps ("*") are sloppy and must be explicit.
-wildcards = "deny"
+# Workspace path-deps carry version="*" which is standard; warn rather than
+# deny so internal crate references don't block the gate.
+wildcards = "warn"
 highlight  = "all"
 deny       = []
 skip       = []

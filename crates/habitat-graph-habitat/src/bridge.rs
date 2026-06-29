@@ -3,7 +3,7 @@
 //! This module implements the [`ServiceProbe`] boundary trait plus the in-memory test double
 //! [`StaticProbe`] so the whole crate can be built and gated without touching any live service.
 //! The concrete [`HttpProbe`] (plain HTTP GET + 200 check) lives behind
-//! `#[cfg(feature = "live")]` and requires the `ureq` crate.
+//! `#[cfg(feature = "live-bridges")]` and requires the `ureq` crate.
 //!
 //! ## Path-map special case — Maintenance Engine
 //!
@@ -193,20 +193,20 @@ pub fn default_factory_endpoints() -> Vec<ServiceEndpoint> {
 /// Requires the `live` feature (which activates `ureq`). Never panics: transport errors and
 /// non-200 responses both produce unhealthy [`HealthReport`]s with descriptive `detail` text,
 /// always sanitised through [`display_safe`] before storage.
-#[cfg(feature = "live")]
+#[cfg(feature = "live-bridges")]
 #[derive(Debug, Clone)]
 pub struct HttpProbe {
     timeout_secs: u64,
 }
 
-#[cfg(feature = "live")]
+#[cfg(feature = "live-bridges")]
 impl Default for HttpProbe {
     fn default() -> Self {
         Self { timeout_secs: 5 }
     }
 }
 
-#[cfg(feature = "live")]
+#[cfg(feature = "live-bridges")]
 impl HttpProbe {
     /// Creates an `HttpProbe` with the default 5-second per-request timeout.
     #[must_use]
@@ -221,7 +221,7 @@ impl HttpProbe {
     }
 }
 
-#[cfg(feature = "live")]
+#[cfg(feature = "live-bridges")]
 impl ServiceProbe for HttpProbe {
     /// GETs `endpoint.url`; HTTP 200 → healthy, any other status or transport error → unhealthy.
     ///
@@ -844,14 +844,14 @@ mod tests {
     // any network connections.
 
     /// `HttpProbe::new()` must construct without panicking.
-    #[cfg(feature = "live")]
+    #[cfg(feature = "live-bridges")]
     #[test]
     fn http_probe_new_constructs_ok() {
         let _ = super::HttpProbe::new();
     }
 
     /// `HttpProbe::default()` and `HttpProbe::new()` must produce the same configuration.
-    #[cfg(feature = "live")]
+    #[cfg(feature = "live-bridges")]
     #[test]
     fn http_probe_default_same_debug_as_new() {
         let via_new = super::HttpProbe::new();
@@ -865,7 +865,7 @@ mod tests {
     }
 
     /// The default timeout is 5 seconds — visible in the Debug representation.
-    #[cfg(feature = "live")]
+    #[cfg(feature = "live-bridges")]
     #[test]
     fn http_probe_default_timeout_is_five_seconds() {
         let p = super::HttpProbe::new();
@@ -877,7 +877,7 @@ mod tests {
     }
 
     /// A custom timeout must be reflected in the Debug representation.
-    #[cfg(feature = "live")]
+    #[cfg(feature = "live-bridges")]
     #[test]
     fn http_probe_with_timeout_secs_reflects_in_debug() {
         let p = super::HttpProbe::with_timeout_secs(30);
@@ -889,7 +889,7 @@ mod tests {
     }
 
     /// `HttpProbe` must be `Send + Sync` — it crosses thread boundaries in multi-probe scenarios.
-    #[cfg(feature = "live")]
+    #[cfg(feature = "live-bridges")]
     #[test]
     fn http_probe_is_send_sync() {
         fn assert_send_sync<T: Send + Sync>() {}
@@ -897,7 +897,7 @@ mod tests {
     }
 
     /// `HttpProbe` must be `Clone` so callers can share a template probe.
-    #[cfg(feature = "live")]
+    #[cfg(feature = "live-bridges")]
     #[test]
     fn http_probe_is_clone() {
         let original = super::HttpProbe::new();

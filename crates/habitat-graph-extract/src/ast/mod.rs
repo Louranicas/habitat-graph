@@ -7,7 +7,20 @@
 pub mod python;
 pub mod rust;
 
-#[cfg(any(feature = "ts", feature = "js", feature = "go", feature = "text"))]
+#[cfg(any(
+    feature = "ts",
+    feature = "js",
+    feature = "go",
+    feature = "text",
+    feature = "java",
+    feature = "ruby",
+    feature = "c",
+    feature = "cpp",
+    feature = "scala",
+    feature = "csharp",
+    feature = "kotlin",
+    feature = "php"
+))]
 pub mod util;
 
 #[cfg(feature = "ts")]
@@ -21,3 +34,27 @@ pub mod go;
 
 #[cfg(feature = "text")]
 pub mod text;
+
+#[cfg(feature = "c")]
+pub mod c;
+
+#[cfg(feature = "cpp")]
+pub mod cpp;
+
+#[cfg(feature = "java")]
+pub mod java;
+
+#[cfg(feature = "ruby")]
+pub mod ruby;
+
+#[cfg(feature = "scala")]
+pub mod scala;
+
+#[cfg(feature = "csharp")]
+pub mod csharp;
+
+#[cfg(feature = "kotlin")]
+pub mod kotlin;
+
+#[cfg(feature = "php")]
+pub mod php;
