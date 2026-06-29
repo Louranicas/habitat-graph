@@ -82,6 +82,21 @@ enum Command {
         #[arg(long, default_value = "graphify-out/graph.json")]
         graph: PathBuf,
     },
+    /// Git merge driver for `graph.json` (invoked by git as `merge-driver %O %A %B`).
+    MergeDriver {
+        /// Base (`%O`) — the merge ancestor `graph.json`.
+        base: PathBuf,
+        /// Ours (`%A`) — our `graph.json`; the deterministic merge is written back here.
+        ours: PathBuf,
+        /// Theirs (`%B`) — the other side's `graph.json`.
+        theirs: PathBuf,
+    },
+    /// Register the deterministic `graph.json` merge driver in a repository.
+    InstallMergeDriver {
+        /// Repository root to install into (writes `.gitattributes`).
+        #[arg(long, default_value = ".")]
+        repo: PathBuf,
+    },
     /// Exercise the engine on a tiny in-memory corpus (no I/O).
     SelfTest,
     /// Print environment + wiring diagnostics.
@@ -120,6 +135,10 @@ impl Cli {
             Command::Path { from, to, graph } => commands::query::run_path(&graph, &from, &to),
             Command::Serve { graph, addr } => commands::serve::run(&graph, &addr),
             Command::Mcp { graph } => commands::mcp::run(&graph),
+            Command::MergeDriver { base, ours, theirs } => {
+                commands::merge_driver::run_merge_driver(&base, &ours, &theirs)
+            }
+            Command::InstallMergeDriver { repo } => commands::merge_driver::install(&repo),
             Command::SelfTest => commands::meta::self_test(),
             Command::Doctor => commands::meta::doctor(),
         }

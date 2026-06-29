@@ -2,6 +2,7 @@
 
 pub mod extract;
 pub mod mcp;
+pub mod merge_driver;
 pub mod meta;
 pub mod query;
 pub mod serve;
