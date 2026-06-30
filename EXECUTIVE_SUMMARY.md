@@ -3,7 +3,12 @@
 
 # habitat-graph — Executive Summary (S1008796)
 
-**STATUS: PLANNING ONLY.** No code, no `cargo init`, no `devenv` entry, no arming key. This is the
+> **STATUS (2026-06-30, S1009104): SUPERSEDED — V3 BUILT + COMPLETE.** The "planning only" text below is the
+> original S1008796 framing, kept for history. The codebase is built and gate-green: 13 crates, **3894 tests / 0
+> failed**, all FO-1..FO-12 met, pushed to GitHub + GitLab. See [`README.md`](README.md) and [`EVIDENCE.md`](EVIDENCE.md)
+> for the authoritative current state. Remaining items are publication/learning one-way doors only.
+
+**STATUS (original, S1008796): PLANNING ONLY.** No code, no `cargo init`, no `devenv` entry, no arming key. This is the
 hub of a 13-file design corpus for refactoring [`safishamsi/graphify`](https://github.com/safishamsi/graphify)
 (Python) into a Rust factory organ.
 
