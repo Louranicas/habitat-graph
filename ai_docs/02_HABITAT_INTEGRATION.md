@@ -36,7 +36,7 @@ The graph becomes a **learning** substrate, not a static snapshot:
 
 ## 3. Orchestrator kernel plugin (the strategic wire)
 
-The orchestrator plugin (`zellij-habitat-orchestrator-plugin` v0.1.2, WASM) decomposes missions;
+The orchestrator plugin (`zellij-habitat-orchestrator-plugin` v0.1.3, WASM) decomposes missions;
 that is fundamentally a subgraph query. habitat-graph becomes its **map oracle**.
 
 - **Transport:** the existing pipe protocol — `cc-pipe nexus -- habitat-graph query "<scope>"`.
