@@ -5,7 +5,9 @@
 //!
 //! Every URL is validated by [`habitat_graph_source::ssrf::is_safe_url`] before a network
 //! connection is attempted. Blocked categories: loopback, private, link-local, CGNAT, unspecified,
-//! non-`http`/`https` schemes.
+//! non-`http`/`https` schemes. HTTP redirects are never followed (`redirects(0)`, any `3xx`
+//! response is rejected) so a remote server cannot bypass the guard by 302-ing the fetch to an
+//! address the original URL's host check never saw.
 //!
 //! # `DoS` caps
 //!
@@ -89,9 +91,14 @@ pub fn infer_extension(url: &str) -> String {
 
 /// Fetches `url` and returns its body bytes, capped at [`MAX_CONTENT_BYTES`].
 ///
+/// Redirects are never followed: the [`is_safe_url`] check only validates the *original* URL, so
+/// transparently following a `3xx` response could route the request to an attacker-chosen host
+/// (including loopback / link-local / cloud-metadata addresses) that the SSRF guard never saw.
+///
 /// # Errors
 ///
-/// - [`GraphError::Guard`] when the URL fails the SSRF check or the body exceeds the size cap.
+/// - [`GraphError::Guard`] when the URL fails the SSRF check, the server responds with a redirect
+///   (`3xx`), or the body exceeds the size cap.
 /// - [`GraphError::Io`] on network / read failure.
 /// - Returns a build-time error message when compiled without `--features live`.
 #[cfg(feature = "live")]
@@ -100,10 +107,21 @@ pub fn fetch_bytes(url: &str) -> Result<Vec<u8>> {
 
     let response = ureq::AgentBuilder::new()
         .timeout(FETCH_TIMEOUT)
+        // Never auto-follow redirects: a 3xx hop is not covered by the SSRF check above, which
+        // only validates `url` itself. With `redirects(0)`, ureq returns the 3xx response as-is
+        // instead of transparently chasing `Location`, so we can reject it below.
+        .redirects(0)
         .build()
         .get(url)
         .call()
         .map_err(|e| GraphError::Guard(format!("fetch {url:?}: {e}")))?;
+
+    if (300..400).contains(&response.status()) {
+        return Err(GraphError::Guard(format!(
+            "fetch {url:?}: refusing to follow redirect (status {})",
+            response.status()
+        )));
+    }
 
     // Use try_from to avoid any platform-specific truncation on 32-bit targets.
     let cap: u64 = u64::try_from(MAX_CONTENT_BYTES).unwrap_or(u64::MAX);
@@ -185,8 +203,10 @@ pub fn extract_from_bytes(bytes: &[u8], ext: &str) -> Result<habitat_graph_core:
 /// # Errors
 ///
 /// - [`GraphError::Io`] on read/write failure.
-/// - [`GraphError::Parse`] when the existing `out` is not valid node-link JSON.
-/// - [`GraphError::Schema`] on serialization failure.
+/// - [`GraphError::Schema`] when the existing `out` is not valid node-link JSON, or on
+///   serialization failure. A pre-existing `out` that fails to parse aborts the merge (the file
+///   is left untouched) instead of being silently treated as an empty graph — overwriting it
+///   would destroy any prior content that is not otherwise regenerable.
 pub fn merge_into_output(new_graph: habitat_graph_core::Graph, out: &Path) -> Result<()> {
     // Load existing graph (or start fresh).
     let prior = if out.exists() {
@@ -195,8 +215,12 @@ pub fn merge_into_output(new_graph: habitat_graph_core::Graph, out: &Path) -> Re
         if text.trim().is_empty() {
             habitat_graph_core::Graph::default()
         } else {
-            habitat_graph_serve::from_node_link(&text)
-                .unwrap_or_else(|_| habitat_graph_core::Graph::default())
+            // Propagate parse failures instead of swallowing them: an existing `out` that fails
+            // to parse must abort the merge (leaving the file untouched) rather than silently
+            // being treated as empty, which would overwrite — and destroy — the prior graph.
+            // This matches both this function's documented `# Errors` contract above and the
+            // git merge-driver's fail-closed handling of the same `from_node_link` call.
+            habitat_graph_serve::from_node_link(&text)?
         }
     } else {
         habitat_graph_core::Graph::default()
@@ -284,7 +308,11 @@ mod tests {
     use std::path::PathBuf;
     use std::sync::atomic::{AtomicU32, Ordering};
 
-    use habitat_graph_core::{Graph, GraphError};
+    use habitat_graph_core::Graph;
+    // Only the `#[cfg(not(feature = "live"))]` tests below match on `GraphError` variants; under
+    // `--features live` those tests are compiled out, so this import would otherwise be unused.
+    #[cfg(not(feature = "live"))]
+    use habitat_graph_core::GraphError;
 
     use super::{
         extract_from_bytes, fetch_bytes, infer_extension, merge_into_output, run,
@@ -473,6 +501,72 @@ mod tests {
         );
     }
 
+    // ── fetch_bytes: SSRF-via-redirect regression (S1009142) ─────────────────
+    // `is_safe_url` only validates the *original* URL; if the HTTP transport followed a 3xx
+    // redirect, an attacker-controlled public host could 302 the fetch to an internal address
+    // (loopback / RFC-1918 / link-local cloud metadata) that the guard never saw. fetch_bytes
+    // must refuse to follow redirects rather than chasing `Location` transparently.
+    #[cfg(feature = "live")]
+    mod redirect_guard {
+        use std::io::{BufRead, BufReader, Write as _};
+        use std::net::TcpListener;
+
+        use super::fetch_bytes;
+
+        /// Serves exactly one HTTP/1.1 response over an ephemeral loopback port, then exits.
+        ///
+        /// Returns the `http://127.0.0.1:<port>/` base URL; the server thread is detached (it
+        /// blocks on `accept()` forever if never contacted, which is harmless for a short-lived
+        /// test process).
+        fn spawn_one_shot_server(response: String) -> String {
+            let listener = TcpListener::bind("127.0.0.1:0").expect("bind ephemeral port");
+            let addr = listener.local_addr().expect("local_addr");
+            std::thread::spawn(move || {
+                if let Ok((stream, _)) = listener.accept() {
+                    let mut reader = BufReader::new(stream.try_clone().expect("clone stream"));
+                    let mut line = String::new();
+                    // Drain the request line + headers (best-effort; content is irrelevant).
+                    loop {
+                        line.clear();
+                        match reader.read_line(&mut line) {
+                            Ok(0) | Err(_) => break,
+                            Ok(_) if line == "\r\n" || line == "\n" => break,
+                            Ok(_) => {}
+                        }
+                    }
+                    let mut stream = reader.into_inner();
+                    let _ = stream.write_all(response.as_bytes());
+                    let _ = stream.flush();
+                }
+            });
+            format!("http://{addr}/")
+        }
+
+        #[test]
+        fn fetch_bytes_does_not_follow_redirect_to_internal_host() {
+            // An "internal" service that would leak its body if the redirect were followed.
+            let internal_url = spawn_one_shot_server(
+                "HTTP/1.1 200 OK\r\nContent-Length: 20\r\nConnection: close\r\n\r\nINTERNAL_SECRET_DATA"
+                    .to_owned(),
+            );
+            // A public-looking host that 302s straight to the internal service.
+            let redirector_url = spawn_one_shot_server(format!(
+                "HTTP/1.1 302 Found\r\nLocation: {internal_url}\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
+            ));
+
+            match fetch_bytes(&redirector_url) {
+                Err(e) => assert!(
+                    e.to_string().contains("redirect"),
+                    "expected a redirect-refusal error, got: {e}"
+                ),
+                Ok(bytes) => panic!(
+                    "fetch_bytes must not follow the redirect to an internal host; leaked body: {:?}",
+                    String::from_utf8_lossy(&bytes)
+                ),
+            }
+        }
+    }
+
     // ── extract_from_bytes ────────────────────────────────────────────────────
 
     #[test]
@@ -555,6 +649,30 @@ mod tests {
         let graph = Graph::default();
         merge_into_output(graph, &out).expect("merge");
         assert!(out.exists());
+    }
+
+    /// Regression for S1009142: a pre-existing `out` that is non-empty but not valid node-link
+    /// JSON must abort the merge with an error and leave the file untouched, rather than being
+    /// silently treated as an empty graph (which would overwrite — and destroy — its contents).
+    #[test]
+    fn merge_into_unparseable_existing_file_errors_and_preserves_file() {
+        let d = tdir();
+        let out = d.join("g.json");
+        let corrupt = "not valid node-link json{{{";
+        fs::write(&out, corrupt).expect("seed corrupt file");
+
+        let graph = Graph::default();
+        let result = merge_into_output(graph, &out);
+
+        assert!(
+            result.is_err(),
+            "merge over an unparseable existing graph.json must fail, not silently succeed"
+        );
+        let text_after = fs::read_to_string(&out).expect("read back");
+        assert_eq!(
+            text_after, corrupt,
+            "an unparseable graph.json must be left untouched on merge failure, not overwritten"
+        );
     }
 
     #[test]
@@ -668,12 +786,9 @@ mod tests {
 
     #[test]
     fn extract_from_bytes_py_extension_runs_without_panic() {
-        // Python extractor must handle this without panicking.
-        let graph = extract_from_bytes(b"def hello(): pass", "py").expect("extract");
-        assert!(
-            graph.nodes.len() >= 0,
-            "Python extraction must succeed without panic"
-        );
+        // Python extractor must handle this without panicking; `.expect` is the assertion that
+        // extraction returned `Ok` (node count is `usize`, so `>= 0` would be tautological).
+        let _graph = extract_from_bytes(b"def hello(): pass", "py").expect("extract");
     }
 
     #[test]
