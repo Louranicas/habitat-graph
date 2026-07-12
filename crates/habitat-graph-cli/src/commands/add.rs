@@ -693,6 +693,15 @@ fn validate_add_journal_origin(
     }
 
     let after_checksum = private_graph_generation(&journal.graph)?;
+    if !same_context {
+        let target_status = super::private_state::private_checksum_status_at_path(
+            state_path,
+            &[before_checksum, &after_checksum],
+        )?;
+        if target_status.any && !target_status.matched {
+            return Err(reject_foreign_add_journal());
+        }
+    }
     let status = super::private_state::private_checksum_status(
         journal_state_path,
         &[before_checksum, &after_checksum],
@@ -1633,6 +1642,57 @@ mod tests {
         assert_eq!(error.kind(), "guard");
         assert_eq!(fs::read_to_string(&out).unwrap(), public_before);
         assert!(super::add_journal_path(&alpha_state).unwrap().exists());
+    }
+
+    #[test]
+    fn ancestor_add_journal_rejects_conflicting_target_context() {
+        let d = tdir();
+        init_git(&d);
+        commit_git(&d, "first");
+        let out = d.join("public/graph.json");
+        let original = extract_from_bytes(b"fn original() {}", "rs").unwrap();
+        merge_into_output(original.clone(), &out).unwrap();
+        let public_before = fs::read_to_string(&out).unwrap();
+        let before_graph = habitat_graph_serve::from_node_link(&public_before).unwrap();
+        let pending = habitat_graph_build::merge(
+            extract_from_bytes(b"fn pending() {}", "rs").unwrap(),
+            original,
+        )
+        .sorted();
+        let pending_json = habitat_graph_export::to_node_link(&pending).unwrap();
+        let origin_state = super::private_state_path(&out).unwrap();
+        super::write_add_journal(
+            &out,
+            &origin_state,
+            Some(&before_graph),
+            &private_checksum(&origin_state),
+            &pending,
+            &pending_json,
+        )
+        .unwrap();
+
+        commit_git(&d, "second");
+        let target_state = super::private_state_path(&out).unwrap();
+        let replacement = extract_from_bytes(b"fn replacement() {}", "rs").unwrap();
+        let target_json = super::super::private_state::serialize(
+            &replacement,
+            &super::content_generation(&public_before),
+            &super::super::private_state::semantic_generation(&before_graph).unwrap(),
+        )
+        .unwrap();
+        super::super::private_state::write_state(&target_state, &target_json).unwrap();
+
+        let error = merge_into_output(
+            extract_from_bytes(b"fn after_retry() {}", "rs").unwrap(),
+            &out,
+        )
+        .unwrap_err();
+        assert_eq!(error.kind(), "guard");
+        assert_eq!(fs::read_to_string(&out).unwrap(), public_before);
+        assert!(fs::read_to_string(target_state)
+            .unwrap()
+            .contains("replacement"));
+        assert!(super::add_journal_path(&origin_state).unwrap().exists());
     }
 
     #[test]

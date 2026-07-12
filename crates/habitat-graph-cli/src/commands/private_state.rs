@@ -37,6 +37,7 @@ pub(super) struct ContextIdentity {
     pub(super) key: String,
     pub(super) lineage: String,
     revision: String,
+    unborn_predecessor: Option<(String, String)>,
 }
 
 pub(super) fn path_for_output(output: &Path, legacy: &Path) -> Result<PathBuf> {
@@ -389,6 +390,20 @@ pub(super) fn private_checksum_status(
     Ok(status)
 }
 
+pub(super) fn private_checksum_status_at_path(
+    path: &Path,
+    expected: &[&str],
+) -> Result<PrivateChecksumStatus> {
+    let Some(stored) = read(path, "private transaction target state")? else {
+        return Ok(PrivateChecksumStatus::default());
+    };
+    let checksum = generation(stored.graph.to_json()?.as_bytes());
+    Ok(PrivateChecksumStatus {
+        any: true,
+        matched: expected.contains(&checksum.as_str()),
+    })
+}
+
 #[derive(Default)]
 struct ContextAncestry {
     verified: bool,
@@ -425,12 +440,27 @@ fn context_ancestry(path: &Path, candidates: &[PathBuf]) -> Result<ContextAncest
     let Some(expected_head) = context_revision(path)? else {
         return Ok(ContextAncestry::default());
     };
+    let current_identity = git_context_identity(&git_dir)?;
+    if current_identity.revision != expected_head
+        || state_context_key(path).as_deref() != Some(current_identity.key.as_str())
+    {
+        return Ok(ContextAncestry::default());
+    }
     let mut revisions: HashMap<String, Vec<PathBuf>> = HashMap::new();
+    let mut direct_ancestors = HashSet::new();
     for candidate in candidates {
         if candidate == path {
             continue;
         }
         if let Some(revision) = context_revision(candidate)? {
+            if current_identity.unborn_predecessor.as_ref().is_some_and(
+                |(context, predecessor_revision)| {
+                    state_context_key(candidate).as_deref() == Some(context.as_str())
+                        && revision == *predecessor_revision
+                },
+            ) {
+                direct_ancestors.insert(candidate.clone());
+            }
             revisions
                 .entry(revision)
                 .or_default()
@@ -455,7 +485,7 @@ fn context_ancestry(path: &Path, candidates: &[PathBuf]) -> Result<ContextAncest
         .stdout
         .take()
         .ok_or_else(|| GraphError::Io("read Git ancestry output".to_owned()))?;
-    let mut ancestors = HashSet::new();
+    let mut ancestors = direct_ancestors;
     let mut observed_head = None;
     let mut line = String::new();
     let mut reader = std::io::BufReader::new(stdout);
@@ -1618,12 +1648,13 @@ fn git_context_identity(git_dir: &Path) -> Result<ContextIdentity> {
     let head = git_dir.join("HEAD");
     let identity = read_git_control_line(&head, "Git HEAD")?
         .ok_or_else(|| GraphError::Guard("Git HEAD is missing".to_owned()))?;
-    let (context, lineage, revision) = if is_object_id(&identity) {
+    let (context, lineage, revision, unborn_predecessor) = if is_object_id(&identity) {
         let commit = identity.to_ascii_lowercase();
         (
             format!("detached:{commit}"),
             format!("detached:{commit}"),
             format!("commit:{commit}"),
+            None,
         )
     } else {
         let reference = identity
@@ -1631,22 +1662,36 @@ fn git_context_identity(git_dir: &Path) -> Result<ContextIdentity> {
             .map(str::trim)
             .filter(|reference| valid_git_reference(reference))
             .ok_or_else(|| GraphError::Guard("invalid Git HEAD".to_owned()))?;
-        let (context, revision) = match resolve_git_reference(git_dir, reference)? {
-            Some(commit) => (
-                format!("ref:{reference}\ncommit:{commit}"),
-                format!("commit:{commit}"),
-            ),
-            None => (
-                format!("ref:{reference}\nunborn"),
-                format!("unborn:{reference}"),
-            ),
-        };
-        (context, format!("ref:{reference}"), revision)
+        let (context, revision, unborn_predecessor) =
+            match resolve_git_reference(git_dir, reference)? {
+                Some(commit) => {
+                    let predecessor_context =
+                        generation(format!("ref:{reference}\nunborn").as_bytes());
+                    let predecessor_revision = generation(format!("unborn:{reference}").as_bytes());
+                    (
+                        format!("ref:{reference}\ncommit:{commit}"),
+                        format!("commit:{commit}"),
+                        Some((predecessor_context, predecessor_revision)),
+                    )
+                }
+                None => (
+                    format!("ref:{reference}\nunborn"),
+                    format!("unborn:{reference}"),
+                    None,
+                ),
+            };
+        (
+            context,
+            format!("ref:{reference}"),
+            revision,
+            unborn_predecessor,
+        )
     };
     Ok(ContextIdentity {
         key: generation(context.as_bytes()),
         lineage: generation(lineage.as_bytes()),
         revision: generation(revision.as_bytes()),
+        unborn_predecessor,
     })
 }
 
@@ -2443,6 +2488,40 @@ mod tests {
         )
         .unwrap_err();
         assert_eq!(error.kind(), "guard");
+    }
+
+    #[test]
+    fn first_commit_inherits_same_ref_unborn_state() {
+        let root = TempDir::new().unwrap();
+        init_real_git(root.path());
+        let output_dir = root.path().join("public");
+        fs::create_dir_all(&output_dir).unwrap();
+        let output = output_dir.join("graph.json");
+        let legacy = output_dir.join(".habitat-graph-state.json");
+        let public_generation = super::generation(b"unborn public bytes");
+        let semantic = super::semantic_generation(&Graph::new()).unwrap();
+        let mut private = Graph::new();
+        private.manifest.tool_version = "unborn-private-lineage".to_owned();
+
+        let unborn_path = super::path_for_output(&output, &legacy).unwrap();
+        super::write_state(
+            &unborn_path,
+            &super::serialize(&private, &public_generation, &semantic).unwrap(),
+        )
+        .unwrap();
+
+        commit_real_git(root.path(), "first");
+        let committed_path = super::path_for_output(&output, &legacy).unwrap();
+        assert_ne!(unborn_path, committed_path);
+        let inherited = super::load_matching(
+            &committed_path,
+            Some(&public_generation),
+            Some(&semantic),
+            "test private state",
+        )
+        .unwrap()
+        .unwrap();
+        assert_eq!(inherited.graph, private);
     }
 
     #[test]
