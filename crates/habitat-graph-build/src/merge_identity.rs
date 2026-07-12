@@ -7,14 +7,14 @@ use habitat_graph_core::{
 
 #[derive(Clone, Debug, Eq, Hash, PartialEq)]
 pub(crate) enum NodeIdentity {
-    Projected(NodeId, String, usize),
+    Projected(NodeId, usize),
     Label(String),
 }
 
 impl NodeIdentity {
     pub(crate) const fn projected_id(&self) -> Option<NodeId> {
         match self {
-            Self::Projected(id, _, _) => Some(*id),
+            Self::Projected(id, _) => Some(*id),
             Self::Label(_) => None,
         }
     }
@@ -48,21 +48,21 @@ pub(crate) fn node_identity_maps(
                 .collect()
         })
         .collect();
-    let mut candidates: HashMap<(NodeId, String), Vec<ProjectionCandidate>> = HashMap::new();
+    let mut candidates: HashMap<NodeId, Vec<ProjectionCandidate>> = HashMap::new();
 
     for (graph_index, graph) in graphs.iter().enumerate() {
         for node in &graph.nodes {
-            let (marker, projected) = if is_canonical_redaction_marker(&node.label) {
-                (true, node.label.clone())
+            let marker = if is_canonical_redaction_marker(&node.label) {
+                true
             } else {
                 let projected = redact_public_text(&node.label);
                 if projected.as_ref() == node.label {
                     continue;
                 }
-                (false, projected.into_owned())
+                false
             };
             candidates
-                .entry((node.id, projected))
+                .entry(node.id)
                 .or_default()
                 .push(ProjectionCandidate {
                     graph_index,
@@ -71,25 +71,18 @@ pub(crate) fn node_identity_maps(
         }
     }
 
-    for ((id, marker), group) in candidates {
-        if !group.iter().any(|candidate| candidate.marker) {
-            continue;
-        }
-
+    for (id, group) in candidates {
         let lineage_anchor = lineage_root
             .filter(|root| group.iter().any(|candidate| candidate.graph_index == *root));
 
         if let Some(anchor) = lineage_anchor {
             for candidate in group {
-                maps[candidate.graph_index]
-                    .insert(id, NodeIdentity::Projected(id, marker.clone(), anchor));
+                maps[candidate.graph_index].insert(id, NodeIdentity::Projected(id, anchor));
             }
         } else {
             for candidate in group.into_iter().filter(|candidate| candidate.marker) {
-                maps[candidate.graph_index].insert(
-                    id,
-                    NodeIdentity::Projected(id, marker.clone(), candidate.graph_index),
-                );
+                maps[candidate.graph_index]
+                    .insert(id, NodeIdentity::Projected(id, candidate.graph_index));
             }
         }
     }
@@ -105,8 +98,7 @@ pub(crate) fn relation_identities(
     edges
         .iter()
         .map(|edge| {
-            let marker = project_public_relation(&edge.relation);
-            if is_canonical_redaction_marker(&marker) {
+            if is_projected_relation(&edge.relation) {
                 RelationIdentity::Projected(
                     projector.project(edge.source, edge.target, &edge.relation),
                     projected_provenance,
@@ -116,6 +108,15 @@ pub(crate) fn relation_identities(
             }
         })
         .collect()
+}
+
+pub(crate) fn is_lossy_relation(relation: &str) -> bool {
+    is_canonical_redaction_marker(&project_public_relation(relation))
+}
+
+fn is_projected_relation(relation: &str) -> bool {
+    let marker = project_public_relation(relation);
+    is_canonical_redaction_marker(&marker) && relation.starts_with(&marker)
 }
 
 pub(crate) fn node_identity(node: &Node, identities: &NodeIdentityMap) -> NodeIdentity {
@@ -131,7 +132,7 @@ pub(crate) fn allocate_node_id(
     reserved_projected_ids: &HashSet<u32>,
 ) -> NodeId {
     let (preferred, projected) = match identity {
-        NodeIdentity::Projected(id, _, _) => (id.get(), true),
+        NodeIdentity::Projected(id, _) => (id.get(), true),
         NodeIdentity::Label(label) => (content_id(label), false),
     };
     let mut raw = preferred;

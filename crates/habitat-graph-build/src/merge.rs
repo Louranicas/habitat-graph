@@ -16,7 +16,7 @@ use crate::merge_identity::{
 ///
 /// 1. A fresh node-identity map is built in first-seen order (all of `a` before all of `b`).
 ///    Clean nodes use label identity, while publicly redacted nodes retain stable
-///    `(id, marker, provenance)` identity.
+///    `(id, provenance)` identity.
 ///    When the same identity appears in both graphs only one node is kept — the one from `a`.
 /// 2. Per-graph `old_id → new_id` maps let each graph's edges be remapped into the merged id
 ///    space.  An edge whose source **or** target lacks a mapping is silently dropped
@@ -973,6 +973,23 @@ mod tests {
             .edges
             .iter()
             .any(|edge| edge.relation == "api_key=beta"));
+    }
+
+    #[test]
+    fn identical_raw_secret_relations_deduplicate() {
+        let mut a = Graph::new();
+        a.nodes.push(node(1, "A", "a.rs"));
+        a.nodes.push(node(2, "B", "a.rs"));
+        a.edges.push(edge(1, 2, "api_key=same"));
+
+        let mut b = Graph::new();
+        b.nodes.push(node(10, "A", "b.rs"));
+        b.nodes.push(node(20, "B", "b.rs"));
+        b.edges.push(edge(10, 20, "api_key=same"));
+
+        let result = merge(a, b);
+        assert_eq!(result.edges.len(), 1);
+        assert_eq!(result.edges[0].relation, "api_key=same");
     }
 
     #[test]

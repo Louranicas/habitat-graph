@@ -10,6 +10,9 @@ use unicode_normalization::UnicodeNormalization as _;
 
 use crate::escape::{markdown_code_span, markdown_text, project_public_edges, redact_public_text};
 
+const MAX_FILENAME_BYTES: usize = 255;
+const NOTE_EXTENSION: &str = ".md";
+
 /// Renders `graph` as an Obsidian vault: a deterministic list of `(filename, markdown)` pairs —
 /// one note per node (its `source_file` + `[[wikilinks]]` to connected nodes) plus a
 /// Map-of-Content index note (`_MOC.md`). The caller is responsible for writing the files.
@@ -23,7 +26,8 @@ use crate::escape::{markdown_code_span, markdown_text, project_public_edges, red
 /// their filenames remain stable as other redacted nodes are added. When two or more clean nodes
 /// produce the same stem both are disambiguated by appending the [`NodeId`] before the extension
 /// (e.g. `foo_n1.md`, `foo_n2.md`). Portable filename equivalence includes case folding and
-/// Unicode compatibility normalization; Windows-reserved stems are always qualified.
+/// Unicode compatibility normalization; Windows-reserved stems are always qualified. Every final
+/// filename is truncated at a UTF-8 boundary to fit a 255-byte filesystem component.
 ///
 /// # Note content
 ///
@@ -160,9 +164,9 @@ fn assign_filenames(graph: &Graph) -> Vec<String> {
         .zip(qualified.iter())
         .map(|((node, stem), qualified)| {
             if *qualified {
-                format!("{}.md", qualified_stem(stem, node.id))
+                qualified_filename(stem, node.id, None)
             } else {
-                format!("{stem}.md")
+                plain_filename(stem)
             }
         })
         .collect();
@@ -194,14 +198,13 @@ fn assign_filenames(graph: &Graph) -> Vec<String> {
             continue;
         }
 
-        let base = qualified_stem(&stems[index], graph.nodes[index].id);
         let mut attempt = 1_usize;
         loop {
-            let fallback = if attempt == 1 {
-                format!("{base}.md")
-            } else {
-                format!("{base}_{attempt}.md")
-            };
+            let fallback = qualified_filename(
+                &stems[index],
+                graph.nodes[index].id,
+                (attempt > 1).then_some(attempt),
+            );
             let fallback_key = portable_filename_key(&fallback);
             if !used.contains(&fallback_key) && !reserved.contains(fallback_key.as_str()) {
                 used.insert(fallback_key);
@@ -219,12 +222,37 @@ fn portable_filename_key(filename: &str) -> String {
     filename.nfkd().flat_map(char::to_lowercase).collect()
 }
 
-fn qualified_stem(stem: &str, id: NodeId) -> String {
-    if let Some(separator) = stem.find('.').filter(|_| windows_reserved_stem(stem)) {
-        format!("{}_{}{}", &stem[..separator], id, &stem[separator..])
+fn plain_filename(stem: &str) -> String {
+    let budget = MAX_FILENAME_BYTES.saturating_sub(NOTE_EXTENSION.len());
+    format!("{}{NOTE_EXTENSION}", truncate_utf8(stem, budget))
+}
+
+fn qualified_filename(stem: &str, id: NodeId, attempt: Option<usize>) -> String {
+    let identity = format!("_{id}");
+    let collision = attempt.map_or_else(String::new, |attempt| format!("_{attempt}"));
+    let budget = MAX_FILENAME_BYTES
+        .saturating_sub(NOTE_EXTENSION.len())
+        .saturating_sub(identity.len())
+        .saturating_sub(collision.len());
+    let stem = truncate_utf8(stem, budget);
+    let qualified = if let Some(separator) = stem.find('.').filter(|_| windows_reserved_stem(stem))
+    {
+        format!("{}{}{}", &stem[..separator], identity, &stem[separator..])
     } else {
-        format!("{stem}_{id}")
+        format!("{stem}{identity}")
+    };
+    format!("{qualified}{collision}{NOTE_EXTENSION}")
+}
+
+fn truncate_utf8(input: &str, max_bytes: usize) -> &str {
+    if input.len() <= max_bytes {
+        return input;
     }
+    let mut end = max_bytes;
+    while !input.is_char_boundary(end) {
+        end = end.saturating_sub(1);
+    }
+    &input[..end]
 }
 
 fn windows_reserved_stem(stem: &str) -> bool {
@@ -1394,5 +1422,39 @@ mod tests {
             1
         );
         assert!(filenames.contains(&"_MOC_n4.md".to_owned()));
+    }
+
+    #[test]
+    fn qualified_unicode_filename_reserves_its_suffix_budget() {
+        let label = "é".repeat(121);
+        let g = graph_with_nodes(vec![make_node(u32::MAX, &label, "a.rs")]);
+        let filename = render_vault(&g)
+            .into_iter()
+            .find(|(filename, _)| filename != "_MOC.md")
+            .map(|(filename, _)| filename)
+            .unwrap();
+
+        assert!(filename.len() <= super::MAX_FILENAME_BYTES);
+        assert!(filename.ends_with("_n4294967295.md"));
+    }
+
+    #[test]
+    fn truncated_plain_filename_collisions_remain_bounded_and_unique() {
+        let first = "a".repeat(256);
+        let second = format!("{}b", "a".repeat(255));
+        let g = graph_with_nodes(vec![
+            make_node(1, &first, "a.rs"),
+            make_node(2, &second, "b.rs"),
+        ]);
+        let filenames: Vec<String> = render_vault(&g)
+            .into_iter()
+            .filter(|(filename, _)| filename != "_MOC.md")
+            .map(|(filename, _)| filename)
+            .collect();
+
+        assert!(filenames
+            .iter()
+            .all(|filename| filename.len() <= super::MAX_FILENAME_BYTES));
+        assert_ne!(filenames[0], filenames[1]);
     }
 }

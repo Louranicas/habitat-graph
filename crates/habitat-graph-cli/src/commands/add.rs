@@ -230,7 +230,12 @@ pub fn merge_into_output(new_graph: Graph, out: &Path) -> Result<()> {
     super::private_state::ensure(&state_path)?;
     let mut public_prior = load_public_output(out)?;
     let recovered_add = recover_add_journal(out, &state_path, &mut public_prior)?;
-    let private_prior = load_private_state(&state_path, &legacy_state_path)?;
+    let private_prior = load_private_state(
+        &state_path,
+        &legacy_state_path,
+        public_prior.content_generation.as_deref(),
+        public_prior.semantic_generation.as_deref(),
+    )?;
     let replaying_legacy_projection = match (&private_prior, &public_prior.graph) {
         (None, Some(public)) => public_topology(&new_graph)? == public_topology(public)?,
         _ => false,
@@ -244,6 +249,7 @@ pub fn merge_into_output(new_graph: Graph, out: &Path) -> Result<()> {
             private_prior,
             public_prior.graph.clone(),
             public_prior.content_generation.as_deref(),
+            public_prior.semantic_generation.as_deref(),
         )?
     };
     let merged = if replaying_legacy_projection {
@@ -253,13 +259,14 @@ pub fn merge_into_output(new_graph: Graph, out: &Path) -> Result<()> {
     };
 
     let json = habitat_graph_export::to_node_link(&merged)?;
-    let state_json = super::private_state::serialize(
-        &merged,
-        &super::private_state::generation(json.as_bytes()),
-    )?;
+    let public_graph = habitat_graph_serve::from_node_link(&json)?;
+    let public_generation = super::private_state::generation(json.as_bytes());
+    let public_semantic_generation = super::private_state::semantic_generation(&public_graph)?;
+    let state_json =
+        super::private_state::serialize(&merged, &public_generation, &public_semantic_generation)?;
     write_add_journal(&state_path, public_prior.graph.as_ref(), &merged, &json)?;
     super::atomic_file::write(out, json.as_bytes(), false, "public graph")?;
-    super::private_state::write(&state_path, &state_json)?;
+    super::private_state::write_state(&state_path, &state_json)?;
     super::private_state::remove(&add_journal_path(&state_path)?, "add journal")?;
     if state_path != legacy_state_path {
         super::private_state::remove(&legacy_state_path, "legacy private state")?;
@@ -290,6 +297,7 @@ fn legacy_private_state_path(out: &Path) -> Result<PathBuf> {
 struct PublicOutput {
     graph: Option<Graph>,
     content_generation: Option<String>,
+    semantic_generation: Option<String>,
 }
 
 fn load_public_output(out: &Path) -> Result<PublicOutput> {
@@ -299,6 +307,7 @@ fn load_public_output(out: &Path) -> Result<PublicOutput> {
             return Ok(PublicOutput {
                 graph: None,
                 content_generation: None,
+                semantic_generation: None,
             })
         }
         Err(error) => {
@@ -322,6 +331,7 @@ fn load_public_output(out: &Path) -> Result<PublicOutput> {
         habitat_graph_serve::from_node_link(&text)?
     };
     Ok(PublicOutput {
+        semantic_generation: Some(super::private_state::semantic_generation(&graph)?),
         graph: Some(graph),
         content_generation: Some(content_generation(&text)),
     })
@@ -330,17 +340,32 @@ fn load_public_output(out: &Path) -> Result<PublicOutput> {
 fn load_private_state(
     path: &Path,
     legacy: &Path,
+    public_generation: Option<&str>,
+    public_semantic_generation: Option<&str>,
 ) -> Result<Option<super::private_state::StoredGraph>> {
-    let selected = if path.exists() {
-        path
-    } else if legacy != path && legacy.exists() {
-        legacy
-    } else {
+    let mut state = super::private_state::load_matching(
+        path,
+        public_generation,
+        public_semantic_generation,
+        "private add state",
+    )?;
+    if state.is_none() && legacy != path {
+        state = super::private_state::load_matching(
+            legacy,
+            public_generation,
+            public_semantic_generation,
+            "legacy private add state",
+        )?;
+    }
+    if state.is_none() {
+        state = super::private_state::read(path, "private add state")?;
+    }
+    if state.is_none() && legacy != path {
+        state = super::private_state::read(legacy, "legacy private add state")?;
+    }
+    let Some(state) = state else {
         return Ok(None);
     };
-    let text = std::fs::read_to_string(selected)
-        .map_err(|error| GraphError::Io(format!("read private add state: {error}")))?;
-    let state = super::private_state::parse(&text)?;
     if state.graph.schema != SCHEMA_VERSION {
         return Err(GraphError::Schema(format!(
             "private add state schema mismatch: stored={:?}, current={SCHEMA_VERSION:?}",
@@ -563,12 +588,18 @@ fn recover_add_journal(out: &Path, state_path: &Path, public: &mut PublicOutput)
             "public graph recovery",
         )?;
     }
-    let state_json = super::private_state::serialize(&journal.graph, &intended_generation)?;
-    super::private_state::write(state_path, &state_json)?;
+    let intended_semantic_generation = super::private_state::semantic_generation(&intended_graph)?;
+    let state_json = super::private_state::serialize(
+        &journal.graph,
+        &intended_generation,
+        &intended_semantic_generation,
+    )?;
+    super::private_state::write_state(state_path, &state_json)?;
     super::private_state::remove(&add_journal_path(state_path)?, "add journal")?;
     *public = PublicOutput {
         graph: Some(intended_graph),
         content_generation: Some(intended_generation),
+        semantic_generation: Some(intended_semantic_generation),
     };
     Ok(true)
 }
@@ -577,13 +608,16 @@ fn select_prior(
     private: Option<super::private_state::StoredGraph>,
     public: Option<Graph>,
     public_generation: Option<&str>,
+    public_semantic_generation: Option<&str>,
 ) -> Result<Graph> {
     match (private, public) {
         (Some(private), Some(public)) => {
-            if let Some(committed_generation) = private.public_generation.as_deref() {
-                if Some(committed_generation) == public_generation {
-                    return Ok(private.graph);
-                }
+            if super::private_state::matches_public(
+                &private,
+                public_generation,
+                public_semantic_generation,
+            ) {
+                return Ok(private.graph);
             }
             if projected_public_state(&private.graph)? == public_graph_state(&public) {
                 Ok(private.graph)
@@ -1103,7 +1137,7 @@ mod tests {
     }
 
     #[test]
-    fn committed_generation_preserves_private_lineage_across_policy_changes() {
+    fn committed_semantics_preserve_private_lineage_across_policy_and_format_changes() {
         let d = tdir();
         let out = d.join("g.json");
         let mut private = extract_from_bytes(b"fn original() {}", "rs").unwrap();
@@ -1114,15 +1148,17 @@ mod tests {
         .unwrap();
         old_public["nodes"][0]["label"] = serde_json::json!("[REDACTED:api_key]");
         let old_public = serde_json::to_string_pretty(&old_public).unwrap();
-        fs::write(&out, &old_public).unwrap();
+        let old_public_graph = habitat_graph_serve::from_node_link(&old_public).unwrap();
+        fs::write(&out, format!("{old_public}\n")).unwrap();
 
         let state_path = super::private_state_path(&out).unwrap();
         let state = super::super::private_state::serialize(
             &private,
             &super::super::private_state::generation(old_public.as_bytes()),
+            &super::super::private_state::semantic_generation(&old_public_graph).unwrap(),
         )
         .unwrap();
-        super::super::private_state::write(&state_path, &state).unwrap();
+        super::super::private_state::write_state(&state_path, &state).unwrap();
 
         let added = extract_from_bytes(b"fn added() {}", "rs").unwrap();
         merge_into_output(added, &out).unwrap();
@@ -1133,6 +1169,31 @@ mod tests {
         assert!(public_after.contains("api_key,slack_token"));
         assert!(public_after.contains("added"));
         assert!(!public_after.contains("xox(b)-secret"));
+    }
+
+    #[test]
+    fn branch_switch_restores_generation_indexed_private_lineage() {
+        let d = tdir();
+        let out = d.join("g.json");
+        let mut branch_a = extract_from_bytes(b"fn branch_a() {}", "rs").unwrap();
+        branch_a.nodes[0].label = "api_key=branch-a-private".to_owned();
+        merge_into_output(branch_a, &out).unwrap();
+        let branch_a_public = fs::read_to_string(&out).unwrap();
+
+        let branch_b = extract_from_bytes(b"fn branch_b() {}", "rs").unwrap();
+        fs::write(&out, habitat_graph_export::to_node_link(&branch_b).unwrap()).unwrap();
+        let added_on_b = extract_from_bytes(b"fn branch_b_added() {}", "rs").unwrap();
+        merge_into_output(added_on_b, &out).unwrap();
+
+        fs::write(&out, branch_a_public).unwrap();
+        let added_on_a = extract_from_bytes(b"fn branch_a_added() {}", "rs").unwrap();
+        merge_into_output(added_on_a, &out).unwrap();
+
+        let state_path = super::private_state_path(&out).unwrap();
+        let private = fs::read_to_string(state_path).unwrap();
+        assert!(private.contains("api_key=branch-a-private"));
+        assert!(private.contains("branch_a_added"));
+        assert!(!private.contains("branch_b_added"));
     }
 
     #[test]

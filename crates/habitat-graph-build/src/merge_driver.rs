@@ -7,7 +7,7 @@
 //! ## Semantics
 //!
 //! Clean-node merge identity is by **label**, while publicly redacted nodes retain stable
-//! `(id, marker, provenance)` identity — the same mechanism as the 2-way
+//! `(id, provenance)` identity — the same mechanism as the 2-way
 //! [`crate::merge::merge`]. For each
 //! identity `L` the outcome is:
 //!
@@ -20,34 +20,40 @@
 //! | yes | yes | no  | **drop** (deleted by `theirs`; unchanged in `ours`) |
 //! | yes | yes | yes | keep once (unchanged on both sides) |
 //!
-//! Edges follow the same policy keyed on endpoint identity plus exact relation text; already
-//! projected relations additionally retain branch provenance unless anchored in the base. When
-//! both branches reduce the same parallel projected-relation group, only the provable lower bound
-//! of common survivors is retained. Edges whose endpoints were deleted by the node-level merge are
-//! also dropped even if the edge itself survived. Communities follow the same policy keyed on
-//! community label; member [`NodeId`]s are remapped to the merged id space and members whose node
-//! was deleted are pruned.
+//! Edges follow the same policy keyed on endpoint identity plus exact raw relation text. Lossy
+//! projected relations retain branch provenance when no base lineage exists and otherwise anchor
+//! to endpoint-local base slots independently of the current redaction marker. When both branches
+//! reduce the same parallel lossy-relation group, only the provable lower bound of common survivors
+//! is retained. Edges whose endpoints were deleted by the node-level merge are also dropped even if
+//! the edge itself survived. Communities follow the same policy keyed on community label; member
+//! [`NodeId`]s are remapped to the merged id space and members whose node was deleted are pruned.
 //!
 //! The identity-interned output is passed through [`Graph::sorted`] so two runs on identical
 //! inputs produce byte-identical output (R4).
 
 use std::collections::{HashMap, HashSet};
 
-use habitat_graph_core::{
-    project_public_relation, Community, CommunityId, Edge, Graph, Manifest, Node, NodeId,
-};
+use habitat_graph_core::{Community, CommunityId, Edge, Graph, Manifest, Node, NodeId};
 
 use crate::merge_identity::{
-    allocate_node_id, node_id_to_identity_map, node_identity, node_identity_maps,
-    node_identity_set, relation_identities, NodeIdentity, NodeIdentityMap, RelationIdentity,
+    allocate_node_id, is_lossy_relation, node_id_to_identity_map, node_identity,
+    node_identity_maps, node_identity_set, relation_identities, NodeIdentity, NodeIdentityMap,
+    RelationIdentity,
 };
 
 type EdgeKey = (NodeIdentity, NodeIdentity, RelationIdentity);
-type ProjectedEdgeGroup = (NodeIdentity, NodeIdentity, String);
+type LossyEdgeGroup = (NodeIdentity, NodeIdentity);
+type BaseLossyEdgeGroups = HashMap<LossyEdgeGroup, Vec<EdgeKey>>;
+
+struct BaseEdgeLineage {
+    keys: HashSet<EdgeKey>,
+    lossy_key_groups: HashMap<EdgeKey, LossyEdgeGroup>,
+    survivor_limits: HashMap<LossyEdgeGroup, usize>,
+}
 
 /// Deterministically 3-way-merges `ours` and `theirs` against their common ancestor `base`.
 ///
-/// Merge identity is by label for clean nodes and stable `(id, marker, provenance)` for publicly
+/// Merge identity is by label for clean nodes and stable `(id, provenance)` for publicly
 /// redacted nodes; see the module documentation for the full deletion/addition semantics table. Node data
 /// (`source_file`, `source_location`) from `ours` wins when the same identity appears in both
 /// branches. The same preference applies to edge `confidence` and to community member lists.
@@ -96,18 +102,31 @@ pub fn merge3(base: &Graph, ours: &Graph, theirs: &Graph) -> Graph {
     let (merged_nodes, identity_to_new_id) = assign_node_ids(pre_nodes);
 
     // ── Phase 3: edge identity-key set for base-aware deletion ────────────────
-    let base_edge_keys: HashSet<EdgeKey> = edge_keys(base, &base_id_to_identity, 0)
-        .into_iter()
-        .flatten()
-        .collect();
-    let ours_edge_keys =
-        anchor_edge_keys_to_base(edge_keys(ours, &ours_id_to_identity, 1), &base_edge_keys);
+    let base_edge_keys = edge_keys(base, &base_id_to_identity, 0);
+    let base_lossy_edge_groups = base_lossy_edge_groups(base, &base_edge_keys);
+    let base_lossy_key_groups = base_lossy_key_groups(&base_lossy_edge_groups);
+    let base_edge_keys: HashSet<EdgeKey> = base_edge_keys.into_iter().flatten().collect();
+    let ours_edge_keys = anchor_edge_keys_to_base(
+        edge_keys(ours, &ours_id_to_identity, 1),
+        &base_edge_keys,
+        &base_lossy_edge_groups,
+    );
     let theirs_edge_keys = anchor_edge_keys_to_base(
         edge_keys(theirs, &theirs_id_to_identity, 2),
         &base_edge_keys,
+        &base_lossy_edge_groups,
     );
-    let projected_survivor_limits =
-        projected_survivor_limits(&base_edge_keys, &ours_edge_keys, &theirs_edge_keys);
+    let survivor_limits = lossy_survivor_limits(
+        &base_lossy_edge_groups,
+        &base_lossy_key_groups,
+        &ours_edge_keys,
+        &theirs_edge_keys,
+    );
+    let base_edge_lineage = BaseEdgeLineage {
+        keys: base_edge_keys,
+        lossy_key_groups: base_lossy_key_groups,
+        survivor_limits,
+    };
 
     // ── Phase 4: merge edges ──────────────────────────────────────────────────
     let merged_edges = merge_graph_edges(
@@ -115,8 +134,7 @@ pub fn merge3(base: &Graph, ours: &Graph, theirs: &Graph) -> Graph {
         theirs,
         &ours_edge_keys,
         &theirs_edge_keys,
-        &base_edge_keys,
-        &projected_survivor_limits,
+        &base_edge_lineage,
         &identity_to_new_id,
     );
 
@@ -170,68 +188,105 @@ fn edge_keys(
 fn anchor_edge_keys_to_base(
     keys: Vec<Option<EdgeKey>>,
     base_keys: &HashSet<EdgeKey>,
+    base_lossy_edge_groups: &BaseLossyEdgeGroups,
 ) -> Vec<Option<EdgeKey>> {
+    let base_lossy_key_groups = base_lossy_key_groups(base_lossy_edge_groups);
+    let occupied: HashSet<EdgeKey> = keys
+        .iter()
+        .flatten()
+        .filter(|key| {
+            matches!(&key.2, RelationIdentity::Exact(_))
+                && base_keys.contains(*key)
+                && base_lossy_key_groups.contains_key(*key)
+        })
+        .cloned()
+        .collect();
+    let mut cursors: HashMap<LossyEdgeGroup, usize> = HashMap::new();
+
     keys.into_iter()
         .map(|key| {
-            let (source, target, relation) = key?;
-            let RelationIdentity::Projected(projected, _) = &relation else {
-                return Some((source, target, relation));
-            };
-            let base_key = (
-                source.clone(),
-                target.clone(),
-                RelationIdentity::Projected(projected.clone(), 0),
-            );
-            if base_keys.contains(&base_key) {
-                Some(base_key)
-            } else {
-                Some((source, target, relation))
+            let key = key?;
+            if !matches!(&key.2, RelationIdentity::Projected(_, _)) {
+                return Some(key);
             }
+            let group = (key.0.clone(), key.1.clone());
+            let Some(base_group) = base_lossy_edge_groups.get(&group) else {
+                return Some(key);
+            };
+            let cursor = cursors.entry(group).or_default();
+            while base_group
+                .get(*cursor)
+                .is_some_and(|candidate| occupied.contains(candidate))
+            {
+                *cursor = cursor.saturating_add(1);
+            }
+            let Some(base_key) = base_group.get(*cursor).cloned() else {
+                return Some(key);
+            };
+            *cursor = cursor.saturating_add(1);
+            Some(base_key)
         })
         .collect()
 }
 
-fn projected_edge_group(key: &EdgeKey) -> Option<ProjectedEdgeGroup> {
-    let RelationIdentity::Projected(relation, _) = &key.2 else {
-        return None;
-    };
-    Some((
-        key.0.clone(),
-        key.1.clone(),
-        project_public_relation(relation),
-    ))
+fn base_lossy_edge_groups(graph: &Graph, keys: &[Option<EdgeKey>]) -> BaseLossyEdgeGroups {
+    let mut groups: BaseLossyEdgeGroups = HashMap::new();
+    for (edge, key) in graph.edges.iter().zip(keys) {
+        let Some(key) = key else {
+            continue;
+        };
+        if !is_lossy_relation(&edge.relation) {
+            continue;
+        }
+        let group = (key.0.clone(), key.1.clone());
+        let group_keys = groups.entry(group).or_default();
+        if !group_keys.contains(key) {
+            group_keys.push(key.clone());
+        }
+    }
+    groups
 }
 
-fn projected_group_counts<'a>(
+fn base_lossy_key_groups(groups: &BaseLossyEdgeGroups) -> HashMap<EdgeKey, LossyEdgeGroup> {
+    groups
+        .iter()
+        .flat_map(|(group, keys)| keys.iter().cloned().map(|key| (key, group.clone())))
+        .collect()
+}
+
+fn matched_lossy_group_counts<'a>(
     keys: impl Iterator<Item = &'a EdgeKey>,
-) -> HashMap<ProjectedEdgeGroup, usize> {
+    base_lossy_key_groups: &HashMap<EdgeKey, LossyEdgeGroup>,
+) -> HashMap<LossyEdgeGroup, usize> {
     let mut counts = HashMap::new();
     for key in keys {
-        if let Some(group) = projected_edge_group(key) {
-            *counts.entry(group).or_default() += 1;
+        if let Some(group) = base_lossy_key_groups.get(key) {
+            *counts.entry(group.clone()).or_default() += 1;
         }
     }
     counts
 }
 
-fn projected_survivor_limits(
-    base_keys: &HashSet<EdgeKey>,
+fn lossy_survivor_limits(
+    base_lossy_edge_groups: &BaseLossyEdgeGroups,
+    base_lossy_key_groups: &HashMap<EdgeKey, LossyEdgeGroup>,
     ours_keys: &[Option<EdgeKey>],
     theirs_keys: &[Option<EdgeKey>],
-) -> HashMap<ProjectedEdgeGroup, usize> {
-    let base_counts = projected_group_counts(base_keys.iter());
+) -> HashMap<LossyEdgeGroup, usize> {
     let ours_unique: HashSet<&EdgeKey> = ours_keys.iter().flatten().collect();
     let theirs_unique: HashSet<&EdgeKey> = theirs_keys.iter().flatten().collect();
-    let ours_counts = projected_group_counts(ours_unique.into_iter());
-    let theirs_counts = projected_group_counts(theirs_unique.into_iter());
+    let ours_counts = matched_lossy_group_counts(ours_unique.into_iter(), base_lossy_key_groups);
+    let theirs_counts =
+        matched_lossy_group_counts(theirs_unique.into_iter(), base_lossy_key_groups);
 
-    base_counts
-        .into_iter()
-        .filter_map(|(group, base_count)| {
-            let ours_count = ours_counts.get(&group).copied().unwrap_or(0);
-            let theirs_count = theirs_counts.get(&group).copied().unwrap_or(0);
+    base_lossy_edge_groups
+        .iter()
+        .filter_map(|(group, base_keys)| {
+            let base_count = base_keys.len();
+            let ours_count = ours_counts.get(group).copied().unwrap_or(0);
+            let theirs_count = theirs_counts.get(group).copied().unwrap_or(0);
             (ours_count < base_count && theirs_count < base_count).then_some((
-                group,
+                group.clone(),
                 ours_count
                     .saturating_add(theirs_count)
                     .saturating_sub(base_count),
@@ -314,15 +369,14 @@ fn merge_graph_edges(
     theirs: &Graph,
     ours_edge_keys: &[Option<EdgeKey>],
     theirs_edge_keys: &[Option<EdgeKey>],
-    base_edge_keys: &HashSet<EdgeKey>,
-    projected_survivor_limits: &HashMap<ProjectedEdgeGroup, usize>,
+    base: &BaseEdgeLineage,
     identity_to_new_id: &HashMap<NodeIdentity, NodeId>,
 ) -> Vec<Edge> {
     let ours_edge_key_set: HashSet<&EdgeKey> = ours_edge_keys.iter().flatten().collect();
     let theirs_edge_key_set: HashSet<&EdgeKey> = theirs_edge_keys.iter().flatten().collect();
 
     let mut seen: HashSet<EdgeKey> = HashSet::new();
-    let mut projected_survivors: HashMap<ProjectedEdgeGroup, usize> = HashMap::new();
+    let mut lossy_survivors: HashMap<LossyEdgeGroup, usize> = HashMap::new();
     let mut result: Vec<Edge> = Vec::new();
 
     for (edges, keys) in [
@@ -337,16 +391,16 @@ fn merge_graph_edges(
             let tgt_identity = &key.1;
 
             // Base-aware deletion: keep iff new OR kept on both sides.
-            let keep = !base_edge_keys.contains(key)
+            let keep = !base.keys.contains(key)
                 || (ours_edge_key_set.contains(key) && theirs_edge_key_set.contains(key));
             if !keep || seen.contains(key) {
                 continue;
             }
 
-            let projected_survivor = if base_edge_keys.contains(key) {
-                if let Some(group) = projected_edge_group(key) {
-                    if let Some(limit) = projected_survivor_limits.get(&group) {
-                        let kept = projected_survivors.get(&group).copied().unwrap_or(0);
+            let lossy_survivor = if base.keys.contains(key) {
+                if let Some(group) = base.lossy_key_groups.get(key).cloned() {
+                    if let Some(limit) = base.survivor_limits.get(&group) {
+                        let kept = lossy_survivors.get(&group).copied().unwrap_or(0);
                         if kept >= *limit {
                             continue;
                         }
@@ -368,8 +422,8 @@ fn merge_graph_edges(
                 continue;
             };
 
-            if let Some((group, kept)) = projected_survivor {
-                projected_survivors.insert(group, kept);
+            if let Some((group, kept)) = lossy_survivor {
+                lossy_survivors.insert(group, kept);
             }
             seen.insert(key.clone());
             result.push(Edge {
@@ -1359,6 +1413,37 @@ mod tests {
     }
 
     #[test]
+    fn policy_widened_redacted_node_keeps_base_lineage() {
+        let mut base = nodes_graph(&[(10, "[REDACTED:api_key]"), (20, "Safe")]);
+        base.edges.push(edge(10, 20, "calls"));
+        let mut ours = nodes_graph(&[(10, "[REDACTED:api_key,slack_token]"), (20, "Safe")]);
+        ours.edges.push(edge(10, 20, "calls"));
+        let theirs = ours.clone();
+
+        let merged = merge3(&base, &ours, &theirs);
+        assert_eq!(merged.nodes.len(), 2);
+        assert_eq!(
+            merged
+                .nodes
+                .iter()
+                .filter(|node| node.id == NodeId::new(10))
+                .count(),
+            1
+        );
+        assert_eq!(merged.edges.len(), 1);
+    }
+
+    #[test]
+    fn policy_widened_redacted_node_respects_deletion() {
+        let base = nodes_graph(&[(10, "[REDACTED:api_key]"), (20, "Safe")]);
+        let ours = nodes_graph(&[(20, "Safe")]);
+        let theirs = nodes_graph(&[(10, "[REDACTED:api_key,slack_token]"), (20, "Safe")]);
+
+        let merged = merge3(&base, &ours, &theirs);
+        assert!(merged.nodes.iter().all(|node| node.id != NodeId::new(10)));
+    }
+
+    #[test]
     fn redacted_public_merge_uses_label_identity_for_clean_nodes() {
         let mut base = nodes_graph(&[(90, "[REDACTED:api_key]"), (5, "Shared")]);
         let mut ours = nodes_graph(&[(90, "[REDACTED:api_key]"), (6, "Shared"), (10, "Alpha")]);
@@ -1494,6 +1579,18 @@ mod tests {
     }
 
     #[test]
+    fn independently_added_identical_raw_secret_relations_deduplicate() {
+        let mut ours = nodes_graph(&[(1, "A"), (2, "B")]);
+        ours.edges.push(edge(1, 2, "api_key=same"));
+        let mut theirs = nodes_graph(&[(10, "A"), (20, "B")]);
+        theirs.edges.push(edge(10, 20, "api_key=same"));
+
+        let merged = merge3(&Graph::new(), &ours, &theirs);
+        assert_eq!(merged.edges.len(), 1);
+        assert_eq!(merged.edges[0].relation, "api_key=same");
+    }
+
+    #[test]
     fn independently_added_projected_relations_survive_merge3() {
         let mut ours = nodes_graph(&[(1, "A"), (2, "B")]);
         ours.edges.push(edge(1, 2, "[REDACTED:api_key]#e0"));
@@ -1528,6 +1625,39 @@ mod tests {
         theirs
             .edges
             .push(edge(1, 2, "[REDACTED:api_key]#e00000000000000000000"));
+
+        let merged = merge3(&base, &ours, &theirs);
+        assert!(merged.edges.is_empty());
+    }
+
+    #[test]
+    fn policy_widened_projected_relation_keeps_base_lineage() {
+        let old = "[REDACTED:api_key]#e00000000000000000000";
+        let widened = "[REDACTED:api_key,slack_token]#e00000000000000000000";
+        let mut base = nodes_graph(&[(1, "A"), (2, "B")]);
+        base.edges.push(edge(1, 2, old));
+        let mut ours = nodes_graph(&[(1, "A"), (2, "B")]);
+        ours.edges.push(edge(1, 2, widened));
+        let mut theirs = nodes_graph(&[(1, "A"), (2, "B")]);
+        theirs.edges.push(edge(1, 2, widened));
+
+        let merged = merge3(&base, &ours, &theirs);
+        assert_eq!(merged.edges.len(), 1);
+        assert_eq!(merged.edges[0].relation, widened);
+    }
+
+    #[test]
+    fn policy_widened_projected_relation_respects_deletion() {
+        let mut base = nodes_graph(&[(1, "A"), (2, "B")]);
+        base.edges
+            .push(edge(1, 2, "[REDACTED:api_key]#e00000000000000000000"));
+        let ours = nodes_graph(&[(1, "A"), (2, "B")]);
+        let mut theirs = nodes_graph(&[(1, "A"), (2, "B")]);
+        theirs.edges.push(edge(
+            1,
+            2,
+            "[REDACTED:api_key,slack_token]#e00000000000000000000",
+        ));
 
         let merged = merge3(&base, &ours, &theirs);
         assert!(merged.edges.is_empty());

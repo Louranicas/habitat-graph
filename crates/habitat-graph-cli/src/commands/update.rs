@@ -10,9 +10,10 @@
 //!
 //! ## Sidecar format
 //!
-//! The sidecar stores the complete [`Graph`] in graph-compatible JSON together with the generation
-//! of its committed public projection. On the next incremental run three things are extracted from
-//! it without extra serialization overhead:
+//! The sidecar stores the complete [`Graph`] in graph-compatible JSON together with byte and
+//! semantic generations of its committed public projection. Prior generations are retained as
+//! owner-only snapshots so branch switches can recover matching raw lineage. On the next
+//! incremental run three things are extracted from it without extra serialization overhead:
 //!
 //! - `graph.schema` — the [`SCHEMA_VERSION`] at build time (for the P1-G12 mismatch guard).
 //! - `graph.manifest.inputs` — the `path → content_hash` map used to diff against the current
@@ -76,24 +77,21 @@ pub fn run(dir: &Path, out: &Path) -> u8 {
 /// private sidecar permissions cannot be enforced.
 fn run_inner(dir: &Path, out: &Path) -> Result<()> {
     let (sidecar_path, legacy_sidecar_path) = prepare_private_state(out)?;
+    let public_output = load_public_output(&out.join("graph.json"))?;
 
     // ── Detect all source files (sorted for R4 determinism) ─────────────────────
     let files = habitat_graph_source::detect(dir, &["rs"])?;
 
     // ── Load the prior sidecar (returns None on first run / mismatch) ───────────
-    let Some(prior_graph) = load_available_prior(&sidecar_path, &legacy_sidecar_path)? else {
+    let Some(prior_graph) =
+        load_available_prior(&sidecar_path, &legacy_sidecar_path, public_output.as_ref())?
+    else {
         // No sidecar or schema mismatch → full rebuild.
         return do_full_build(out, &files, &sidecar_path, &legacy_sidecar_path);
     };
 
     // ── Hash every current file (needed for the diff) ───────────────────────────
-    let current_inputs: Vec<(PathBuf, Vec<u8>)> = files
-        .iter()
-        .map(|p| {
-            let bytes = habitat_graph_source::read_local(p, 0)?;
-            Ok((p.clone(), bytes))
-        })
-        .collect::<Result<_>>()?;
+    let current_inputs = read_inputs(&files)?;
 
     let current_manifest =
         habitat_graph_source::build_manifest(&current_inputs, env!("CARGO_PKG_VERSION"));
@@ -213,12 +211,69 @@ fn run_inner(dir: &Path, out: &Path) -> Result<()> {
     Ok(())
 }
 
-fn load_available_prior(current: &Path, legacy: &Path) -> Result<Option<Graph>> {
-    if current.exists() {
-        try_load_prior(current)
-    } else {
-        try_load_prior(legacy)
+fn load_available_prior(
+    current: &Path,
+    legacy: &Path,
+    public: Option<&PublicOutput>,
+) -> Result<Option<Graph>> {
+    if let Some(prior) = try_load_prior(current, public)? {
+        return Ok(Some(prior));
     }
+    if legacy != current {
+        return try_load_prior(legacy, public);
+    }
+    Ok(None)
+}
+
+fn read_inputs(files: &[PathBuf]) -> Result<Vec<(PathBuf, Vec<u8>)>> {
+    files
+        .iter()
+        .map(|path| {
+            let bytes = habitat_graph_source::read_local(path, 0)?;
+            Ok((path.clone(), bytes))
+        })
+        .collect()
+}
+
+struct PublicOutput {
+    generation: String,
+    semantic_generation: String,
+}
+
+fn load_public_output(path: &Path) -> Result<Option<PublicOutput>> {
+    let metadata = match std::fs::symlink_metadata(path) {
+        Ok(metadata) => metadata,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(error) => {
+            return Err(GraphError::Io(format!(
+                "inspect public graph {}: {error}",
+                path.display()
+            )))
+        }
+    };
+    if !metadata.file_type().is_file() {
+        return Err(GraphError::Guard(format!(
+            "public graph is not a regular file: {}",
+            path.display()
+        )));
+    }
+    let text = std::fs::read_to_string(path)
+        .map_err(|error| GraphError::Io(format!("read public graph: {error}")))?;
+    let graph = if text.trim().is_empty() {
+        Graph::default()
+    } else {
+        match habitat_graph_serve::from_node_link(&text) {
+            Ok(graph) => graph,
+            Err(error) => {
+                eprintln!("warning: public graph parse failed ({error}): forcing full rebuild");
+                return Ok(None);
+            }
+        }
+    };
+    Ok(Some(PublicOutput {
+        semantic_generation: super::private_state::semantic_generation(&graph)?,
+        generation: super::private_state::generation(text.as_bytes()),
+    }))
 }
 
 fn prepare_private_state(out: &Path) -> Result<(PathBuf, PathBuf)> {
@@ -241,23 +296,60 @@ fn prepare_private_state(out: &Path) -> Result<(PathBuf, PathBuf)> {
 ///
 /// # Errors
 ///
-/// Returns [`GraphError::Io`] only if the sidecar file exists but cannot be read from disk.
-fn try_load_prior(sidecar_path: &Path) -> Result<Option<Graph>> {
-    if !sidecar_path.exists() {
+/// Returns an error if private state or public output cannot be inspected safely.
+fn try_load_prior(sidecar_path: &Path, public: Option<&PublicOutput>) -> Result<Option<Graph>> {
+    let mut state = if let Some(public) = public {
+        match super::private_state::load_matching(
+            sidecar_path,
+            Some(&public.generation),
+            Some(&public.semantic_generation),
+            "incremental private state",
+        ) {
+            Ok(state) => state,
+            Err(error) if error.kind() == "schema" => {
+                eprintln!("warning: sidecar parse failed ({error}): forcing full rebuild");
+                return Ok(None);
+            }
+            Err(error) => return Err(error),
+        }
+    } else {
+        None
+    };
+    if state.is_none() {
+        state = match super::private_state::read(sidecar_path, "incremental private state") {
+            Ok(state) => state,
+            Err(error) if error.kind() == "schema" => {
+                eprintln!("warning: sidecar parse failed ({error}): forcing full rebuild");
+                return Ok(None);
+            }
+            Err(error) => return Err(error),
+        };
+    }
+    let Some(state) = state else {
+        return Ok(None);
+    };
+
+    let public_matches = if let Some(public) = public {
+        if super::private_state::matches_public(
+            &state,
+            Some(&public.generation),
+            Some(&public.semantic_generation),
+        ) {
+            true
+        } else {
+            let projected = habitat_graph_export::to_node_link(&state.graph)?;
+            let projected = habitat_graph_serve::from_node_link(&projected)?;
+            super::private_state::semantic_generation(&projected)? == public.semantic_generation
+        }
+    } else {
+        false
+    };
+    if !public_matches {
+        eprintln!("warning: private state does not match graph.json: forcing full rebuild");
         return Ok(None);
     }
 
-    let bytes =
-        std::fs::read(sidecar_path).map_err(|e| GraphError::Io(format!("sidecar read: {e}")))?;
-    let text = String::from_utf8_lossy(&bytes);
-
-    let graph = match super::private_state::parse(&text) {
-        Ok(state) => state.graph,
-        Err(e) => {
-            eprintln!("warning: sidecar parse failed ({e}): forcing full rebuild");
-            return Ok(None);
-        }
-    };
+    let graph = state.graph;
 
     if graph.schema != SCHEMA_VERSION {
         eprintln!(
@@ -297,13 +389,7 @@ fn do_full_build(
     let graph = graph.sorted();
 
     // Compute the sidecar manifest (second pass over the same files for content hashes).
-    let inputs: Vec<(PathBuf, Vec<u8>)> = files
-        .iter()
-        .map(|p| {
-            let bytes = habitat_graph_source::read_local(p, 0)?;
-            Ok((p.clone(), bytes))
-        })
-        .collect::<Result<_>>()?;
+    let inputs = read_inputs(files)?;
     let manifest = habitat_graph_source::build_manifest(&inputs, env!("CARGO_PKG_VERSION"));
 
     let n = graph.nodes.len();
@@ -340,11 +426,13 @@ fn write_artifacts(
     let mut sidecar = graph.clone();
     sidecar.manifest = current_manifest;
     let public_json = habitat_graph_export::to_node_link(graph)?;
+    let public_graph = habitat_graph_serve::from_node_link(&public_json)?;
     let sidecar_json = super::private_state::serialize(
         &sidecar,
         &super::private_state::generation(public_json.as_bytes()),
+        &super::private_state::semantic_generation(&public_graph)?,
     )?;
-    super::private_state::write(sidecar_path, &sidecar_json)?;
+    super::private_state::write_state(sidecar_path, &sidecar_json)?;
     if sidecar_path != legacy_sidecar_path {
         super::private_state::remove(legacy_sidecar_path, "legacy private state")?;
     }
@@ -580,6 +668,41 @@ mod tests {
         let _ = run(src.path(), out.path());
         let g = parse_sidecar(out.path());
         assert_eq!(g.nodes.len(), 1);
+    }
+
+    #[test]
+    fn mismatched_public_generation_forces_source_rebuild() {
+        let src = TempDir::new().unwrap();
+        let out = TempDir::new().unwrap();
+        mk_file(src.path(), "lib.rs", "fn source_truth() {}");
+        assert_eq!(run(src.path(), out.path()), 0);
+
+        let committed_public = read_graph_json(out.path());
+        let committed_graph = habitat_graph_serve::from_node_link(&committed_public).unwrap();
+        let mut stale_private = super::super::private_state::parse(&read_sidecar(out.path()))
+            .unwrap()
+            .graph;
+        stale_private.nodes[0].label = "stale_private_cache".to_owned();
+        let stale_bytes = super::super::private_state::serialize(
+            &stale_private,
+            &super::super::private_state::generation(committed_public.as_bytes()),
+            &super::super::private_state::semantic_generation(&committed_graph).unwrap(),
+        )
+        .unwrap();
+        fs::write(out.path().join(SIDECAR), stale_bytes).unwrap();
+
+        let mut checked_out = committed_graph;
+        checked_out.nodes[0].label = "checked_out_public".to_owned();
+        fs::write(
+            out.path().join("graph.json"),
+            habitat_graph_export::to_node_link(&checked_out).unwrap(),
+        )
+        .unwrap();
+
+        assert_eq!(run(src.path(), out.path()), 0);
+        let rebuilt = read_graph_json(out.path());
+        assert!(rebuilt.contains("source_truth"));
+        assert!(!rebuilt.contains("stale_private_cache"));
     }
 
     #[test]
