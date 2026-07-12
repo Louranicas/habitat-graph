@@ -146,6 +146,7 @@ Read `doctor --json` (doc 18 §1) — the agent/operator manifest. Key operation
 | **I-7** | severed-arc storm (arc-telemetry alarm) | a real factory-wiring regression (or a graph rebuild that dropped a grammar → false arcs); confirm against the declared arc set (C-G5); if real → injection.db trap + S1008620; if artifact → it's I-3/I-5 underneath |
 | **I-8** | DoS attempt (`rejected_dos` spike on pdf/url) | the C-2 caps working as designed; confirm caps (size/timeout/mem) holding; these are off the agent-critical path (R11b) so no serve impact; log the source |
 | **I-9** | a model can't drive the organ | run XM-1…7 (doc 17 §9) for the failing client; check capability negotiation (manifest discoverable?), transport mount (MCP config / bridge / UDS perms), token-budget basis (R7a tokenizer field) |
+| **I-10** | `update`/`add` refuses a pending transaction or private lineage | stop concurrent writers and return to the Git context that created the operation; retry the same command so the owner-only journal can recover. Do not delete state or journals by hand. A changed public graph, multiple journals, unverified ancestry, or mismatched checksum fails closed and needs forensic review before regeneration. |
 
 ---
 

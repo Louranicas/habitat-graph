@@ -136,7 +136,7 @@ src/
     url.rs         # validate_url (allow/size/timeout)
     path.rs        # confine to output dir (anti-traversal)
     sanitize.rs    # label: 256-char cap, strip control chars, display_safe (Trojan-Source/bidi defence — DDF lesson)
-    secrets.rs     # secret screen on persisted/exported content
+    secrets.rs     # canonical public-output redaction; raw graph values stay internal
 ```
 Responsibilities: IDs · ranges · the graph model · confidence · config · receipts · the security
 boundary (every external input funnels through `guard`). Public-API rule: `lib.rs` re-exports stable
@@ -216,8 +216,10 @@ src/
   export/
     mod.rs  json.rs  html.rs  svg.rs  graphml.rs  cypher.rs  obsidian.rs  wiki.rs
 ```
-Flow: `Graph + analysis -> artifacts`. Tests: each exporter vs golden; html self-contained; json
-schema-compat (R2); obsidian wikilink correctness; benchmark token math.
+Flow: `Graph + analysis -> deterministic public projection -> destination escaping -> artifacts`.
+The projection redacts screened strings without changing node IDs, edge endpoints, counts, or
+communities. Tests: each exporter vs golden; cross-format redaction parity; html self-contained;
+json schema-compat (R2); obsidian wikilink correctness; benchmark token math.
 
 ### `habitat-graph-daemon`  (L7) — the warm-DB host (ADR-04 §8.2, the "cluster")
 The long-running process holding the salsa DB + warm graph; morphd-shaped UDS. The capacity multiplier.

@@ -32,6 +32,13 @@ pub struct Span { pub start_byte: u32, pub end_byte: u32, pub start_line: u32, p
 (diff-minimal for the merge driver); `generated_at` is the ONLY non-deterministic field and is omitted
 under `--deterministic` (parity mode). JSON is a complete document; never partial.
 
+The Rust `Graph` above is the complete internal model. Public `graph.json` uses the graphify-compatible
+node-link envelope and projects every attacker-influenced string through the shared deterministic
+secret screen before destination escaping. Redaction changes labels, source paths, and relations only:
+the original `NodeId`s, edge endpoints, counts, and community assignments are preserved. Raw graphs
+needed by `update` and `add` are stored separately in owner-only state, scoped by canonical output and
+Git context; byte/semantic generations tie that state to the corresponding public projection.
+
 ## 2. Salsa query graph — the incremental contract (`habitat-graph-cache`)
 
 The pipeline expressed as salsa inputs + tracked functions (current salsa API shape: `#[salsa::input]`,
@@ -144,7 +151,11 @@ pub enum GraphError {
 }
 ```
 No `unwrap`/`expect` in lib; every fallible boundary returns `Result<_, GraphError>`; the CLI maps
-variants → the §4 exit codes. (Guard escapes Trojan-Source/bidi at every render boundary — DDF lesson.)
+variants → the §4 exit codes. Guard first replaces screened private-key/token/header patterns with
+canonical `[REDACTED:<ordered-tags>]` markers, then applies the destination's Trojan-Source,
+bidi, XML, Markdown, JSON, or Cypher escaping. The screen is deliberately high-signal rather than a
+general secret scanner. Redacted parallel relations use endpoint-local structural ordinals, not a
+digest of the secret value.
 
 ---
 

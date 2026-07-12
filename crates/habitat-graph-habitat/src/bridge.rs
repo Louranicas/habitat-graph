@@ -2,7 +2,7 @@
 //!
 //! This module implements the [`ServiceProbe`] boundary trait plus the in-memory test double
 //! [`StaticProbe`] so the whole crate can be built and gated without touching any live service.
-//! The concrete [`HttpProbe`] (plain HTTP GET + 200 check) lives behind
+//! The concrete `HttpProbe` (plain HTTP GET + 200 check) lives behind
 //! `#[cfg(feature = "live-bridges")]` and requires the `ureq` crate.
 //!
 //! ## Path-map special case — Maintenance Engine
@@ -52,7 +52,7 @@ pub struct HealthReport {
 
 /// Boundary trait for probing a [`ServiceEndpoint`] and returning a [`HealthReport`].
 ///
-/// Both the in-memory double ([`StaticProbe`]) and the live adapter ([`HttpProbe`], behind the
+/// Both the in-memory double ([`StaticProbe`]) and the live adapter (`HttpProbe`, behind the
 /// `live` feature) implement this trait, so [`probe_all`] and [`count_healthy`] are fully
 /// generic and testable without I/O.
 ///

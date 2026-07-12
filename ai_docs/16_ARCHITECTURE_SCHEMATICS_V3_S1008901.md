@@ -143,6 +143,12 @@ flowchart LR
 ```
 *Rule (F13): a redrawn SVG must never widen the agent's staleness window. The human-artifact exporters run off the critical path; `--svg/--graphml/--wiki` are opt-in flags on `extract`.*
 
+Every branch in this matrix crosses the same public-projection boundary before serialization:
+screened strings become deterministic redaction markers while node IDs, edges, counts, and
+communities remain intact. Format-specific escaping happens after that projection. Previously
+adopted optional artifacts and generated wiki/vault files are refreshed only through conservative
+ownership manifests; unowned files are preserved.
+
 ## 5. Lifecycle state machine (PC) — update · watch · hook (with the single-writer lock)
 
 ```mermaid
@@ -163,6 +169,12 @@ stateDiagram-v2
   Delta --> Idle: release lock; push delta (arming-gated)
 ```
 *`--update` is honest: file-cache is extraction-level; Leiden re-runs globally → the plan measures/discloses the analyze cost rather than calling file-cache "incremental" (C-4, doc 09:38).*
+
+The lifecycle has two persistence planes: redacted public artifacts and a complete raw incremental
+graph. The raw plane is owner-only, keyed by canonical output plus Git context, and protected by an
+output lock, bounded snapshots, and lineage-checked add/update journals. Public artifacts are written
+atomically and a no-source-change update still refreshes them, preventing old export policy from
+surviving indefinitely.
 
 ## 6. Semantic / multimodal pipeline (PE) — local-first, TIERWRIGHT-routed
 

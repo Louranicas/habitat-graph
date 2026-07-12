@@ -1,4 +1,4 @@
-//! Obsidian vault export: one note per node with `[[wikilinks]]`.
+//! Obsidian vault export: one deterministically redacted note per node with `[[wikilinks]]`.
 
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::fmt::Write as FmtWrite;
@@ -42,6 +42,10 @@ const NOTE_EXTENSION: &str = ".md";
 /// ```
 ///
 /// An edge appears at **both** endpoints (source and target). Self-loops appear once.
+/// Labels, source paths, and relations use the shared deterministic secret redaction before
+/// Markdown/Obsidian escaping. The projection retains one note per original [`NodeId`], the same
+/// links, and the same community membership; redacted filenames include that ID to avoid marker
+/// collisions.
 ///
 /// # MOC
 ///

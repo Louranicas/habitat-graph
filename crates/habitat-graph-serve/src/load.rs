@@ -1,4 +1,4 @@
-//! Load a node-link `graph.json` back into a queryable [`Graph`](habitat_graph_core::Graph).
+//! Load a node-link `graph.json` back into a queryable [`Graph`].
 
 use std::collections::BTreeMap;
 
@@ -21,7 +21,7 @@ use habitat_graph_core::{
 /// communities by id with members ascending), satisfying the determinism invariant R4.
 ///
 /// # Errors
-/// Returns [`GraphError::Schema`](habitat_graph_core::GraphError::Schema) if `json` is not a valid
+/// Returns [`GraphError::Schema`] if `json` is not a valid
 /// node-link document (missing `nodes`/`links`, wrong field types, unknown confidence value, etc.).
 pub fn from_node_link(json: &str) -> Result<Graph> {
     let root: serde_json::Value =

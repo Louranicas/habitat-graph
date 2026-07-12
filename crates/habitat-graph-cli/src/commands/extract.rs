@@ -1,4 +1,9 @@
 //! The `extract` command — the full pipeline (detect → extract → build → analyze → export → write).
+//!
+//! Core and optional artifacts are public redacted projections. Hidden ownership manifests let a
+//! later `extract`, `update`, or `watch` refresh previously generated optional/wiki output without
+//! deleting or overwriting unowned files. Obsidian vault sync uses the same fail-closed ownership
+//! rule, including conservative recognition of the exact legacy generated-note layout.
 
 use std::collections::{BTreeMap, HashSet};
 use std::fmt::Write as _;
@@ -23,7 +28,9 @@ const OPTIONAL_ARTIFACTS: &[&str] = &["graph.svg", "graph.graphml", "graph.cyphe
 /// Optional PB exporter artifacts to emit alongside the always-written core artifacts.
 ///
 /// All default to `false` (F13: human-facing exporters never burden the agent-critical path —
-/// `graph.json` + `GRAPH_REPORT.md` + `graph.html` are always written; these are opt-in).
+/// `graph.json` + `GRAPH_REPORT.md` + `graph.html` are always written; these are opt-in). Once an
+/// optional artifact is explicitly adopted, its ownership manifest keeps it refreshed on later
+/// default runs even when the flag is omitted.
 // A flat set of independent on/off CLI toggles is the natural representation here.
 #[allow(clippy::struct_excessive_bools)]
 #[derive(Debug, Default, Clone, Copy)]
@@ -965,6 +972,16 @@ fn wiki_manifest_exists(wiki_dir: &Path) -> Result<bool> {
     Ok(true)
 }
 
+/// Synchronizes generated wiki pages while preserving every unowned path.
+///
+/// `claim_unowned` permits a first explicit `--wiki` run to adopt only signed pages or a complete,
+/// reciprocally linked legacy wiki. Later runs trust the ownership manifest; malformed manifests,
+/// unsafe filenames, and collisions with unowned files fail closed.
+///
+/// # Errors
+///
+/// Returns [`GraphError::Io`] for filesystem failures, [`GraphError::Schema`] for invalid
+/// manifests, or [`GraphError::Guard`] when a path cannot safely be claimed or replaced.
 pub(super) fn sync_generated_wiki(
     wiki_dir: &Path,
     rendered: &[(String, String)],
@@ -1150,6 +1167,16 @@ fn select_optional_artifact(
     }
 }
 
+/// Atomically writes the core redacted artifacts and refreshes owned optional/wiki projections.
+///
+/// An explicit option adopts the corresponding optional artifact. On subsequent calls its hidden
+/// ownership manifest refreshes it even with default options. Existing unowned artifacts are left
+/// untouched (with a warning), and invalid manifests or unsafe file types fail closed.
+///
+/// # Errors
+///
+/// Returns [`GraphError::Io`] for filesystem failures, [`GraphError::Schema`] for serialization or
+/// manifest failures, and [`GraphError::Guard`] for unsafe or unowned replacement targets.
 pub(super) fn write_public_artifacts(out: &Path, graph: &Graph, opts: ExtractOpts) -> Result<()> {
     std::fs::create_dir_all(out).map_err(|error| GraphError::Io(error.to_string()))?;
 

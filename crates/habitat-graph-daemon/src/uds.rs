@@ -12,7 +12,7 @@
 //!
 //! A `BufReader::lines()` / `next_line()` call accumulates the entire line before returning; a
 //! malicious local client that sends a gigabyte with no newline would exhaust process memory.
-//! [`serve_uds`] uses [`read_bounded_line`] — a manual [`AsyncBufRead`] fill/consume loop — to
+//! [`serve_uds`] uses a private `read_bounded_line` helper — a manual [`AsyncBufRead`] fill/consume loop — to
 //! cap the per-line buffer at [`MAX_LINE_BYTES`]. Connections that exceed the cap receive a
 //! JSON-RPC parse-error response (`code -32700`) and are closed.
 
@@ -55,7 +55,7 @@ struct Snapshot {
 
 /// Atomically-swappable warm state: the served [`Graph`] and its prebuilt [`LabelIndex`].
 ///
-/// Held behind one [`ArcSwap`] over a [`Snapshot`] so [`WarmState::reload`] replaces both
+/// Held behind one [`ArcSwap`] over a private `Snapshot` so [`WarmState::reload`] replaces both
 /// atomically — in-flight requests keep serving the prior snapshot; new requests see the new one;
 /// no lock; no downtime.
 pub struct WarmState {

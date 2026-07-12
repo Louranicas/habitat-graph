@@ -12,7 +12,7 @@
 //! | Transport | Feature | Remarks |
 //! |---|---|---|
 //! | [`LoopbackTransport`] | always | in-process round-trip; zero network/spawn |
-//! | [`live::ProcessTransport`] | `live` | shells out to `cc-pipe` |
+//! | `live::ProcessTransport` | `live` | shells out to `cc-pipe` |
 //!
 //! Tests exclusively use [`LoopbackTransport`] — zero I/O, zero process spawning.
 //!

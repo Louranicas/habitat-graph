@@ -73,10 +73,11 @@ fn community_of(graph: &Graph) -> HashMap<NodeId, CommunityId> {
 
 /// Returns all trusted edges that bridge two distinct communities, in [`Graph`]`::edges` order.
 ///
-/// A "surprising" connection is a [`Confidence::Extracted`] edge whose source and target nodes
+/// A "surprising" connection is a
+/// [`Confidence::Extracted`](habitat_graph_core::Confidence::Extracted) edge whose source and target nodes
 /// belong to **different** communities.  Edges where either endpoint has no community assignment,
 /// where both endpoints share the same community, or whose confidence is not
-/// [`Confidence::Extracted`] are silently excluded.
+/// [`Confidence::Extracted`](habitat_graph_core::Confidence::Extracted) are silently excluded.
 ///
 /// The output is deterministic (R4): iteration follows `graph.edges` insertion order and no
 /// `HashMap` iteration order leaks into the result.

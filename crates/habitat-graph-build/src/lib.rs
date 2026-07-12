@@ -1,8 +1,8 @@
 //! `habitat-graph-build` — aggregate per-file extractions into the interned graph (L4).
 //!
-//! [`assemble`] interns each `RawNode` label to a stable [`NodeId`](habitat_graph_core::NodeId),
+//! [`assemble()`] interns each `RawNode` label to a stable [`NodeId`](habitat_graph_core::NodeId),
 //! resolves edge endpoints, drops duplicates, and returns a deterministic
-//! [`Graph`](habitat_graph_core::Graph). [`dedup`] and [`merge`] support incremental rebuilds.
+//! [`Graph`](habitat_graph_core::Graph). [`dedup()`] and [`merge()`] support incremental rebuilds.
 #![forbid(unsafe_code)]
 #![warn(missing_docs)]
 

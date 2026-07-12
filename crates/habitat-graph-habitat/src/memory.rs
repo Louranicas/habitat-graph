@@ -13,7 +13,7 @@
 //! # Boundary
 //!
 //! All storage is behind the [`MemorySink`] trait. Tests inject [`InMemorySink`] (no disk,
-//! no network, no processes). The concrete [`SqliteSink`] — backed by `rusqlite` with bound
+//! no network, no processes). The concrete `SqliteSink` — backed by `rusqlite` with bound
 //! `?` parameters exclusively — is compiled only with `feature = "live"`.
 
 use habitat_graph_core::{sanitize_label, GraphError, Result};
@@ -62,7 +62,7 @@ pub struct PovmPathway {
 ///
 /// Implementations must be `Send + Sync` so they can be shared across threads.
 /// The in-crate test double is [`InMemorySink`]; production wires the `live`-feature
-/// [`SqliteSink`].
+/// `SqliteSink`.
 ///
 /// # Errors
 ///

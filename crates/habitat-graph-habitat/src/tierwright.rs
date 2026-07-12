@@ -1,4 +1,4 @@
-//! TIERWRIGHT backend — [`Backend`](habitat_graph_backend::Backend) implementation that routes
+//! TIERWRIGHT backend — [`Backend`] implementation that routes
 //! semantic extraction through the factory's TIERWRIGHT model router (`:8201`).
 //!
 //! TIERWRIGHT speaks a simple envelope protocol:
@@ -7,7 +7,7 @@
 //! - **Response:** `{ "output": "<json-string>" }` where the inner string is the `{nodes,edges}`
 //!   JSON understood by [`habitat_graph_backend::parse_semantic`].
 //!
-//! The backend is generic over [`HttpTransport`](habitat_graph_backend::HttpTransport) so it is
+//! The backend is generic over [`HttpTransport`] so it is
 //! fully testable without a running service: tests inject
 //! [`StaticTransport`](habitat_graph_backend::StaticTransport); production wires a real client
 //! via the `live` feature.

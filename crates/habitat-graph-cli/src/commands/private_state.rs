@@ -1,3 +1,15 @@
+//! Owner-only persistence for raw graphs used by `update` and `add`.
+//!
+//! Public artifacts contain the deterministic redacted projection, so incremental operations keep
+//! the complete graph separately. In a Git repository the state is keyed by canonical output path
+//! and branch/detached-HEAD context below the resolved Git metadata directory; non-Git outputs use
+//! the legacy hidden sidecar. Directories are hardened to `0o700` and files to `0o600` on Unix.
+//! Platforms that cannot enforce those permissions fail closed and remove unsupported legacy state.
+//!
+//! Bounded snapshots allow a matching earlier public generation to recover after a branch switch.
+//! Output locks serialize writers, while add/update journals bind interrupted transactions to their
+//! originating context, lineage, public generations, and private checksums before retrying them.
+
 use std::collections::{BTreeSet, HashMap, HashSet};
 use std::ffi::OsString;
 use std::io::{BufRead as _, Read as _};

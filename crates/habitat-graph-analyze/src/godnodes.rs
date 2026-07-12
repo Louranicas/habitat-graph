@@ -2,7 +2,7 @@
 //!
 //! Surfaces the already-computed [`degree_centrality`](crate::degree_centrality) as labelled,
 //! ranked hubs. The primary sort key is total degree (descending); the tiebreak is
-//! [`NodeId`](habitat_graph_core::NodeId) ascending, giving a deterministic total order (R4).
+//! [`NodeId`] ascending, giving a deterministic total order (R4).
 //!
 //! ## Label resolution
 //!

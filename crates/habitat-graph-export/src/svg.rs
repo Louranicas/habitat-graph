@@ -4,8 +4,8 @@
 //! one `<text>` label per node, and one `<line>` per edge. Layout is fully deterministic (R4):
 //! nodes are placed on a circle in the order of `graph.nodes`; angles are derived solely from
 //! node index and node count. Community membership drives fill colour via a fixed palette. Every
-//! attacker-influenced string (node label, etc.) is routed through [`crate::escape::xml_escape`]
-//! (STRIDE-T). No randomness; no system clock.
+//! attacker-influenced node label is redacted through the shared public-output policy and routed
+//! through [`crate::escape::xml_escape`] (STRIDE-T). No randomness; no system clock.
 
 use std::collections::HashMap;
 use std::f64::consts::PI;
@@ -53,8 +53,10 @@ const UNCLUSTERED_FILL: &str = "#cccccc";
 /// whose source or target [`NodeId`] is absent from `graph.nodes` is silently skipped.
 /// Self-loop edges (source == target in position space) are also skipped.
 ///
-/// All node labels and graph-derived strings are passed through [`xml_escape`] before embedding,
-/// neutralising XML-injection payloads such as `</text><script>alert(1)</script>` (STRIDE-T).
+/// All node labels first use deterministic secret redaction and then pass through [`xml_escape`]
+/// before embedding, neutralising XML-injection payloads such as
+/// `</text><script>alert(1)</script>` (STRIDE-T). Redaction does not change node positions, edge
+/// lines, or community-derived colours.
 ///
 /// The function is infallible and never touches the filesystem, network, or system clock.
 #[must_use]

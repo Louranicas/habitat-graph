@@ -8,7 +8,7 @@ use std::sync::Mutex;
 /// A minimal blocking HTTP transport: send a JSON `body` to `url` via `POST`, return the response.
 ///
 /// Backends are generic over this trait so tests inject a deterministic [`StaticTransport`] and
-/// production wires a real client (the `net`-feature [`UreqTransport`], or the habitat crate's
+/// production wires a real client (the `net`-feature `UreqTransport`, or the habitat crate's
 /// TIERWRIGHT-routed transport).
 pub trait HttpTransport: Send + Sync {
     /// Sends an HTTP `POST` of `body` to `url` with `Content-Type: application/json` plus any extra

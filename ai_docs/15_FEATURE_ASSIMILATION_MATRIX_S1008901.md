@@ -69,6 +69,12 @@ Each grammar's real cost is **not** the extractor; it is the oracle pipeline:
 | X3 | `--neo4j` → cypher | `export::cypher` (`CREATE`/`MERGE`) | ❌ | parses | tooling |
 | X4 | `--wiki` (+`index.md`) | `export::wiki` (folds w/ obsidian) | ❌ | links resolve | dual-value (agent-crawlable) |
 
+**Cross-export security invariant:** node-link JSON, report, HTML, SVG, GraphML, Cypher, Obsidian,
+and wiki all use one export-boundary redaction policy. It preserves IDs/topology/counts/communities,
+uses canonical markers plus structural ordinals for lossy parallel relations, and only then applies
+the destination grammar's escaping. Generated Markdown and optional artifacts are ownership-tracked
+so policy upgrades refresh proven generated files without overwriting user-authored content.
+
 ## D. Lifecycle & integration — Phase PC
 
 | # | graphify | hg home | status | gate | correction bound in |
@@ -80,6 +86,10 @@ Each grammar's real cost is **not** the extractor; it is the oracle pipeline:
 | C6 | `add <URL>` | `source::ingest` + `cli::add` | 🟡 ingest scaffolded | size/timeout caps + **SSRF/private-IP block** | C-2 (doc 09:46) |
 | C1 | `--mode deep` (inferred edges) | `extract` heuristic `uses`/`references` @ INFERRED/AMBIGUOUS | ❌ | **gated OUT of analyze→sphere→arc** | T1/F12 (doc 09:104) |
 | — | schema-versioning | `core::schema` `schema_version` field | ❌ | `--update` detects taxonomy mismatch | P1-G12 (doc 09:64) |
+
+`update`/`add` keep their complete raw graphs in owner-only, output- and Git-context-scoped state;
+bounded snapshots and lineage-checked journals make branch switches and interrupted writes
+retry-safe. A no-change `update` still re-renders public artifacts and re-hardens private state.
 
 ## E. Analytics — Phase PD
 

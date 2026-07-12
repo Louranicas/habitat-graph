@@ -48,9 +48,10 @@ pub fn estimate_tokens(text: &str) -> usize {
 /// The node-link estimate falls back to `0` if serialization fails (it cannot in practice for a
 /// well-formed [`Graph`]); the report estimate is always available.
 ///
-/// Both estimates are deterministic: identical graphs produce identical [`TokenBenchmark`] values
-/// (R4 invariant). Call [`Graph::sorted`](habitat_graph_core::Graph::sorted) before this function
-/// to obtain the canonical ordering.
+/// Both estimates measure the public redacted projections, not the raw internal strings, and are
+/// deterministic: identical graphs produce identical [`TokenBenchmark`] values (R4 invariant).
+/// Call [`Graph::sorted`](habitat_graph_core::Graph::sorted) before this function to obtain the
+/// canonical ordering.
 ///
 /// # Examples
 ///

@@ -1,4 +1,4 @@
-//! The `update` command — incremental rebuild with sidecar-based extraction cache (FO-9 lifecycle).
+//! The `update` command — incremental rebuild with owner-only raw extraction state (FO-9 lifecycle).
 //!
 //! ## Honest cost model (C-4)
 //!
@@ -8,12 +8,14 @@
 //! after each incremental merge. The state cache saves AST-parsing work; it does not save analysis
 //! work.
 //!
-//! ## Sidecar format
+//! ## Private-state format and location
 //!
-//! The sidecar stores the complete [`Graph`] in graph-compatible JSON together with byte and
-//! semantic generations of its committed public projection. Prior generations are retained as
-//! owner-only snapshots so branch switches can recover matching raw lineage. On the next
-//! incremental run three things are extracted from it without extra serialization overhead:
+//! The state stores the complete [`Graph`] in graph-compatible JSON together with byte and semantic
+//! generations of its committed public projection. In Git it lives below the resolved metadata
+//! directory, keyed by canonical output and Git context; non-Git outputs use the legacy hidden
+//! sidecar. Prior generations are retained as owner-only snapshots so branch switches can recover
+//! matching raw lineage. On the next incremental run three things are extracted from it without
+//! extra serialization overhead:
 //!
 //! - `graph.schema` — the [`SCHEMA_VERSION`] at build time (for the P1-G12 mismatch guard).
 //! - `graph.manifest.inputs` — the `path → content_hash` map used to diff against the current
@@ -23,7 +25,7 @@
 //!
 //! ## Schema-version guard (P1-G12)
 //!
-//! If the sidecar's `schema` field differs from the current [`SCHEMA_VERSION`], a warning is
+//! If the private state's `schema` field differs from the current [`SCHEMA_VERSION`], a warning is
 //! emitted to stderr and a full rebuild is performed.  Silently merging across taxonomy versions
 //! would corrupt the graph by mixing incompatible node/edge semantics.
 
@@ -32,12 +34,12 @@ use std::path::{Path, PathBuf};
 
 use habitat_graph_core::{Graph, GraphError, Manifest, NodeId, Result, SCHEMA_VERSION};
 
-/// Sidecar filename storing the full internal [`Graph`] JSON (relative to the output directory).
+/// Legacy non-Git/migration filename for the full internal [`Graph`] state.
 const SIDECAR: &str = ".habitat-graph-state.json";
 
 /// Runs an incremental update over `dir`, writing refreshed artifacts into `out`.
 ///
-/// On the first invocation (no sidecar present) or after a [`SCHEMA_VERSION`] mismatch, a full
+/// On the first invocation (no matching private state) or after a [`SCHEMA_VERSION`] mismatch, a full
 /// rebuild is performed.  On subsequent invocations only files whose `blake3` content hash has
 /// changed are re-extracted; unchanged files' nodes/edges are preserved from the prior graph.
 /// Community detection is always re-run globally (honest C-4 cost: Leiden is not incremental).
@@ -47,7 +49,7 @@ const SIDECAR: &str = ".habitat-graph-state.json";
 /// Emits exactly one summary line on success:
 /// - `"update: {changed} changed, {n} nodes (analyze re-run globally)"` after any build.
 /// - `"update: 0 changed, {n} nodes (artifacts refreshed; analyze not re-run)"` when source
-///   inputs are unchanged. Public artifacts and private sidecar permissions are still refreshed so
+///   inputs are unchanged. Public artifacts and private-state permissions are still refreshed so
 ///   an exporter-policy upgrade cannot leave legacy output behind.
 ///
 /// Returns a process exit code: `0` on success, `4` on any error (diagnostics to stderr).
@@ -74,7 +76,7 @@ pub fn run(dir: &Path, out: &Path) -> u8 {
 ///
 /// Returns [`GraphError::Io`] on filesystem failures, [`GraphError::Parse`] on extraction
 /// failures, [`GraphError::Schema`] on serialization failures, or [`GraphError::Guard`] when
-/// private sidecar permissions cannot be enforced.
+/// private-state permissions cannot be enforced.
 fn run_inner(dir: &Path, out: &Path) -> Result<()> {
     let (sidecar_path, legacy_sidecar_path, _output_lock) = prepare_update_transaction(out)?;
     let public_output = load_public_output(&out.join("graph.json"))?;
@@ -600,12 +602,12 @@ fn recover_update_journal(out: &Path, state_path: &Path, legacy_state_path: &Pat
     Ok(true)
 }
 
-/// Attempts to load the prior graph from the sidecar file.
+/// Attempts to load the prior graph from the context-scoped private state.
 ///
 /// Returns `Ok(None)` when:
-/// - The sidecar does not exist (first run — a full build is needed).
-/// - The sidecar is corrupted / not valid JSON (a warning is printed to stderr).
-/// - The sidecar's `schema` differs from [`SCHEMA_VERSION`] (taxonomy mismatch; warning printed).
+/// - No matching state exists (first run — a full build is needed).
+/// - The state is corrupted / not valid JSON (a warning is printed to stderr).
+/// - The state's `schema` differs from [`SCHEMA_VERSION`] (taxonomy mismatch; warning printed).
 ///
 /// # Errors
 ///
@@ -679,10 +681,10 @@ fn try_load_prior(sidecar_path: &Path, public: Option<&PublicOutput>) -> Result<
 /// Performs a full rebuild from scratch (first run or schema-version mismatch).
 ///
 /// Reads every file in `files`, runs the full pipeline
-/// (extract → assemble → analyze → export), and writes all artifacts including a fresh sidecar.
+/// (extract → assemble → analyze → export), and writes all artifacts plus fresh private state.
 ///
 /// Files are read twice: once internally by `extract_files` for AST parsing, and once here to
-/// compute the `blake3` content hashes for the sidecar manifest.
+/// compute the `blake3` content hashes for the private-state manifest.
 ///
 /// # Errors
 ///
@@ -724,9 +726,9 @@ fn do_full_build(
 /// Writes all three core artifacts (`graph.json`, `GRAPH_REPORT.md`, `graph.html`), refreshes any
 /// existing optional exports, and writes the private state cache.
 ///
-/// The sidecar stores `graph` with `current_manifest` substituted in: this ensures the sidecar
+/// The private state stores `graph` with `current_manifest` substituted in: this ensures the cache
 /// tracks the actual content hashes of the current file-system snapshot, not the empty manifest
-/// produced by [`habitat_graph_build::assemble`].
+/// produced by [`habitat_graph_build::assemble()`].
 ///
 /// # Errors
 ///

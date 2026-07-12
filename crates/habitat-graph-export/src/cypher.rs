@@ -1,7 +1,8 @@
 //! Cypher exporter — Neo4j `MERGE` statements (the graphify `--neo4j` analogue).
 //!
-//! Every attacker-influenced string (`label`, `source_file`, `relation`) is routed through
-//! [`crate::escape::cypher_escape`] before embedding in any single-quoted Cypher literal
+//! Every attacker-influenced string (`label`, `source_file`, `relation`) is redacted through the
+//! shared public-output policy, then routed through [`crate::escape::cypher_escape`] before
+//! embedding in any single-quoted Cypher literal
 //! (STRIDE-T injection guard).  The relationship type is always the fixed literal `:REL`;
 //! `relation` is stored as a *property*, never interpolated into the type-identifier position —
 //! a label like `' DETACH DELETE n //` is neutralised to `\' DETACH DELETE n //` so it cannot
@@ -28,9 +29,11 @@ use crate::escape::{cypher_escape, project_public_edges, redact_public_text};
 ///   MATCH (a {id: 1}),(b {id: 2}) MERGE (a)-[:REL {relation: 'calls', confidence: 'EXTRACTED'}]->(b);
 ///   ```
 ///
-/// All attacker-influenced strings (`label`, `source_file`, `relation`) are escaped through
-/// [`cypher_escape`](crate::escape::cypher_escape).  `confidence` is a bounded enum value
-/// produced by this library's own code; it is passed through `cypher_escape` for uniformity.
+/// All attacker-influenced strings (`label`, `source_file`, `relation`) first use deterministic
+/// secret redaction and are then escaped through [`cypher_escape`].
+/// Redaction leaves node IDs, edge endpoints, and the header counts unchanged. `confidence` is a
+/// bounded enum value produced by this library's own code; it passes through `cypher_escape` for
+/// uniformity.
 ///
 /// Node output follows `graph.nodes`; edges are ordered by public projected fields. For
 /// byte-identical canonical node and community output across runs, call

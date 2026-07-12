@@ -1,9 +1,10 @@
 //! `habitat-graph-core` — the stable vocabulary of the habitat-graph knowledge-graph engine.
 //!
 //! This crate is **vocabulary, not behaviour** (Module Structure Plan, Design Rule 1): it owns the
-//! interned [`ids`], the source [`span`], the [`confidence`] trust-signal, the graph [`schema`]
-//! (the `graph.json` wire truth, byte-compatible with the graphify exemplar), and the [`error`]
-//! taxonomy. It performs **no** filesystem, network, terminal, parser, or git operation.
+//! interned [`ids`], the source [`span`], the [`confidence`] trust-signal, the canonical internal
+//! graph [`schema`], and the [`error`] taxonomy. Public graphify-compatible `graph.json` is a
+//! deterministic redacted projection owned by `habitat-graph-export`. Core performs **no**
+//! filesystem, network, terminal, parser, or git operation.
 //!
 //! See `ai_docs/05_INTERFACE_CONTRACTS.md` §1 (schema) and §9 (errors) for the contracts this
 //! crate implements, and `docs/MODULE_STRUCTURE_PLAN.md` for its place in the workspace.

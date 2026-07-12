@@ -1,8 +1,12 @@
-//! The graph model — the `graph.json` wire truth (interface contract §1).
+//! The canonical internal graph model (interface contract §1).
 //!
 //! Serialization is **deterministic**: [`Graph::sorted`] canonicalizes collection order so diffs are
 //! minimal and the git merge driver stays conflict-free (R4). Paths are stored as normalized
 //! `String`s (forward-slash) for cross-platform wire stability rather than `PathBuf`.
+//!
+//! This model may contain raw attacker-influenced strings. Its serde representation is used for
+//! owner-only incremental state; public `graph.json` is the redacted node-link projection emitted
+//! by `habitat-graph-export`, which preserves IDs and topology while replacing screened strings.
 
 use serde::{Deserialize, Serialize};
 
@@ -16,9 +20,9 @@ pub const SCHEMA_VERSION: &str = "habitat-graph.graph.v0";
 pub struct Node {
     /// Stable identifier.
     pub id: NodeId,
-    /// Human-readable label.
+    /// Raw human-readable label; public exporters apply deterministic redaction.
     pub label: String,
-    /// Normalized source path the node was extracted from.
+    /// Raw normalized source path; public exporters apply deterministic redaction.
     pub source_file: String,
     /// Location within `source_file`.
     pub source_location: Span,
@@ -31,7 +35,7 @@ pub struct Edge {
     pub source: NodeId,
     /// Target node.
     pub target: NodeId,
-    /// Relationship kind (e.g. `"calls"`, `"imports"`, `"defines"`).
+    /// Raw relationship kind (e.g. `"calls"`, `"imports"`, `"defines"`); public exporters redact it.
     pub relation: String,
     /// How the relationship was derived.
     pub confidence: Confidence,
@@ -69,7 +73,7 @@ pub struct Manifest {
     pub generated_at: Option<String>,
 }
 
-/// The complete knowledge graph — the root of `graph.json`.
+/// The complete internal knowledge graph, including raw strings and provenance.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Graph {
     /// Schema version tag (see [`SCHEMA_VERSION`]).
@@ -141,7 +145,10 @@ impl Graph {
         self
     }
 
-    /// Serializes to canonical pretty JSON.
+    /// Serializes the complete, unredacted internal graph to canonical pretty JSON.
+    ///
+    /// This representation is suitable for owner-only state, not a public artifact. Use
+    /// `habitat_graph_export::to_node_link` at public output boundaries.
     ///
     /// # Errors
     /// Returns [`GraphError::Schema`](crate::GraphError::Schema) if serialization fails.
@@ -149,7 +156,9 @@ impl Graph {
         serde_json::to_string_pretty(self).map_err(|e| crate::GraphError::Schema(e.to_string()))
     }
 
-    /// Parses a graph from JSON.
+    /// Parses the complete internal graph representation from JSON.
+    ///
+    /// This is not the graphify-compatible node-link parser used for public `graph.json` files.
     ///
     /// # Errors
     /// Returns [`GraphError::Schema`](crate::GraphError::Schema) if the input is not a valid graph.

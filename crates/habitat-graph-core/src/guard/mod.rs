@@ -5,8 +5,10 @@
 //! the FS-canonicalizing confinement and live network caps live in `habitat-graph-source`/`-ingest`,
 //! which build on these.
 //!
-//! The cardinal rule (deep-diff-forge lesson): [`display_safe`] must be applied at **every** render
-//! boundary, including secondary UIs — a missed boundary is how Trojan-Source escapes leak.
+//! The cardinal rule (deep-diff-forge lesson): every public projection first applies
+//! [`redact_public_text`] without changing graph identity/topology, then applies [`display_safe`]
+//! and its destination grammar's escaping. This includes secondary UIs; one missed boundary is how
+//! secret text or Trojan-Source escapes leak.
 
 pub mod path;
 pub mod sanitize;

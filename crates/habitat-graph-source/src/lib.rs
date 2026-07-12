@@ -1,6 +1,6 @@
 //! `habitat-graph-source` — input acquisition + triage (Module Structure Plan L2).
 //!
-//! Three responsibilities: [`detect`] collects candidate files (honoring `.gitignore`), [`ingest`]
+//! Three responsibilities: [`detect()`] collects candidate files (honoring `.gitignore`), [`ingest`]
 //! reads their bytes, and [`manifest`] records each processed input with a content hash for
 //! provenance. The cached/uncached partition lives in `habitat-graph-cache` (ADR-04: single cache
 //! truth), not here.

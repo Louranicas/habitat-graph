@@ -63,7 +63,7 @@ pub static REBUILD_LOCK: Mutex<()> = Mutex::new(());
 // ── Core rebuild ──────────────────────────────────────────────────────────────
 
 /// Extracts a graph from every recognised source file under `dir`, writes the core artifacts, and
-/// refreshes optional public artifacts already present in `out`.
+/// refreshes optional public artifacts whose ownership manifests already claim them in `out`.
 ///
 /// Returns the number of nodes in the resulting graph.
 ///

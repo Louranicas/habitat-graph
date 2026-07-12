@@ -20,16 +20,16 @@ const MAX_EDGES_PER_NODE: usize = 8;
 /// Returns a deterministic, local-first structural summary of `concept` and its graph neighbourhood.
 ///
 /// Nodes whose label contains `concept` (case-insensitive substring) are found via
-/// [`find_by_label`] in ascending [`NodeId`] order. Up to [`MAX_CONCEPTS`] are rendered;
+/// [`find_by_label`] in ascending [`NodeId`] order. Up to `MAX_CONCEPTS` are rendered;
 /// when more match, an explicit truncation note is appended (never a silent cap).
 ///
 /// For each matched node the summary includes:
-/// - outbound edges: sorted by `(target_id, relation)`, capped at [`MAX_EDGES_PER_NODE`] with a
+/// - outbound edges: sorted by `(target_id, relation)`, capped at `MAX_EDGES_PER_NODE` with a
 ///   note when truncated, showing the relation kind and the target node's label;
 /// - inbound edges: sorted by `(source_id, relation)`, same cap, showing the relation kind and
 ///   the source node's label;
 /// - community membership: the label(s) of any
-///   [`Community`](habitat_graph_core::Community) the node belongs to, sorted by community id.
+///   [`Community`] the node belongs to, sorted by community id.
 ///
 /// Every label and relation string embedded in the output is passed through [`display_safe`] to
 /// neutralise Trojan-Source / bidi-override injection from attacker-controlled source.

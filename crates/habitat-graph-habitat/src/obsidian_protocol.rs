@@ -14,7 +14,7 @@
 //! I/O lives behind the [`RebuildHook`] trait, which callers receive as a dependency:
 //!
 //! * [`NoopRebuild`] — always succeeds silently; the default in tests and dev environments.
-//! * [`HmemRebuild`] — runs `hmem rebuild` as a subprocess; available only under the `live`
+//! * `HmemRebuild` — runs `hmem rebuild` as a subprocess; available only under the `live`
 //!   feature so the default build and test suite remain process-free.
 
 use habitat_graph_core::{display_safe, Result};
@@ -163,7 +163,7 @@ pub fn render_graph_note(
 ///
 /// The crate ships two implementations:
 /// * [`NoopRebuild`] — silent no-op; suitable for tests and environments where `hmem` is absent.
-/// * [`HmemRebuild`] — runs `hmem rebuild` as a subprocess (requires the `live` feature).
+/// * `HmemRebuild` — runs `hmem rebuild` as a subprocess (requires the `live` feature).
 ///
 /// Callers receive a `&dyn RebuildHook` or a generic `R: RebuildHook` so the concrete choice
 /// is a dependency that can be injected at the call-site.
@@ -172,7 +172,7 @@ pub trait RebuildHook {
     ///
     /// # Errors
     ///
-    /// Returns [`GraphError::Io`] if the underlying rebuild command fails or returns a non-zero
+    /// Returns [`habitat_graph_core::GraphError::Io`] if the underlying rebuild command fails or returns a non-zero
     /// exit code.
     fn rebuild(&self) -> Result<()>;
 }

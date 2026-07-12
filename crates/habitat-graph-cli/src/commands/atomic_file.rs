@@ -1,3 +1,8 @@
+//! Durable same-directory replacement for public artifacts and owner-only private state.
+//!
+//! Writes use a newly created temporary file, flush it, atomically rename it over the destination,
+//! and sync the containing directory. Failed writes remove their temporary file when possible.
+
 use std::fs::OpenOptions;
 use std::io::Write as _;
 use std::path::Path;
@@ -11,6 +16,12 @@ use std::os::unix::fs::OpenOptionsExt as _;
 
 static TEMP_SEQUENCE: AtomicU64 = AtomicU64::new(0);
 
+/// Atomically replaces `path` with `bytes`, optionally creating the temporary file owner-only.
+///
+/// # Errors
+///
+/// Returns [`GraphError::Io`] when the temporary file cannot be created, written, synchronized,
+/// renamed, or made durable through a parent-directory sync.
 pub(super) fn write(path: &Path, bytes: &[u8], owner_only: bool, context: &str) -> Result<()> {
     let parent = path
         .parent()
@@ -65,6 +76,11 @@ pub(super) fn write(path: &Path, bytes: &[u8], owner_only: bool, context: &str) 
     write_result
 }
 
+/// Removes `path` if present and synchronizes its containing directory.
+///
+/// # Errors
+///
+/// Returns [`GraphError::Io`] when removal or the parent-directory sync fails.
 pub(super) fn remove(path: &Path, context: &str) -> Result<()> {
     match std::fs::remove_file(path) {
         Ok(()) => {

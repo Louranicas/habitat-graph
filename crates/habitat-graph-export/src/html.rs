@@ -6,9 +6,10 @@
 //! any browser. (For very large graphs a `sigma`/`cytoscape` exporter is a future refinement; this viewer
 //! targets the typical per-service extract.)
 //!
-//! Security: the embedded JSON has every `<` escaped to `<` so a label can never break out of the
-//! `<script type="application/json">` island; node labels are already render-safe (the export path runs
-//! them through [`display_safe`](habitat_graph_core::display_safe)).
+//! Security: the embedded node-link JSON already applies the shared deterministic secret redaction
+//! without changing IDs or topology. The HTML layer also escapes every `<` in that JSON so a label
+//! cannot break out of the `<script type="application/json">` island; node labels are render-safe
+//! through [`display_safe`].
 
 use crate::json::to_node_link;
 use habitat_graph_core::{display_safe, Graph, Result};
@@ -91,6 +92,8 @@ const VIEWER: &str = r#"<!doctype html>
 /// Renders a self-contained interactive `graph.html` for `graph`.
 ///
 /// The page embeds the node-link JSON (graphify-compatible) and a dependency-free canvas viewer.
+/// It therefore inherits [`crate::to_node_link`]'s deterministic redaction while preserving node
+/// IDs, edge endpoints, counts, and community assignments.
 ///
 /// # Errors
 /// Returns [`GraphError::Schema`](habitat_graph_core::GraphError::Schema) if the graph cannot be

@@ -11,8 +11,9 @@
 //!
 //! # Security (STRIDE-T)
 //!
-//! Every attacker-influenced string (node label, source path, relation) is routed through
-//! [`display_safe`](habitat_graph_core::display_safe) before embedding in the output.
+//! Every attacker-influenced string (node label, source path, relation) first uses the shared
+//! deterministic secret redaction and is then routed through
+//! [`display_safe`] before embedding in the output.
 //! Labels used inside `[text](url)` link text are additionally bracket-escaped (`]` → `\]`,
 //! `[` → `\[`) to prevent link-injection attacks such as `](evil)` breaking out of the intended
 //! link target.
@@ -53,7 +54,9 @@ pub const GENERATED_WIKI_SIGNATURE: &str = "<!-- habitat-graph-generated:wiki:v1
 ///
 /// # Security
 ///
-/// All labels, paths, and relations pass through [`sanitize_label`] and [`display_safe`].
+/// All labels, paths, and relations first use deterministic secret redaction, then pass through
+/// [`sanitize_label`] and [`display_safe`]. The projection keeps every original `node-{id}.md`
+/// filename and edge link, so IDs and topology do not change.
 /// Labels embedded in Markdown link text also pass through the internal bracket-escaper so
 /// that `]` inside a label cannot close the link text early.
 #[must_use]

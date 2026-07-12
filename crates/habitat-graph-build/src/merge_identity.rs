@@ -1,3 +1,12 @@
+//! Provenance-aware identities shared by incremental and three-way graph merges.
+//!
+//! Clean nodes keep label identity. A node whose public label is a lossy redaction instead keeps
+//! its original [`NodeId`] plus input provenance, preventing unrelated secrets that share one
+//! marker from collapsing into a single node. Relations follow the same split: exact raw text is
+//! compared directly, while public markers receive endpoint-local ordinals and input provenance.
+//! Raw and projected identities therefore remain distinct without deriving a public digest from
+//! secret text.
+
 use std::collections::{HashMap, HashSet};
 
 use habitat_graph_core::{

@@ -2,7 +2,8 @@
 //!
 //! # Dangling-edge policy
 //!
-//! An edge whose `source` or `target` label does not appear in any [`RawNode`] across the full
+//! An edge whose `source` or `target` label does not appear in any
+//! [`RawNode`](habitat_graph_core::RawNode) across the full
 //! set of extractions is silently **dropped**. This happens when an extractor emits a relationship
 //! referencing a symbol that was never extracted as a node — for example because that symbol lives
 //! in an un-scanned file or was filtered out. Callers that need to preserve such edges should
@@ -29,7 +30,7 @@ use habitat_graph_core::{content_id, Edge, Extraction, Graph, Node, NodeId};
 ///    endpoint label is absent the edge is silently dropped (see the *dangling-edge policy* in the
 ///    module-level documentation).
 ///
-/// 3. **Deduplication** — [`crate::dedup`] removes duplicate nodes (same id) and duplicate edges
+/// 3. **Deduplication** — [`crate::dedup()`] removes duplicate nodes (same id) and duplicate edges
 ///    (same `source`/`target`/`relation`); first occurrence wins.
 ///
 /// 4. **Sorting** — [`Graph::sorted`] canonicalises collection order so serialized output is

@@ -7,7 +7,8 @@
 //! # Determinism (R4)
 //!
 //! Output is byte-identical across calls on the same graph: hub questions appear first, ordered
-//! by hub degree descending then [`NodeId`] ascending as a tiebreak, followed by bridge
+//! by hub degree descending then [`NodeId`](habitat_graph_core::NodeId) ascending as a tiebreak,
+//! followed by bridge
 //! questions in `graph.edges` order.  The first occurrence of any duplicate question string is
 //! kept; subsequent occurrences are silently dropped (tracked with a [`HashSet`] that preserves
 //! insertion order via the parallel `Vec`).
@@ -76,7 +77,8 @@ pub fn sanitize_label(label: &str) -> String {
 /// Returns a deterministic, de-duplicated list of suggested exploration questions derived from
 /// the graph's hubs (top god-nodes) and bridges (surprising cross-community connections).
 ///
-/// Hub questions appear first, in descending-degree order tiebroken by [`NodeId`] ascending,
+/// Hub questions appear first, in descending-degree order tiebroken by
+/// [`NodeId`](habitat_graph_core::NodeId) ascending,
 /// followed by bridge questions in the order returned by [`surprising_connections`] (which
 /// preserves `graph.edges` insertion order, satisfying R4).  Duplicate question strings are
 /// removed; the first occurrence is kept.

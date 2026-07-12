@@ -43,7 +43,7 @@ struct WireGraph {
 
 /// Builds the instruction prompt asking a model to return the semantic `{nodes, edges}` JSON.
 ///
-/// The schema in the prompt mirrors [`WireGraph`]; `text` is appended verbatim. Backends that set a
+/// The schema in the prompt mirrors the private `WireGraph`; `text` is appended verbatim. Backends that set a
 /// JSON response-format flag still send this so models without that flag produce parseable output.
 #[must_use]
 pub fn build_prompt(text: &str) -> String {

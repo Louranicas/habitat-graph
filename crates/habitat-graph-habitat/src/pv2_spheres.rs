@@ -11,7 +11,7 @@
 //!
 //! [`SphereRegistrar`] is the boundary trait that decouples the community→sphere mapping from
 //! its transport. [`RecordingRegistrar`] is the thread-safe in-memory double for tests (no
-//! network, no I/O). The concrete live HTTP adapter ([`HttpRegistrar`]) lives behind
+//! network, no I/O). The concrete live HTTP adapter (`HttpRegistrar`) lives behind
 //! `#[cfg(feature = "live-bridges")]` and POSTs JSON to the PV2 Kuramoto sphere endpoint at
 //! `http://localhost:8132`.
 //!
@@ -93,7 +93,7 @@ pub fn community_to_registration(c: &Community) -> SphereRegistration {
 ///
 /// Implementations in this module:
 /// - [`RecordingRegistrar`]: thread-safe in-memory double (all builds).
-/// - [`HttpRegistrar`]: live HTTP adapter (`feature = "live"` only).
+/// - `HttpRegistrar`: live HTTP adapter (`feature = "live"` only).
 pub trait SphereRegistrar: Send + Sync {
     /// Registers a single sphere from the supplied payload.
     ///

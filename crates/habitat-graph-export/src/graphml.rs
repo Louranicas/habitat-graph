@@ -2,8 +2,9 @@
 //!
 //! [`render_graphml`] produces a standards-conformant `GraphML` document with `<key>` declarations
 //! for node and edge attributes, one `<node>` per graph node, and one `<edge>` per graph edge.
-//! Every attacker-influenced string (label, `source_file`, relation) is routed through
-//! [`crate::escape::xml_escape`] before embedding in the XML (STRIDE-T injection guard).
+//! Every attacker-influenced string (label, `source_file`, relation) is redacted through the shared
+//! public-output policy, then routed through [`crate::escape::xml_escape`] before embedding in the
+//! XML (STRIDE-T injection guard).
 
 use std::fmt::Write as FmtWrite;
 
@@ -56,9 +57,11 @@ const KEY_CONFIDENCE: &str = "d_confidence";
 ///
 /// ## Security (STRIDE-T)
 ///
-/// Every attacker-influenced string is passed through [`xml_escape`](crate::escape::xml_escape)
-/// before embedding. Node labels and edge relations are additionally preprocessed with
-/// [`sanitize_label`](habitat_graph_core::sanitize_label), which strips C0 control characters and
+/// Every attacker-influenced string is passed through [`xml_escape`]
+/// before embedding. Labels, source paths, and relations first pass through deterministic secret
+/// redaction; that projection leaves node IDs, edge endpoints, and graph cardinality unchanged.
+/// Node labels and edge relations are additionally preprocessed with
+/// [`sanitize_label`], which strips C0 control characters and
 /// caps length at 256 code points. A label like `</node><evil>` or a path containing `&` cannot
 /// break out of its enclosing XML element.
 ///

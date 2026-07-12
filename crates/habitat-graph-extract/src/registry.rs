@@ -64,7 +64,7 @@ pub fn registered_extractors() -> Vec<Box<dyn Extractor>> {
 /// Reads and extracts every file in `files`, dispatching by extension, in parallel.
 ///
 /// Files with no matching extractor are skipped (not an error). Returns one
-/// [`Extraction`](habitat_graph_core::Extraction) per extracted file.
+/// [`Extraction`] per extracted file.
 ///
 /// # Errors
 /// Returns the first [`GraphError`](habitat_graph_core::GraphError) encountered (read or parse).

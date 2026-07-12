@@ -5,7 +5,9 @@
 //! base/ours/theirs `graph.json`, computes the deterministic 3-way merge, and writes the result
 //! back to `ours` (git's `%A`, the file git keeps). [`install`] registers the driver in a repo
 //! (`.gitattributes` + the `git config` lines). Because `graph.json` is canonically sorted (R4) the
-//! merge is always conflict-free.
+//! merge is always conflict-free. Clean nodes merge by label; redacted public nodes and relations
+//! retain stable IDs plus conservative base/branch provenance so unrelated lossy markers do not
+//! collapse together.
 
 use std::path::Path;
 
@@ -23,7 +25,8 @@ fn load(path: &Path) -> Result<Graph> {
 
 /// Runs the 3-way merge git invokes as `habitat-graph merge-driver %O %A %B`.
 ///
-/// Reads `base`/`ours`/`theirs`, writes the deterministic merge back to `ours` (git's `%A`).
+/// Reads `base`/`ours`/`theirs`, preserving redacted-node IDs and conservative projected-relation
+/// provenance, then writes the deterministic public projection back to `ours` (git's `%A`).
 /// Returns `0` on success (the merge is always conflict-free) or `1` on an I/O or parse error.
 #[must_use]
 pub fn run_merge_driver(base: &Path, ours: &Path, theirs: &Path) -> u8 {

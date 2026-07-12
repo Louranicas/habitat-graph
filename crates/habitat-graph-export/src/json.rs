@@ -42,7 +42,7 @@ use crate::escape::{project_public_edges, redact_public_text};
 ///
 /// # Errors
 ///
-/// Returns [`GraphError::Schema`](habitat_graph_core::GraphError::Schema) if
+/// Returns [`GraphError::Schema`] if
 /// [`serde_json`] serialization fails (in practice, only if a [`serde_json::Number`] is
 /// non-finite, which cannot occur here).
 pub fn to_node_link(graph: &Graph) -> Result<String> {

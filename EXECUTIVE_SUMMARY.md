@@ -4,7 +4,7 @@
 # habitat-graph — Executive Summary (S1008796)
 
 > **STATUS (2026-06-30, S1009104): SUPERSEDED — V3 BUILT + COMPLETE.** The "planning only" text below is the
-> original S1008796 framing, kept for history. The codebase is built and gate-green: 13 crates, **3894 tests / 0
+> original S1008796 framing, kept for history. The codebase is built and gate-green: 13 crates, **3914 tests / 0
 > failed**, all FO-1..FO-12 met, pushed to GitHub + GitLab. See [`README.md`](README.md) and [`EVIDENCE.md`](EVIDENCE.md)
 > for the authoritative current state. Remaining items are publication/learning one-way doors only.
 

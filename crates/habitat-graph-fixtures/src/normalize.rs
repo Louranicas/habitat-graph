@@ -1,4 +1,4 @@
-//! Reduce our [`Graph`](habitat_graph_core::Graph) to a [`NormalizedGraph`](crate::NormalizedGraph).
+//! Reduce our [`Graph`] to a [`NormalizedGraph`].
 //!
 //! The conversion is label-keyed and endpoint-safe:
 //!

@@ -1,4 +1,4 @@
-//! `GRAPH_REPORT.md` generation — the human-facing summary.
+//! `GRAPH_REPORT.md` generation — the human-facing, deterministically redacted summary.
 
 use std::collections::HashMap;
 use std::fmt::Write as _;
@@ -9,7 +9,7 @@ use habitat_graph_core::{display_safe, Graph, NodeId};
 use crate::escape::{markdown_code_span, markdown_text, redact_public_text};
 
 /// Renders a deterministic Markdown report: node/edge/community counts, the top hubs (by
-/// [`degree_centrality`](habitat_graph_analyze::degree_centrality)), a per-community summary, and a
+/// [`degree_centrality`]), a per-community summary, and a
 /// few suggested queries. Infallible (returns the Markdown string).
 ///
 /// ## Sections
@@ -21,10 +21,11 @@ use crate::escape::{markdown_code_span, markdown_text, redact_public_text};
 /// | Communities | One bullet per community showing its member count, sorted by community id. |
 /// | Suggested Queries | 2–3 natural-language starters referencing the top hub label(s). |
 ///
-/// Hubs are ranked by degree (descending), then by [`NodeId`](habitat_graph_core::NodeId)
-/// (ascending) on a tie, matching [`degree_centrality`](habitat_graph_analyze::degree_centrality)'s
-/// guarantee. All labels pass through [`display_safe`](habitat_graph_core::display_safe) before
-/// appearing in the output, providing Trojan-Source and bidi protection.
+/// Hubs are ranked by degree (descending), then by [`NodeId`]
+/// (ascending) on a tie, matching [`degree_centrality`]'s
+/// guarantee. All labels first use the shared deterministic secret redaction, then pass through
+/// [`display_safe`] and Markdown escaping before appearing in the
+/// output. Redaction does not change the reported graph counts, hub degrees, or community sizes.
 #[allow(clippy::module_name_repetitions)]
 #[must_use]
 pub fn render_report(graph: &Graph) -> String {
