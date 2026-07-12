@@ -7,7 +7,7 @@ use habitat_graph_core::{
 };
 use serde_json::Value;
 
-use crate::escape::{redact_public_text, PublicRelationProjector};
+use crate::escape::{project_public_edges, redact_public_text};
 
 /// Renders `graph` as `NetworkX` node-link JSON.
 ///
@@ -32,9 +32,10 @@ use crate::escape::{redact_public_text, PublicRelationProjector};
 /// `community` is the [`CommunityId`](habitat_graph_core::CommunityId) integer when the node
 /// appears in `graph.communities`, or JSON `null` otherwise.
 ///
-/// Output is fully deterministic: node and link arrays follow the order of `graph.nodes` /
-/// `graph.edges` as given — call [`Graph::sorted`](habitat_graph_core::Graph::sorted) first to
-/// obtain the canonical R4 ordering.  String fields are sanitised with
+/// Output is fully deterministic: nodes follow `graph.nodes`, while links are ordered by source,
+/// target, projected relation, and confidence before redacted relation ordinals are assigned.
+/// Call [`Graph::sorted`](habitat_graph_core::Graph::sorted) first to obtain canonical node and
+/// community ordering. String fields are sanitised with
 /// [`sanitize_label`], redacted with the shared public-output policy, and render-escaped with
 /// [`display_safe`] before embedding. Redaction changes display fields only; node ids and topology
 /// remain untouched.
@@ -79,23 +80,20 @@ pub fn to_node_link(graph: &Graph) -> Result<String> {
         .collect();
 
     // Build links array.
-    let mut relation_projector = PublicRelationProjector::new();
-    let links: Vec<Value> = graph
-        .edges
-        .iter()
-        .map(|edge| {
+    let links: Vec<Value> = project_public_edges(graph)
+        .into_iter()
+        .map(|projected| {
+            let edge = projected.edge;
             // weight: 1.0 for EXTRACTED (trusted), 0.8 for INFERRED / AMBIGUOUS.
             let weight: f64 = if edge.confidence.is_trusted() {
                 1.0
             } else {
                 0.8
             };
-            let projected_relation =
-                relation_projector.project(edge.source, edge.target, &edge.relation);
             serde_json::json!({
                 "source": edge.source.get(),
                 "target": edge.target.get(),
-                "relation": display_safe(&sanitize_label(&projected_relation)),
+                "relation": display_safe(&sanitize_label(&projected.relation)),
                 "confidence": edge.confidence.as_str(),
                 "weight": weight,
             })
@@ -582,6 +580,32 @@ mod tests {
             .iter()
             .all(|relation| relation.starts_with("[REDACTED:api_key]#e")));
         assert!(!to_node_link(&g).unwrap().contains("api_key=alpha"));
+    }
+
+    #[test]
+    fn redacted_relation_order_uses_only_public_edge_fields() {
+        let mut first = Graph::new();
+        first
+            .edges
+            .push(edge(1, 2, "api_key=alpha", Confidence::Ambiguous));
+        first
+            .edges
+            .push(edge(1, 2, "api_key=zulu", Confidence::Extracted));
+
+        let mut swapped = Graph::new();
+        swapped
+            .edges
+            .push(edge(1, 2, "api_key=alpha", Confidence::Extracted));
+        swapped
+            .edges
+            .push(edge(1, 2, "api_key=zulu", Confidence::Ambiguous));
+
+        let first_public = to_node_link(&first).unwrap();
+        let swapped_public = to_node_link(&swapped).unwrap();
+        assert_eq!(first_public, swapped_public);
+        let value = parse(&first_public);
+        assert_eq!(value["links"][0]["confidence"], "EXTRACTED");
+        assert_eq!(value["links"][1]["confidence"], "AMBIGUOUS");
     }
 
     #[test]

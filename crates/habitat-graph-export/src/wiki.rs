@@ -19,17 +19,17 @@
 //!
 //! # Determinism (R4)
 //!
-//! Output is byte-identical across calls for the same [`Graph`].  The function iterates
-//! `graph.nodes` / `graph.edges` in the given order and uses [`BTreeMap`] for auxiliary lookups
-//! whose key traversal order contributes to the rendered text.  No `HashMap` iteration order
-//! leaks into the output.
+//! Output is byte-identical across calls for the same [`Graph`]. The function follows node order,
+//! projects edges into public-field order, and uses [`BTreeMap`] for auxiliary lookups whose key
+//! traversal order contributes to the rendered text. No `HashMap` iteration order leaks into the
+//! output.
 
 use std::collections::BTreeMap;
 use std::fmt::Write as FmtWrite;
 
 use habitat_graph_core::{display_safe, sanitize_label, Graph, NodeId};
 
-use crate::escape::{redact_public_text, PublicRelationProjector};
+use crate::escape::{project_public_edges, redact_public_text};
 
 /// Ownership marker embedded near the top of every generated wiki page.
 pub const GENERATED_WIKI_SIGNATURE: &str = "<!-- habitat-graph-generated:wiki:v1 -->";
@@ -71,10 +71,10 @@ pub fn render_wiki(graph: &Graph) -> Vec<(String, String)> {
     let mut outbound: BTreeMap<NodeId, Vec<(String, NodeId)>> = BTreeMap::new();
     let mut inbound: BTreeMap<NodeId, Vec<(String, NodeId)>> = BTreeMap::new();
 
-    let mut relation_projector = PublicRelationProjector::new();
-    for edge in &graph.edges {
+    for projected in project_public_edges(graph) {
+        let edge = projected.edge;
         if label_map.contains_key(&edge.source) && label_map.contains_key(&edge.target) {
-            let relation = relation_projector.project(edge.source, edge.target, &edge.relation);
+            let relation = projected.relation;
             outbound
                 .entry(edge.source)
                 .or_default()

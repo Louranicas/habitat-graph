@@ -480,6 +480,15 @@ mod tests {
         for artifact in ["graph.svg", "graph.graphml", "graph.cypher"] {
             fs::write(out.join(artifact), raw_label).unwrap();
         }
+        fs::write(
+            out.join(".habitat-graph-artifacts.json"),
+            serde_json::to_vec_pretty(&serde_json::json!({
+                "schema": "habitat-graph.artifact-manifest.v1",
+                "files": ["graph.svg", "graph.graphml", "graph.cypher"],
+            }))
+            .unwrap(),
+        )
+        .unwrap();
         let wiki = out.join("wiki");
         fs::create_dir(&wiki).unwrap();
         fs::write(wiki.join("index.md"), raw_label).unwrap();

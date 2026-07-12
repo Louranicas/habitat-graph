@@ -9,7 +9,7 @@ use std::fmt::Write as FmtWrite;
 
 use habitat_graph_core::{sanitize_label, Graph};
 
-use crate::escape::{redact_public_text, xml_escape, PublicRelationProjector};
+use crate::escape::{project_public_edges, redact_public_text, xml_escape};
 
 /// `GraphML` attribute key identifier for a node's `label` field.
 const KEY_LABEL: &str = "d_label";
@@ -50,9 +50,9 @@ const KEY_CONFIDENCE: &str = "d_confidence";
 ///
 /// ## Determinism (R4)
 ///
-/// Output is byte-identical across runs: nodes and edges are emitted in the order they appear in
-/// `graph.nodes` / `graph.edges`. Call [`Graph::sorted`](habitat_graph_core::Graph::sorted) first
-/// to obtain the canonical ascending-id ordering required by the git merge driver.
+/// Output is byte-identical across runs: nodes follow `graph.nodes`, while edges are ordered by
+/// public projected fields. Call [`Graph::sorted`](habitat_graph_core::Graph::sorted) first to
+/// obtain canonical node and community ordering required by the git merge driver.
 ///
 /// ## Security (STRIDE-T)
 ///
@@ -118,14 +118,12 @@ pub fn render_graphml(graph: &Graph) -> String {
         out.push_str("    </node>\n");
     }
 
-    // One <edge> element per graph edge; deterministic (follows graph.edges order).
-    let mut relation_projector = PublicRelationProjector::new();
-    for edge in &graph.edges {
+    // One <edge> element per graph edge.
+    for projected in project_public_edges(graph) {
+        let edge = projected.edge;
         let src = edge.source.get();
         let tgt = edge.target.get();
-        let projected_relation =
-            relation_projector.project(edge.source, edge.target, &edge.relation);
-        let relation = xml_escape(&sanitize_label(&projected_relation));
+        let relation = xml_escape(&sanitize_label(&projected.relation));
         // Confidence values are always ASCII uppercase identifiers; xml_escape is a no-op here
         // but is applied for belt-and-suspenders STRIDE-T compliance.
         let confidence = xml_escape(edge.confidence.as_str());

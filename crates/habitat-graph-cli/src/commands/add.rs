@@ -52,7 +52,8 @@ pub const FETCH_TIMEOUT: Duration = Duration::from_secs(30);
 
 const PRIVATE_STATE_SUFFIX: &str = ".habitat-graph-state.json";
 const SHARED_PRIVATE_STATE: &str = ".habitat-graph-state.json";
-const ADD_JOURNAL_SCHEMA: &str = "habitat-graph.add-journal.v1";
+const LEGACY_ADD_JOURNAL_SCHEMA: &str = "habitat-graph.add-journal.v1";
+const ADD_JOURNAL_SCHEMA: &str = "habitat-graph.add-journal.v2";
 
 // ── Extension inference ───────────────────────────────────────────────────────
 
@@ -228,13 +229,19 @@ pub fn merge_into_output(new_graph: Graph, out: &Path) -> Result<()> {
         super::private_state::ensure(&legacy_state_path)?;
     }
     let mut public_prior = load_public_output(out)?;
-    recover_add_journal(out, &state_path, &mut public_prior)?;
+    let recovered_add = recover_add_journal(out, &state_path, &mut public_prior)?;
     let private_prior = load_private_state(&state_path, &legacy_state_path)?;
     let replaying_legacy_projection = match (&private_prior, &public_prior.graph) {
         (None, Some(public)) => public_topology(&new_graph)? == public_topology(public)?,
         _ => false,
     };
-    let prior = select_prior(private_prior, public_prior.graph.clone())?;
+    let prior = if recovered_add {
+        private_prior.ok_or_else(|| {
+            GraphError::Io("recovered add journal did not restore private state".to_owned())
+        })?
+    } else {
+        select_prior(private_prior, public_prior.graph.clone())?
+    };
     let merged = if replaying_legacy_projection {
         new_graph.sorted()
     } else {
@@ -243,12 +250,7 @@ pub fn merge_into_output(new_graph: Graph, out: &Path) -> Result<()> {
 
     let state_json = merged.to_json()?;
     let json = habitat_graph_export::to_node_link(&merged)?;
-    write_add_journal(
-        &state_path,
-        public_prior.generation.as_deref(),
-        &merged,
-        &json,
-    )?;
+    write_add_journal(&state_path, public_prior.graph.as_ref(), &merged, &json)?;
     super::atomic_file::write(out, json.as_bytes(), false, "public graph")?;
     super::private_state::write(&state_path, state_json.as_bytes())?;
     super::private_state::remove(&add_journal_path(&state_path)?, "add journal")?;
@@ -280,7 +282,7 @@ fn legacy_private_state_path(out: &Path) -> Result<PathBuf> {
 
 struct PublicOutput {
     graph: Option<Graph>,
-    generation: Option<String>,
+    content_generation: Option<String>,
 }
 
 fn load_public_output(out: &Path) -> Result<PublicOutput> {
@@ -289,7 +291,7 @@ fn load_public_output(out: &Path) -> Result<PublicOutput> {
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
             return Ok(PublicOutput {
                 graph: None,
-                generation: None,
+                content_generation: None,
             })
         }
         Err(error) => {
@@ -312,10 +314,9 @@ fn load_public_output(out: &Path) -> Result<PublicOutput> {
     } else {
         habitat_graph_serve::from_node_link(&text)?
     };
-    let canonical = habitat_graph_export::to_node_link(&graph)?;
     Ok(PublicOutput {
         graph: Some(graph),
-        generation: Some(public_generation(&canonical)),
+        content_generation: Some(content_generation(&text)),
     })
 }
 
@@ -340,13 +341,40 @@ fn load_private_state(path: &Path, legacy: &Path) -> Result<Option<Graph>> {
 }
 
 struct AddJournal {
-    before_public: Option<String>,
-    after_public: String,
+    before_public: Option<Graph>,
+    after_public: Graph,
+    legacy_generations: Option<(Option<String>, String)>,
+    public_json: String,
     graph: Graph,
 }
 
-fn public_generation(text: &str) -> String {
+fn content_generation(text: &str) -> String {
     blake3::hash(text.as_bytes()).to_hex().to_string()
+}
+
+fn public_graph_state(graph: &Graph) -> Graph {
+    let mut state = graph.clone().sorted();
+    state.edges.sort_by(|left, right| {
+        (
+            left.source,
+            left.target,
+            left.relation.as_str(),
+            left.confidence,
+        )
+            .cmp(&(
+                right.source,
+                right.target,
+                right.relation.as_str(),
+                right.confidence,
+            ))
+    });
+    state.manifest.inputs.clear();
+    state.manifest.tool_version.clear();
+    state.manifest.generated_at = None;
+    for community in &mut state.communities {
+        community.label.clear();
+    }
+    state
 }
 
 fn add_journal_path(state_path: &Path) -> Result<PathBuf> {
@@ -360,20 +388,37 @@ fn add_journal_path(state_path: &Path) -> Result<PathBuf> {
 
 fn write_add_journal(
     state_path: &Path,
-    before_public: Option<&str>,
+    before_public: Option<&Graph>,
     graph: &Graph,
     public_json: &str,
 ) -> Result<()> {
     let graph_value: serde_json::Value = serde_json::from_str(&graph.to_json()?)
         .map_err(|error| GraphError::Schema(format!("add journal graph serialize: {error}")))?;
+    let before_public = before_public.map(public_graph_state);
+    let after_public = public_graph_state(&habitat_graph_serve::from_node_link(public_json)?);
     let bytes = serde_json::to_vec_pretty(&serde_json::json!({
         "schema": ADD_JOURNAL_SCHEMA,
         "before_public": before_public,
-        "after_public": public_generation(public_json),
+        "after_public": after_public,
+        "public_checksum": content_generation(public_json),
+        "public_json": public_json,
         "graph": graph_value,
     }))
     .map_err(|error| GraphError::Schema(format!("add journal serialize: {error}")))?;
     super::private_state::write(&add_journal_path(state_path)?, &bytes)
+}
+
+fn parse_journal_graph(value: &serde_json::Value, field: &str) -> Result<Graph> {
+    let graph_text = serde_json::to_string(value)
+        .map_err(|error| GraphError::Schema(format!("add journal {field} parse: {error}")))?;
+    let graph = Graph::from_json(&graph_text)?;
+    if graph.schema != SCHEMA_VERSION {
+        return Err(GraphError::Schema(format!(
+            "add journal {field} schema mismatch: stored={:?}, current={SCHEMA_VERSION:?}",
+            graph.schema
+        )));
+    }
+    Ok(graph)
 }
 
 fn load_add_journal(state_path: &Path) -> Result<Option<AddJournal>> {
@@ -386,70 +431,116 @@ fn load_add_journal(state_path: &Path) -> Result<Option<AddJournal>> {
         .map_err(|error| GraphError::Io(format!("read add journal: {error}")))?;
     let value: serde_json::Value = serde_json::from_str(&text)
         .map_err(|error| GraphError::Schema(format!("add journal parse: {error}")))?;
-    if value["schema"] != ADD_JOURNAL_SCHEMA {
-        return Err(GraphError::Schema(format!(
-            "unsupported add journal schema: {:?}",
-            value["schema"]
-        )));
-    }
-    let before_public = match value.get("before_public") {
-        Some(serde_json::Value::Null) => None,
-        Some(serde_json::Value::String(generation)) => Some(generation.clone()),
+    let legacy_generation = match value["schema"].as_str() {
+        Some(ADD_JOURNAL_SCHEMA) => false,
+        Some(LEGACY_ADD_JOURNAL_SCHEMA) => true,
         _ => {
-            return Err(GraphError::Schema(
-                "add journal `before_public` must be a string or null".to_owned(),
-            ))
+            return Err(GraphError::Schema(format!(
+                "unsupported add journal schema: {:?}",
+                value["schema"]
+            )))
         }
     };
-    let after_public = value["after_public"]
-        .as_str()
-        .ok_or_else(|| {
-            GraphError::Schema("add journal `after_public` must be a string".to_owned())
-        })?
-        .to_owned();
-    let graph_text = serde_json::to_string(
+    let graph = parse_journal_graph(
         value
             .get("graph")
             .ok_or_else(|| GraphError::Schema("add journal missing `graph`".to_owned()))?,
-    )
-    .map_err(|error| GraphError::Schema(format!("add journal graph parse: {error}")))?;
-    let graph = Graph::from_json(&graph_text)?;
-    if graph.schema != SCHEMA_VERSION {
-        return Err(GraphError::Schema(format!(
-            "add journal schema mismatch: stored={:?}, current={SCHEMA_VERSION:?}",
-            graph.schema
-        )));
-    }
+        "graph",
+    )?;
+
+    let (before_public, after_public, legacy_generations, public_json) = if legacy_generation {
+        let before = match value.get("before_public") {
+            Some(serde_json::Value::Null) => None,
+            Some(serde_json::Value::String(generation)) => Some(generation.clone()),
+            _ => {
+                return Err(GraphError::Schema(
+                    "legacy add journal `before_public` must be a string or null".to_owned(),
+                ))
+            }
+        };
+        let after = value["after_public"]
+            .as_str()
+            .ok_or_else(|| {
+                GraphError::Schema("legacy add journal `after_public` must be a string".to_owned())
+            })?
+            .to_owned();
+        let public_json = habitat_graph_export::to_node_link(&graph)?;
+        let after_public = public_graph_state(&habitat_graph_serve::from_node_link(&public_json)?);
+        (None, after_public, Some((before, after)), public_json)
+    } else {
+        let before_public = match value.get("before_public") {
+            Some(serde_json::Value::Null) => None,
+            Some(before) => Some(public_graph_state(&parse_journal_graph(
+                before,
+                "before_public",
+            )?)),
+            None => {
+                return Err(GraphError::Schema(
+                    "add journal missing `before_public`".to_owned(),
+                ))
+            }
+        };
+        let after_public = public_graph_state(&parse_journal_graph(
+            value.get("after_public").ok_or_else(|| {
+                GraphError::Schema("add journal missing `after_public`".to_owned())
+            })?,
+            "after_public",
+        )?);
+        let public_json = value["public_json"]
+            .as_str()
+            .ok_or_else(|| {
+                GraphError::Schema("add journal `public_json` must be a string".to_owned())
+            })?
+            .to_owned();
+        let checksum = value["public_checksum"].as_str().ok_or_else(|| {
+            GraphError::Schema("add journal `public_checksum` must be a string".to_owned())
+        })?;
+        let stored_public = public_graph_state(&habitat_graph_serve::from_node_link(&public_json)?);
+        if content_generation(&public_json) != checksum || stored_public != after_public {
+            return Err(GraphError::Schema(
+                "add journal public generation mismatch".to_owned(),
+            ));
+        }
+        (before_public, after_public, None, public_json)
+    };
     Ok(Some(AddJournal {
         before_public,
         after_public,
+        legacy_generations,
+        public_json,
         graph,
     }))
 }
 
-fn recover_add_journal(out: &Path, state_path: &Path, public: &mut PublicOutput) -> Result<()> {
+fn recover_add_journal(out: &Path, state_path: &Path, public: &mut PublicOutput) -> Result<bool> {
     let Some(journal) = load_add_journal(state_path)? else {
-        return Ok(());
+        return Ok(false);
     };
-    let intended_json = habitat_graph_export::to_node_link(&journal.graph)?;
-    let intended_generation = public_generation(&intended_json);
-    if intended_generation != journal.after_public {
+    let intended_graph = habitat_graph_serve::from_node_link(&journal.public_json)?;
+    let intended_state = public_graph_state(&intended_graph);
+    if intended_state != journal.after_public {
         return Err(GraphError::Schema(
-            "add journal public generation mismatch".to_owned(),
+            "add journal public state mismatch".to_owned(),
+        ));
+    }
+    let current_state = public.graph.as_ref().map(public_graph_state);
+    let current_matches_intended = current_state.as_ref() == Some(&journal.after_public);
+    let current_matches_prior = if let Some((before, after)) = &journal.legacy_generations {
+        let current = public.content_generation.as_deref();
+        current == Some(after.as_str()) || current == before.as_deref()
+    } else {
+        current_state.as_ref() == journal.before_public.as_ref()
+    };
+    if !current_matches_prior && !current_matches_intended {
+        return Err(GraphError::Guard(
+            "public graph changed while an add transaction is pending".to_owned(),
         ));
     }
 
-    let current_generation = public.generation.as_deref();
-    if current_generation != Some(journal.after_public.as_str())
-        && current_generation != journal.before_public.as_deref()
-    {
-        return super::private_state::remove(&add_journal_path(state_path)?, "stale add journal");
-    }
-
-    if current_generation != Some(journal.after_public.as_str()) {
+    if !current_matches_intended {
         super::atomic_file::write(
             out,
-            intended_json.as_bytes(),
+            journal.public_json.as_bytes(),
             false,
             "public graph recovery",
         )?;
@@ -458,10 +549,14 @@ fn recover_add_journal(out: &Path, state_path: &Path, public: &mut PublicOutput)
     super::private_state::write(state_path, state_json.as_bytes())?;
     super::private_state::remove(&add_journal_path(state_path)?, "add journal")?;
     *public = PublicOutput {
-        graph: Some(habitat_graph_serve::from_node_link(&intended_json)?),
-        generation: Some(intended_generation),
+        graph: Some(intended_graph),
+        content_generation: if current_matches_intended {
+            public.content_generation.clone()
+        } else {
+            Some(content_generation(&journal.public_json))
+        },
     };
-    Ok(())
+    Ok(true)
 }
 
 fn select_prior(private: Option<Graph>, public: Option<Graph>) -> Result<Graph> {
@@ -980,13 +1075,10 @@ mod tests {
         let pending = habitat_graph_build::merge(failed_add, original).sorted();
         let pending_json = habitat_graph_export::to_node_link(&pending).expect("render pending");
         let state_path = super::private_state_path(&out).expect("state path");
-        super::write_add_journal(
-            &state_path,
-            Some(&super::public_generation(&public_before)),
-            &pending,
-            &pending_json,
-        )
-        .expect("write interrupted transaction");
+        let before_graph =
+            habitat_graph_serve::from_node_link(&public_before).expect("parse original graph");
+        super::write_add_journal(&state_path, Some(&before_graph), &pending, &pending_json)
+            .expect("write interrupted transaction");
 
         let next = extract_from_bytes(b"fn after_retry() {}", "rs").expect("extract next");
         merge_into_output(next, &out).expect("recover and merge next");
@@ -1003,6 +1095,148 @@ mod tests {
         assert!(public_text.contains("after_retry"));
         let value: serde_json::Value = serde_json::from_str(&public_text).expect("parse public");
         assert_eq!(value["nodes"].as_array().unwrap().len(), 3);
+    }
+
+    #[test]
+    fn journal_recovery_uses_the_stored_public_projection_bytes() {
+        let d = tdir();
+        let out = d.join("g.json");
+        let original = extract_from_bytes(b"fn original() {}", "rs").expect("extract original");
+        merge_into_output(original.clone(), &out).expect("write original");
+
+        let public_before = fs::read_to_string(&out).expect("read original public graph");
+        let added = extract_from_bytes(b"fn pending() {}", "rs").expect("extract pending");
+        let pending = habitat_graph_build::merge(added, original).sorted();
+        let canonical = habitat_graph_export::to_node_link(&pending).expect("render pending");
+        let stored_projection = format!("{canonical}\n");
+        let state_path = super::private_state_path(&out).expect("state path");
+        let before_graph =
+            habitat_graph_serve::from_node_link(&public_before).expect("parse original graph");
+        super::write_add_journal(
+            &state_path,
+            Some(&before_graph),
+            &pending,
+            &stored_projection,
+        )
+        .expect("write interrupted transaction");
+
+        let mut public = super::load_public_output(&out).expect("load public graph");
+        super::recover_add_journal(&out, &state_path, &mut public).expect("recover journal");
+
+        assert_eq!(fs::read_to_string(&out).unwrap(), stored_projection);
+        assert!(fs::read_to_string(&state_path).unwrap().contains("pending"));
+        assert!(!super::add_journal_path(&state_path).unwrap().exists());
+    }
+
+    #[test]
+    fn recovered_raw_state_survives_a_public_policy_change() {
+        let d = tdir();
+        let out = d.join("g.json");
+        let original = extract_from_bytes(b"fn original() {}", "rs").expect("extract original");
+        merge_into_output(original.clone(), &out).expect("write original");
+
+        let public_before = fs::read_to_string(&out).expect("read original public graph");
+        let before_graph =
+            habitat_graph_serve::from_node_link(&public_before).expect("parse original graph");
+        let added = extract_from_bytes(b"fn policy_shifted() {}", "rs").expect("extract pending");
+        let pending = habitat_graph_build::merge(added, original).sorted();
+        let mut stored_value: serde_json::Value = serde_json::from_str(
+            &habitat_graph_export::to_node_link(&pending).expect("render pending"),
+        )
+        .unwrap();
+        let shifted = stored_value["nodes"]
+            .as_array_mut()
+            .unwrap()
+            .iter_mut()
+            .find(|node| node["label"] == "policy_shifted")
+            .unwrap();
+        shifted["label"] = serde_json::json!("[REDACTED:api_key]");
+        let stored_projection = serde_json::to_string_pretty(&stored_value).unwrap();
+        let state_path = super::private_state_path(&out).expect("state path");
+        super::write_add_journal(
+            &state_path,
+            Some(&before_graph),
+            &pending,
+            &stored_projection,
+        )
+        .expect("write interrupted transaction");
+
+        let next = extract_from_bytes(b"fn after_retry() {}", "rs").expect("extract next");
+        merge_into_output(next, &out).expect("recover and merge next");
+
+        let private = fs::read_to_string(&state_path).unwrap();
+        assert!(private.contains("policy_shifted"));
+        assert!(private.contains("after_retry"));
+        let public = fs::read_to_string(&out).unwrap();
+        assert!(public.contains("policy_shifted"));
+        assert!(public.contains("after_retry"));
+    }
+
+    #[test]
+    fn conflicting_public_change_preserves_the_pending_add_journal() {
+        let d = tdir();
+        let out = d.join("g.json");
+        let original = extract_from_bytes(b"fn original() {}", "rs").expect("extract original");
+        merge_into_output(original.clone(), &out).expect("write original");
+        let public_before = fs::read_to_string(&out).expect("read original public graph");
+        let before_graph =
+            habitat_graph_serve::from_node_link(&public_before).expect("parse original graph");
+
+        let added = extract_from_bytes(b"fn pending() {}", "rs").expect("extract pending");
+        let pending = habitat_graph_build::merge(added, original).sorted();
+        let pending_json = habitat_graph_export::to_node_link(&pending).expect("render pending");
+        let state_path = super::private_state_path(&out).expect("state path");
+        super::write_add_journal(&state_path, Some(&before_graph), &pending, &pending_json)
+            .expect("write interrupted transaction");
+
+        let replacement = extract_from_bytes(b"fn replacement() {}", "rs").unwrap();
+        let replacement_json = habitat_graph_export::to_node_link(&replacement).unwrap();
+        fs::write(&out, &replacement_json).unwrap();
+        let next = extract_from_bytes(b"fn next() {}", "rs").unwrap();
+
+        assert!(merge_into_output(next, &out).is_err());
+        assert_eq!(fs::read_to_string(&out).unwrap(), replacement_json);
+        let journal_path = super::add_journal_path(&state_path).unwrap();
+        assert!(journal_path.exists());
+        assert!(fs::read_to_string(journal_path)
+            .unwrap()
+            .contains("pending"));
+    }
+
+    #[test]
+    fn legacy_journal_recovers_with_the_current_public_projection() {
+        let d = tdir();
+        let out = d.join("g.json");
+        let original = extract_from_bytes(b"fn original() {}", "rs").expect("extract original");
+        merge_into_output(original.clone(), &out).expect("write original");
+
+        let public_before = fs::read_to_string(&out).expect("read original public graph");
+        let added = extract_from_bytes(b"fn pending() {}", "rs").expect("extract pending");
+        let pending = habitat_graph_build::merge(added, original).sorted();
+        let current_projection =
+            habitat_graph_export::to_node_link(&pending).expect("render pending");
+        let graph_value: serde_json::Value =
+            serde_json::from_str(&pending.to_json().unwrap()).unwrap();
+        let state_path = super::private_state_path(&out).expect("state path");
+        let journal_path = super::add_journal_path(&state_path).unwrap();
+        fs::write(
+            &journal_path,
+            serde_json::to_vec_pretty(&serde_json::json!({
+                "schema": super::LEGACY_ADD_JOURNAL_SCHEMA,
+                "before_public": super::content_generation(&public_before),
+                "after_public": super::content_generation(&format!("{current_projection}\n")),
+                "graph": graph_value,
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+
+        let mut public = super::load_public_output(&out).expect("load public graph");
+        super::recover_add_journal(&out, &state_path, &mut public).expect("recover legacy journal");
+
+        assert_eq!(fs::read_to_string(&out).unwrap(), current_projection);
+        assert!(fs::read_to_string(&state_path).unwrap().contains("pending"));
+        assert!(!journal_path.exists());
     }
 
     #[test]

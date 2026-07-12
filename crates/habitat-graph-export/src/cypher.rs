@@ -11,7 +11,7 @@ use std::fmt::Write as FmtWrite;
 
 use habitat_graph_core::Graph;
 
-use crate::escape::{cypher_escape, redact_public_text, PublicRelationProjector};
+use crate::escape::{cypher_escape, project_public_edges, redact_public_text};
 
 /// Renders `graph` as a Neo4j Cypher import script (deterministic, infallible).
 ///
@@ -32,8 +32,8 @@ use crate::escape::{cypher_escape, redact_public_text, PublicRelationProjector};
 /// [`cypher_escape`](crate::escape::cypher_escape).  `confidence` is a bounded enum value
 /// produced by this library's own code; it is passed through `cypher_escape` for uniformity.
 ///
-/// Output order follows `graph.nodes` and `graph.edges` in the order they appear.  For
-/// byte-identical canonical output across runs, call
+/// Node output follows `graph.nodes`; edges are ordered by public projected fields. For
+/// byte-identical canonical node and community output across runs, call
 /// [`Graph::sorted`](habitat_graph_core::Graph::sorted) before passing the graph (R4).
 ///
 /// # Security
@@ -72,15 +72,13 @@ pub fn render_cypher(graph: &Graph) -> String {
         );
     }
 
-    let mut relation_projector = PublicRelationProjector::new();
-    for edge in &graph.edges {
+    for projected in project_public_edges(graph) {
+        let edge = projected.edge;
         let src = edge.source.get();
         let tgt = edge.target.get();
         // `relation` is attacker-influenced — escaped AND stored as a property, never as the
         // relationship-type identifier (which is always the fixed literal :REL).
-        let projected_relation =
-            relation_projector.project(edge.source, edge.target, &edge.relation);
-        let relation = cypher_escape(&projected_relation);
+        let relation = cypher_escape(&projected.relation);
         // `confidence` is a bounded enum string from this library's own code; cypher_escape
         // is applied for uniformity (the canonical strings contain no escapable characters).
         let confidence = cypher_escape(edge.confidence.as_str());

@@ -273,7 +273,7 @@ mod tests {
         }
 
         fn call_count(&self) -> usize {
-            self.calls.lock().map(|g| g.len()).unwrap_or(0)
+            self.calls.lock().map_or(0, |g| g.len())
         }
 
         fn calls_snapshot(&self) -> Vec<(String, String)> {
@@ -312,7 +312,7 @@ mod tests {
         }
 
         fn call_count(&self) -> usize {
-            self.calls.lock().map(|g| g.len()).unwrap_or(0)
+            self.calls.lock().map_or(0, |g| g.len())
         }
 
         fn calls_snapshot(&self) -> Vec<(String, String)> {

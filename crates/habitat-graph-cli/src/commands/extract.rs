@@ -1,6 +1,7 @@
 //! The `extract` command — the full pipeline (detect → extract → build → analyze → export → write).
 
-use std::collections::HashSet;
+use std::collections::{BTreeMap, HashSet};
+use std::fmt::Write as _;
 use std::path::{Component, Path};
 
 use habitat_graph_core::{Graph, GraphError, Result};
@@ -11,6 +12,9 @@ const VAULT_MANIFEST: &str = ".habitat-graph-generated.json";
 const VAULT_MANIFEST_SCHEMA: &str = "habitat-graph.vault-manifest.v1";
 const WIKI_MANIFEST: &str = ".habitat-graph-generated.json";
 const WIKI_MANIFEST_SCHEMA: &str = "habitat-graph.wiki-manifest.v1";
+const OPTIONAL_ARTIFACT_MANIFEST: &str = ".habitat-graph-artifacts.json";
+const OPTIONAL_ARTIFACT_MANIFEST_SCHEMA: &str = "habitat-graph.artifact-manifest.v1";
+const OPTIONAL_ARTIFACTS: &[&str] = &["graph.svg", "graph.graphml", "graph.cypher"];
 
 /// Optional PB exporter artifacts to emit alongside the always-written core artifacts.
 ///
@@ -88,32 +92,168 @@ fn safe_vault_filename(filename: &str) -> bool {
         && !filename.contains('\\')
 }
 
-/// Recognizes the exact frontmatter signature emitted by legacy habitat-graph node notes.
-///
-/// This migration path is deliberately conservative: it requires the ordered generated keys,
-/// numeric id/line/degree fields, the `hg/node` ownership tag, and a generated heading. Arbitrary
-/// user Markdown is never treated as generated merely because its filename resembles a label.
-fn is_legacy_generated_node_note(content: &str) -> bool {
+struct GeneratedVaultNode {
+    id: u32,
+    community: Option<u32>,
+    label: String,
+}
+
+fn valid_legacy_yaml_string(value: &str) -> bool {
+    let mut characters = value.chars();
+    while let Some(character) = characters.next() {
+        if character == '"' {
+            return false;
+        }
+        if character == '\\' && !matches!(characters.next(), Some('\\' | '"')) {
+            return false;
+        }
+    }
+    true
+}
+
+fn canonical_legacy_number<T>(value: &str) -> Option<T>
+where
+    T: std::str::FromStr + ToString,
+{
+    let parsed = value.parse::<T>().ok()?;
+    (parsed.to_string() == value).then_some(parsed)
+}
+
+/// Recognizes the exact layout emitted by habitat-graph node notes before ownership manifests.
+fn parse_generated_vault_node_note(content: &str) -> Option<GeneratedVaultNode> {
     let mut lines = content.lines();
     if lines.next() != Some("---") {
-        return false;
+        return None;
     }
-    let Some(id) = lines.next().and_then(|line| line.strip_prefix("id: ")) else {
-        return false;
+    let id = canonical_legacy_number::<u32>(lines.next()?.strip_prefix("id: ")?)?;
+
+    let mut field = lines.next()?;
+    let community = if let Some(value) = field.strip_prefix("community: ") {
+        let community = canonical_legacy_number::<u32>(value)?;
+        field = lines.next()?;
+        Some(community)
+    } else {
+        None
     };
-    if id.parse::<u32>().is_err() {
-        return false;
+
+    let krate = field.strip_prefix("crate: ")?;
+    if !krate
+        .chars()
+        .all(|character| character.is_ascii_alphanumeric() || matches!(character, '.' | '_' | '-'))
+    {
+        return None;
+    }
+    let lang = lines.next()?.strip_prefix("lang: ")?;
+    if !matches!(lang, "rust" | "python" | "js" | "other") {
+        return None;
+    }
+    let file = lines.next()?.strip_prefix("file: \"")?.strip_suffix('"')?;
+    if !valid_legacy_yaml_string(file) {
+        return None;
+    }
+    let line = lines.next()?.strip_prefix("line: ")?;
+    canonical_legacy_number::<u32>(line)?;
+    let degree = lines.next()?.strip_prefix("degree: ")?;
+    canonical_legacy_number::<u64>(degree)?;
+
+    let mut tags = format!("tags: [hg/node, crate/{krate}, lang/{lang}");
+    if let Some(community) = community {
+        let _ = write!(tags, ", community/{community}");
+    }
+    tags.push(']');
+    if lines.next()? != tags || lines.next()? != "---" || !lines.next()?.is_empty() {
+        return None;
     }
 
-    let frontmatter: Vec<&str> = lines.by_ref().take_while(|line| *line != "---").collect();
-    let has_ordered_fields = ["crate: ", "lang: ", "file: \"", "line: ", "degree: "]
-        .iter()
-        .all(|prefix| frontmatter.iter().any(|line| line.starts_with(prefix)));
-    let has_owner_tag = frontmatter
-        .iter()
-        .any(|line| line.starts_with("tags: [hg/node"));
-    let has_heading = lines.any(|line| line.starts_with("# "));
-    has_ordered_fields && has_owner_tag && has_heading
+    let label = lines.next()?.strip_prefix("# ")?.to_owned();
+    if !lines.next()?.is_empty() {
+        return None;
+    }
+    let location = lines.next()?;
+    let location_suffix = format!(":{line}` · crate `{krate}` · degree {degree}");
+    if !location.starts_with("> `") || !location.ends_with(&location_suffix) {
+        return None;
+    }
+    if !lines.next()?.is_empty() || lines.next()? != "## Links" {
+        return None;
+    }
+    for link in lines {
+        let (_, target) = link
+            .strip_prefix("- ")
+            .and_then(|link| link.split_once(":: [["))?;
+        if !target.ends_with("]]") {
+            return None;
+        }
+    }
+
+    Some(GeneratedVaultNode {
+        id,
+        community,
+        label,
+    })
+}
+
+fn render_generated_vault_moc(
+    notes: &[(String, GeneratedVaultNode)],
+    filename_targets: bool,
+) -> Option<String> {
+    if notes.is_empty() {
+        return None;
+    }
+
+    let mut seen = HashSet::with_capacity(notes.len());
+    let mut communities: BTreeMap<u32, Vec<(&str, &GeneratedVaultNode)>> = BTreeMap::new();
+    let mut unclustered = Vec::new();
+    for (filename, note) in notes {
+        if !seen.insert(note.id) {
+            return None;
+        }
+        if let Some(community) = note.community {
+            communities
+                .entry(community)
+                .or_default()
+                .push((filename, note));
+        } else {
+            unclustered.push((filename.as_str(), note));
+        }
+    }
+    for members in communities.values_mut() {
+        members.sort_unstable_by_key(|(_, note)| note.id);
+    }
+    unclustered.sort_unstable_by_key(|(_, note)| note.id);
+
+    let render_link = |filename: &str, note: &GeneratedVaultNode| {
+        if !filename_targets {
+            return format!("[[{}]]", note.label);
+        }
+        let target = filename.strip_suffix(".md").unwrap_or(filename);
+        if target == note.label {
+            format!("[[{target}]]")
+        } else {
+            format!("[[{target}|{}]]", note.label)
+        }
+    };
+
+    let mut moc = String::from("# Map of Content\n");
+    for (community, members) in communities {
+        let _ = write!(moc, "\n## community {community}\n\n");
+        for (filename, note) in members {
+            let _ = writeln!(moc, "- {}", render_link(filename, note));
+        }
+    }
+    if !unclustered.is_empty() {
+        moc.push_str("\n## Unclustered\n\n");
+        for (filename, note) in unclustered {
+            let _ = writeln!(moc, "- {}", render_link(filename, note));
+        }
+    }
+    Some(moc)
+}
+
+fn is_generated_vault_moc(content: &str, notes: &[(String, GeneratedVaultNode)]) -> bool {
+    [false, true].into_iter().any(|filename_targets| {
+        render_generated_vault_moc(notes, filename_targets).as_deref() == Some(content)
+    })
 }
 
 /// Loads the generated-file ownership set, migrating conservative legacy note signatures when no
@@ -151,6 +291,7 @@ fn generated_vault_ownership(vault_dir: &Path) -> Result<HashSet<String>> {
     }
 
     let mut owned = HashSet::new();
+    let mut generated_notes = Vec::new();
     for entry in std::fs::read_dir(vault_dir)
         .map_err(|error| GraphError::Io(format!("vault inventory: {error}")))?
     {
@@ -168,8 +309,17 @@ fn generated_vault_ownership(vault_dir: &Path) -> Result<HashSet<String>> {
         }
         let content = std::fs::read_to_string(entry.path())
             .map_err(|error| GraphError::Io(format!("legacy vault note {filename}: {error}")))?;
-        if is_legacy_generated_node_note(&content) {
-            owned.insert(filename);
+        if let Some(note) = parse_generated_vault_node_note(&content) {
+            owned.insert(filename.clone());
+            generated_notes.push((filename, note));
+        }
+    }
+    let moc_path = vault_dir.join("_MOC.md");
+    if std::fs::symlink_metadata(&moc_path).is_ok_and(|metadata| metadata.file_type().is_file()) {
+        let content = std::fs::read_to_string(&moc_path)
+            .map_err(|error| GraphError::Io(format!("legacy vault MOC: {error}")))?;
+        if is_generated_vault_moc(&content, &generated_notes) {
+            owned.insert("_MOC.md".to_owned());
         }
     }
     Ok(owned)
@@ -431,8 +581,120 @@ fn existing_public_artifact(path: &Path, directory: bool) -> Result<bool> {
     Ok(true)
 }
 
+fn load_optional_artifact_ownership(out: &Path) -> Result<Option<HashSet<String>>> {
+    let path = out.join(OPTIONAL_ARTIFACT_MANIFEST);
+    let metadata = match std::fs::symlink_metadata(&path) {
+        Ok(metadata) => metadata,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(error) => {
+            return Err(GraphError::Io(format!(
+                "inspect optional artifact manifest: {error}"
+            )))
+        }
+    };
+    if !metadata.file_type().is_file() {
+        return Err(GraphError::Guard(format!(
+            "optional artifact manifest is not a regular file: {}",
+            path.display()
+        )));
+    }
+
+    let text = std::fs::read_to_string(&path)
+        .map_err(|error| GraphError::Io(format!("optional artifact manifest read: {error}")))?;
+    let value: serde_json::Value = serde_json::from_str(&text).map_err(|error| {
+        GraphError::Schema(format!("optional artifact manifest parse: {error}"))
+    })?;
+    if value["schema"] != OPTIONAL_ARTIFACT_MANIFEST_SCHEMA {
+        return Err(GraphError::Schema(format!(
+            "unsupported optional artifact manifest schema: {:?}",
+            value["schema"]
+        )));
+    }
+    let files = value["files"].as_array().ok_or_else(|| {
+        GraphError::Schema("optional artifact manifest `files` must be an array".to_owned())
+    })?;
+    files
+        .iter()
+        .map(|entry| {
+            let filename = entry.as_str().ok_or_else(|| {
+                GraphError::Schema(
+                    "optional artifact manifest filename must be a string".to_owned(),
+                )
+            })?;
+            if !OPTIONAL_ARTIFACTS.contains(&filename) {
+                return Err(GraphError::Guard(format!(
+                    "invalid optional artifact filename in manifest: {filename:?}"
+                )));
+            }
+            Ok(filename.to_owned())
+        })
+        .collect::<Result<HashSet<_>>>()
+        .map(Some)
+}
+
+fn write_optional_artifact_manifest(out: &Path, names: &HashSet<String>) -> Result<()> {
+    let mut files: Vec<&str> = names.iter().map(String::as_str).collect();
+    files.sort_unstable();
+    let manifest = serde_json::to_string_pretty(&serde_json::json!({
+        "schema": OPTIONAL_ARTIFACT_MANIFEST_SCHEMA,
+        "files": files,
+    }))
+    .map_err(|error| {
+        GraphError::Schema(format!("optional artifact manifest serialize: {error}"))
+    })?;
+    super::atomic_file::write(
+        &out.join(OPTIONAL_ARTIFACT_MANIFEST),
+        manifest.as_bytes(),
+        false,
+        "optional artifact manifest",
+    )
+}
+
+fn select_optional_artifact(
+    path: &Path,
+    filename: &str,
+    requested: bool,
+    owned: &mut HashSet<String>,
+) -> Result<bool> {
+    if requested {
+        existing_public_artifact(path, false)?;
+        owned.insert(filename.to_owned());
+        return Ok(true);
+    }
+    if !owned.contains(filename) {
+        return Ok(false);
+    }
+    if existing_public_artifact(path, false)? {
+        Ok(true)
+    } else {
+        owned.remove(filename);
+        Ok(false)
+    }
+}
+
 pub(super) fn write_public_artifacts(out: &Path, graph: &Graph, opts: ExtractOpts) -> Result<()> {
     std::fs::create_dir_all(out).map_err(|error| GraphError::Io(error.to_string()))?;
+
+    let prior_optional_ownership = load_optional_artifact_ownership(out)?;
+    let had_optional_manifest = prior_optional_ownership.is_some();
+    let mut optional_owned = prior_optional_ownership.unwrap_or_default();
+    let svg_path = out.join("graph.svg");
+    let svg_selected =
+        select_optional_artifact(&svg_path, "graph.svg", opts.svg, &mut optional_owned)?;
+    let graphml_path = out.join("graph.graphml");
+    let graphml_selected = select_optional_artifact(
+        &graphml_path,
+        "graph.graphml",
+        opts.graphml,
+        &mut optional_owned,
+    )?;
+    let cypher_path = out.join("graph.cypher");
+    let cypher_selected = select_optional_artifact(
+        &cypher_path,
+        "graph.cypher",
+        opts.neo4j,
+        &mut optional_owned,
+    )?;
 
     let json = habitat_graph_export::to_node_link(graph)?;
     std::fs::write(out.join("graph.json"), json.as_bytes())
@@ -446,9 +708,7 @@ pub(super) fn write_public_artifacts(out: &Path, graph: &Graph, opts: ExtractOpt
     std::fs::write(out.join("graph.html"), html.as_bytes())
         .map_err(|error| GraphError::Io(error.to_string()))?;
 
-    let svg_path = out.join("graph.svg");
-    let svg_exists = existing_public_artifact(&svg_path, false)?;
-    if opts.svg || svg_exists {
+    if svg_selected {
         std::fs::write(
             &svg_path,
             habitat_graph_export::render_svg(graph).as_bytes(),
@@ -456,9 +716,7 @@ pub(super) fn write_public_artifacts(out: &Path, graph: &Graph, opts: ExtractOpt
         .map_err(|error| GraphError::Io(format!("graph.svg: {error}")))?;
     }
 
-    let graphml_path = out.join("graph.graphml");
-    let graphml_exists = existing_public_artifact(&graphml_path, false)?;
-    if opts.graphml || graphml_exists {
+    if graphml_selected {
         std::fs::write(
             &graphml_path,
             habitat_graph_export::render_graphml(graph).as_bytes(),
@@ -466,14 +724,16 @@ pub(super) fn write_public_artifacts(out: &Path, graph: &Graph, opts: ExtractOpt
         .map_err(|error| GraphError::Io(format!("graph.graphml: {error}")))?;
     }
 
-    let cypher_path = out.join("graph.cypher");
-    let cypher_exists = existing_public_artifact(&cypher_path, false)?;
-    if opts.neo4j || cypher_exists {
+    if cypher_selected {
         std::fs::write(
             &cypher_path,
             habitat_graph_export::render_cypher(graph).as_bytes(),
         )
         .map_err(|error| GraphError::Io(format!("graph.cypher: {error}")))?;
+    }
+
+    if had_optional_manifest || opts.svg || opts.graphml || opts.neo4j {
+        write_optional_artifact_manifest(out, &optional_owned)?;
     }
 
     let wiki_dir = out.join("wiki");
@@ -643,9 +903,14 @@ mod tests {
         let raw_label = "api_key_assignment_refused";
         mk_file(src.path(), "lib.rs", &format!("fn {raw_label}() {{}}"));
         let legacy = format!(
-            "---\nid: 193856898\ncrate: test\nlang: rust\nfile: \"lib.rs\"\nline: 1\ndegree: 0\ntags: [hg/node, crate/test]\n---\n\n# {raw_label}\n"
+            "---\nid: 193856898\ncrate: test\nlang: rust\nfile: \"lib.rs\"\nline: 1\ndegree: 0\ntags: [hg/node, crate/test, lang/rust]\n---\n\n# {raw_label}\n\n> `lib.rs:1` · crate `test` · degree 0\n\n## Links\n"
         );
         fs::write(vault.path().join(format!("{raw_label}.md")), legacy).unwrap();
+        fs::write(
+            vault.path().join("_MOC.md"),
+            format!("# Map of Content\n\n## Unclustered\n\n- [[{raw_label}]]\n"),
+        )
+        .unwrap();
         fs::write(vault.path().join("user.md"), "# User-authored note\n").unwrap();
 
         assert_eq!(run(src.path(), out.path(), Some(vault.path())), 0);
@@ -665,7 +930,26 @@ mod tests {
                 habitat_graph_core::content_id(raw_label)
             ))
             .exists());
+        assert!(!fs::read_to_string(vault.path().join("_MOC.md"))
+            .unwrap()
+            .contains(raw_label));
         assert!(vault.path().join(super::VAULT_MANIFEST).exists());
+    }
+
+    #[test]
+    fn legacy_vault_ownership_requires_the_exact_generated_layout() {
+        let valid = "---\nid: 1\ncommunity: 2\ncrate: test\nlang: rust\nfile: \"lib.rs\"\nline: 3\ndegree: 4\ntags: [hg/node, crate/test, lang/rust, community/2]\n---\n\n# generated\n\n> `lib.rs:3` · crate `test` · degree 4\n\n## Links\n";
+        assert!(super::parse_generated_vault_node_note(valid).is_some());
+
+        for invalid in [
+            valid.replacen("crate: test\nlang: rust", "lang: rust\ncrate: test", 1),
+            valid.replacen("line: 3", "line: many", 1),
+            valid.replacen("line: 3", "line: 03", 1),
+            valid.replacen("degree: 4", "degree: many", 1),
+            valid.replacen("tags: [hg/node,", "tags: [hg/notebook,", 1),
+        ] {
+            assert!(super::parse_generated_vault_node_note(&invalid).is_none());
+        }
     }
 
     #[test]
@@ -1316,6 +1600,7 @@ mod tests {
             wiki: true,
         };
         assert_eq!(run_artifacts(src.path(), out.path(), None, opts), 0);
+        assert!(out.path().join(super::OPTIONAL_ARTIFACT_MANIFEST).exists());
 
         for artifact in ["graph.svg", "graph.graphml", "graph.cypher"] {
             fs::write(out.path().join(artifact), raw_label).unwrap();
@@ -1351,6 +1636,25 @@ mod tests {
                 .unwrap()
                 .contains(raw_label));
         }
+    }
+
+    #[test]
+    fn default_run_preserves_unowned_optional_public_artifacts() {
+        let src = TempDir::new().unwrap();
+        let out = TempDir::new().unwrap();
+        mk_file(src.path(), "lib.rs", "fn generated() {}");
+        for artifact in ["graph.svg", "graph.graphml", "graph.cypher"] {
+            fs::write(out.path().join(artifact), format!("user-owned {artifact}")).unwrap();
+        }
+
+        assert_eq!(run(src.path(), out.path(), None), 0);
+        for artifact in ["graph.svg", "graph.graphml", "graph.cypher"] {
+            assert_eq!(
+                fs::read_to_string(out.path().join(artifact)).unwrap(),
+                format!("user-owned {artifact}")
+            );
+        }
+        assert!(!out.path().join(super::OPTIONAL_ARTIFACT_MANIFEST).exists());
     }
 
     #[test]

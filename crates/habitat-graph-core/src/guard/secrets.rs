@@ -121,7 +121,7 @@ fn screen_candidate(text: &str, hits: &mut HashSet<&'static str>) {
     if text.contains("AKIA") || text.contains("ASIA") {
         hits.insert("aws_access_key_id");
     }
-    if lower.contains("cargo_registry_token") {
+    if lower.contains("cargo_registry_token") || lower.contains("cargoregistrytoken") {
         hits.insert("cargo_registry_token");
     }
     if contains_bearer_authorization(&lower) {
@@ -280,6 +280,13 @@ mod tests {
     #[test]
     fn detects_cargo_token() {
         assert!(screen_for_secrets("CARGO_REGISTRY_TOKEN=abc123").contains(&"cargo_registry_token"));
+        assert!(
+            screen_for_secrets("cargo_[registry]_token=abc123").contains(&"cargo_registry_token")
+        );
+        assert_eq!(
+            redact_public_text("cargo_[registry]_token=abc123"),
+            "[REDACTED:cargo_registry_token]"
+        );
     }
 
     #[test]

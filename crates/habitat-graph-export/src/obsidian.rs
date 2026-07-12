@@ -8,7 +8,7 @@ use habitat_graph_core::{
 };
 use unicode_normalization::UnicodeNormalization as _;
 
-use crate::escape::{project_relation, redact_public_text, PublicRelationProjector};
+use crate::escape::{project_public_edges, project_relation, redact_public_text};
 
 /// Renders `graph` as an Obsidian vault: a deterministic list of `(filename, markdown)` pairs —
 /// one note per node (its `source_file` + `[[wikilinks]]` to connected nodes) plus a
@@ -251,9 +251,9 @@ fn windows_reserved_stem(stem: &str) -> bool {
 #[must_use]
 fn build_adjacency(graph: &Graph) -> HashMap<NodeId, Vec<(String, NodeId)>> {
     let mut adj: HashMap<NodeId, Vec<(String, NodeId)>> = HashMap::new();
-    let mut relation_projector = PublicRelationProjector::new();
-    for edge in &graph.edges {
-        let relation = relation_projector.project(edge.source, edge.target, &edge.relation);
+    for projected in project_public_edges(graph) {
+        let edge = projected.edge;
+        let relation = projected.relation;
         adj.entry(edge.source)
             .or_default()
             .push((relation.clone(), edge.target));

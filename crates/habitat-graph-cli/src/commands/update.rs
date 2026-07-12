@@ -592,6 +592,15 @@ mod tests {
         for artifact in ["graph.svg", "graph.graphml", "graph.cypher"] {
             fs::write(out.path().join(artifact), raw_label).unwrap();
         }
+        fs::write(
+            out.path().join(".habitat-graph-artifacts.json"),
+            serde_json::to_vec_pretty(&serde_json::json!({
+                "schema": "habitat-graph.artifact-manifest.v1",
+                "files": ["graph.svg", "graph.graphml", "graph.cypher"],
+            }))
+            .unwrap(),
+        )
+        .unwrap();
         let existing_ids: HashSet<u32> = parse_sidecar(out.path())
             .nodes
             .iter()

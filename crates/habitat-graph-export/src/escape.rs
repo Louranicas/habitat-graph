@@ -12,6 +12,43 @@ pub use habitat_graph_core::redact_public_text;
 pub(crate) use habitat_graph_core::{
     project_public_relation as project_relation, PublicRelationProjector,
 };
+use habitat_graph_core::{Edge, Graph};
+
+pub(crate) struct ProjectedPublicEdge<'a> {
+    pub(crate) edge: &'a Edge,
+    pub(crate) relation: String,
+}
+
+pub(crate) fn project_public_edges(graph: &Graph) -> Vec<ProjectedPublicEdge<'_>> {
+    let mut edges: Vec<(&Edge, String)> = graph
+        .edges
+        .iter()
+        .map(|edge| (edge, project_relation(&edge.relation)))
+        .collect();
+    edges.sort_by(|(left, left_relation), (right, right_relation)| {
+        (
+            left.source,
+            left.target,
+            left_relation.as_str(),
+            left.confidence,
+        )
+            .cmp(&(
+                right.source,
+                right.target,
+                right_relation.as_str(),
+                right.confidence,
+            ))
+    });
+
+    let mut projector = PublicRelationProjector::new();
+    edges
+        .into_iter()
+        .map(|(edge, relation)| ProjectedPublicEdge {
+            edge,
+            relation: projector.project(edge.source, edge.target, &relation),
+        })
+        .collect()
+}
 
 /// Escapes a string for safe embedding inside XML text or a double-quoted XML attribute.
 ///
