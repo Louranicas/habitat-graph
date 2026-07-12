@@ -559,7 +559,7 @@ mod tests {
         let v = parse(&to_node_link(&g).unwrap());
         assert_eq!(v["nodes"][0]["source_file"], "[REDACTED:api_key]");
         let relation = v["links"][0]["relation"].as_str().expect("relation");
-        assert_eq!(relation, "[REDACTED:bearer_token]#e0");
+        assert_eq!(relation, "[REDACTED:bearer_token]#e00000000000000000000");
     }
 
     #[test]

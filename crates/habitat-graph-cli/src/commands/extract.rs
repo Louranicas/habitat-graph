@@ -3,7 +3,7 @@
 use std::collections::HashSet;
 use std::path::{Component, Path};
 
-use habitat_graph_core::{GraphError, Result};
+use habitat_graph_core::{Graph, GraphError, Result};
 
 /// Ownership manifest for generated Obsidian notes. Only files recorded here (or recognized by
 /// the conservative legacy signature during first migration) may be removed on a later sync.
@@ -224,18 +224,12 @@ fn sync_generated_vault(vault_dir: &Path, rendered: &[(String, String)]) -> Resu
         }
     }
 
-    let journal_names: HashSet<String> = prior_owned.union(&current_names).cloned().collect();
-    write_vault_manifest(vault_dir, &journal_names)?;
+    write_vault_manifest(vault_dir, &current_names)?;
     for (filename, content) in rendered {
         std::fs::write(vault_dir.join(filename), content.as_bytes())
             .map_err(|error| GraphError::Io(format!("{filename}: {error}")))?;
     }
-
-    if journal_names == current_names {
-        Ok(())
-    } else {
-        write_vault_manifest(vault_dir, &current_names)
-    }
+    Ok(())
 }
 
 fn generated_wiki_filename(filename: &str) -> bool {
@@ -288,6 +282,86 @@ pub(super) fn sync_generated_wiki(wiki_dir: &Path, rendered: &[(String, String)]
     Ok(())
 }
 
+fn existing_public_artifact(path: &Path, directory: bool) -> Result<bool> {
+    let metadata = match std::fs::symlink_metadata(path) {
+        Ok(metadata) => metadata,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(false),
+        Err(error) => {
+            return Err(GraphError::Io(format!(
+                "inspect optional artifact {}: {error}",
+                path.display()
+            )))
+        }
+    };
+    let expected_type = if directory {
+        metadata.file_type().is_dir()
+    } else {
+        metadata.file_type().is_file()
+    };
+    if !expected_type {
+        return Err(GraphError::Guard(format!(
+            "optional artifact has unexpected file type: {}",
+            path.display()
+        )));
+    }
+    Ok(true)
+}
+
+pub(super) fn write_public_artifacts(out: &Path, graph: &Graph, opts: ExtractOpts) -> Result<()> {
+    std::fs::create_dir_all(out).map_err(|error| GraphError::Io(error.to_string()))?;
+
+    let json = habitat_graph_export::to_node_link(graph)?;
+    std::fs::write(out.join("graph.json"), json.as_bytes())
+        .map_err(|error| GraphError::Io(error.to_string()))?;
+
+    let report = habitat_graph_export::render_report(graph);
+    std::fs::write(out.join("GRAPH_REPORT.md"), report.as_bytes())
+        .map_err(|error| GraphError::Io(error.to_string()))?;
+
+    let html = habitat_graph_export::render_html(graph)?;
+    std::fs::write(out.join("graph.html"), html.as_bytes())
+        .map_err(|error| GraphError::Io(error.to_string()))?;
+
+    let svg_path = out.join("graph.svg");
+    let svg_exists = existing_public_artifact(&svg_path, false)?;
+    if opts.svg || svg_exists {
+        std::fs::write(
+            &svg_path,
+            habitat_graph_export::render_svg(graph).as_bytes(),
+        )
+        .map_err(|error| GraphError::Io(format!("graph.svg: {error}")))?;
+    }
+
+    let graphml_path = out.join("graph.graphml");
+    let graphml_exists = existing_public_artifact(&graphml_path, false)?;
+    if opts.graphml || graphml_exists {
+        std::fs::write(
+            &graphml_path,
+            habitat_graph_export::render_graphml(graph).as_bytes(),
+        )
+        .map_err(|error| GraphError::Io(format!("graph.graphml: {error}")))?;
+    }
+
+    let cypher_path = out.join("graph.cypher");
+    let cypher_exists = existing_public_artifact(&cypher_path, false)?;
+    if opts.neo4j || cypher_exists {
+        std::fs::write(
+            &cypher_path,
+            habitat_graph_export::render_cypher(graph).as_bytes(),
+        )
+        .map_err(|error| GraphError::Io(format!("graph.cypher: {error}")))?;
+    }
+
+    let wiki_dir = out.join("wiki");
+    let wiki_exists = existing_public_artifact(&wiki_dir, true)?;
+    if opts.wiki || wiki_exists {
+        let rendered = habitat_graph_export::render_wiki(graph);
+        sync_generated_wiki(&wiki_dir, &rendered)?;
+    }
+
+    Ok(())
+}
+
 /// Inner pipeline: detect → extract → build → analyze → export → write.
 ///
 /// Returns `(node_count, edge_count, community_count)` on success.
@@ -320,51 +394,13 @@ fn run_inner(
     // Re-sort to canonicalize the community list (idempotent on nodes/edges).
     let graph = graph.sorted();
 
-    // Ensure the output directory (and all parents) exist.
-    std::fs::create_dir_all(out).map_err(|e| GraphError::Io(e.to_string()))?;
-
-    // Write graph.json — NetworkX node-link envelope, graphify-compatible.
-    let json = habitat_graph_export::to_node_link(&graph)?;
-    std::fs::write(out.join("graph.json"), json.as_bytes())
-        .map_err(|e| GraphError::Io(e.to_string()))?;
-
-    // Write GRAPH_REPORT.md — human-facing Markdown summary.
-    let report = habitat_graph_export::render_report(&graph);
-    std::fs::write(out.join("GRAPH_REPORT.md"), report.as_bytes())
-        .map_err(|e| GraphError::Io(e.to_string()))?;
-
-    // Write graph.html — self-contained interactive viewer (the graphify graph.html analogue).
-    let html = habitat_graph_export::render_html(&graph)?;
-    std::fs::write(out.join("graph.html"), html.as_bytes())
-        .map_err(|e| GraphError::Io(e.to_string()))?;
+    write_public_artifacts(out, &graph, opts)?;
 
     // Optionally emit an Obsidian vault — one note per node (`[[wikilinks]]` + frontmatter/tags)
     // for Obsidian's graph view + Dataview / Juggl / Breadcrumbs.
     if let Some(vault_dir) = vault {
         let rendered = habitat_graph_export::render_vault(&graph);
         sync_generated_vault(vault_dir, &rendered)?;
-    }
-
-    // PB opt-in exporters (F13: never on the agent-critical path; written only when requested).
-    if opts.svg {
-        let svg = habitat_graph_export::render_svg(&graph);
-        std::fs::write(out.join("graph.svg"), svg.as_bytes())
-            .map_err(|e| GraphError::Io(e.to_string()))?;
-    }
-    if opts.graphml {
-        let graphml = habitat_graph_export::render_graphml(&graph);
-        std::fs::write(out.join("graph.graphml"), graphml.as_bytes())
-            .map_err(|e| GraphError::Io(e.to_string()))?;
-    }
-    if opts.neo4j {
-        let cypher = habitat_graph_export::render_cypher(&graph);
-        std::fs::write(out.join("graph.cypher"), cypher.as_bytes())
-            .map_err(|e| GraphError::Io(e.to_string()))?;
-    }
-    if opts.wiki {
-        let wiki_dir = out.join("wiki");
-        let rendered = habitat_graph_export::render_wiki(&graph);
-        sync_generated_wiki(&wiki_dir, &rendered)?;
     }
 
     Ok(graph.counts())
@@ -556,8 +592,11 @@ mod tests {
     #[test]
     fn vault_sync_retries_after_partial_note_write() {
         let vault = TempDir::new().unwrap();
-        let prior_owned = std::collections::HashSet::from(["blocked.md".to_owned()]);
+        let legacy_secret = "api_key_assignment_refused.md";
+        let prior_owned =
+            std::collections::HashSet::from(["blocked.md".to_owned(), legacy_secret.to_owned()]);
         write_vault_manifest(vault.path(), &prior_owned).unwrap();
+        fs::write(vault.path().join(legacy_secret), "legacy").unwrap();
         fs::create_dir(vault.path().join("blocked.md")).unwrap();
         let rendered = vec![
             ("written.md".to_owned(), "written".to_owned()),
@@ -569,6 +608,8 @@ mod tests {
             fs::read_to_string(vault.path().join("written.md")).unwrap(),
             "written"
         );
+        let journal = fs::read_to_string(vault.path().join(super::VAULT_MANIFEST)).unwrap();
+        assert!(!journal.contains(legacy_secret));
 
         fs::remove_dir(vault.path().join("blocked.md")).unwrap();
         sync_generated_vault(vault.path(), &rendered).unwrap();
@@ -1015,6 +1056,53 @@ mod tests {
             .iter()
             .all(|filename| !wiki.join(filename).exists()));
         assert_eq!(fs::read_to_string(wiki.join("user.md")).unwrap(), "keep me");
+    }
+
+    #[test]
+    fn default_run_refreshes_existing_optional_public_artifacts() {
+        let src = TempDir::new().unwrap();
+        let out = TempDir::new().unwrap();
+        let raw_label = "api_key_assignment_refused";
+        mk_file(src.path(), "lib.rs", &format!("fn {raw_label}() {{}}"));
+        let opts = ExtractOpts {
+            svg: true,
+            graphml: true,
+            neo4j: true,
+            wiki: true,
+        };
+        assert_eq!(run_artifacts(src.path(), out.path(), None, opts), 0);
+
+        for artifact in ["graph.svg", "graph.graphml", "graph.cypher"] {
+            fs::write(out.path().join(artifact), raw_label).unwrap();
+        }
+        let wiki = out.path().join("wiki");
+        fs::write(wiki.join("index.md"), raw_label).unwrap();
+        let node_id = habitat_graph_core::content_id(raw_label);
+        let stale_id = if node_id == u32::MAX {
+            node_id - 1
+        } else {
+            node_id + 1
+        };
+        fs::write(wiki.join(format!("node-{stale_id}.md")), raw_label).unwrap();
+        fs::write(wiki.join("user.md"), "keep me").unwrap();
+
+        assert_eq!(run(src.path(), out.path(), None), 0);
+        for artifact in ["graph.svg", "graph.graphml", "graph.cypher"] {
+            assert!(!fs::read_to_string(out.path().join(artifact))
+                .unwrap()
+                .contains(raw_label));
+        }
+        assert!(!wiki.join(format!("node-{stale_id}.md")).exists());
+        assert_eq!(fs::read_to_string(wiki.join("user.md")).unwrap(), "keep me");
+        for entry in fs::read_dir(&wiki).unwrap() {
+            let entry = entry.unwrap();
+            if entry.file_name() == "user.md" {
+                continue;
+            }
+            assert!(!fs::read_to_string(entry.path())
+                .unwrap()
+                .contains(raw_label));
+        }
     }
 
     #[test]

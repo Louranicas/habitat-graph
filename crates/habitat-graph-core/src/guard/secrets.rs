@@ -217,9 +217,9 @@ pub fn project_public_relation(relation: &str) -> String {
 /// Stateful public edge-relation projection using endpoint-local occurrence ordinals.
 ///
 /// Secret-bearing relations are rendered as a canonical marker followed by `#eN`, where `N` is
-/// their zero-based occurrence among edges with the same endpoints and marker. The discriminator
-/// depends only on public graph structure, so it preserves parallel edges without exposing a
-/// digest of the original relation.
+/// their fixed-width, zero-padded occurrence among edges with the same endpoints and marker. The
+/// discriminator depends only on public graph structure, so it preserves parallel edges without
+/// exposing a digest of the original relation.
 #[derive(Debug, Default)]
 pub struct PublicRelationProjector {
     occurrences: HashMap<(NodeId, NodeId, String), usize>,
@@ -244,7 +244,7 @@ impl PublicRelationProjector {
             .occurrences
             .entry((source, target, projected.clone()))
             .or_default();
-        let result = format!("{projected}#e{occurrence}");
+        let result = format!("{projected}#e{occurrence:020}");
         *occurrence = occurrence.saturating_add(1);
         result
     }
@@ -364,8 +364,8 @@ mod tests {
         let alpha = projector.project(NodeId::new(1), NodeId::new(2), "api_key=alpha");
         let beta = projector.project(NodeId::new(1), NodeId::new(2), "api_key=beta");
         assert_ne!(alpha, beta);
-        assert_eq!(alpha, "[REDACTED:api_key]#e0");
-        assert_eq!(beta, "[REDACTED:api_key]#e1");
+        assert_eq!(alpha, "[REDACTED:api_key]#e00000000000000000000");
+        assert_eq!(beta, "[REDACTED:api_key]#e00000000000000000001");
 
         let mut replay = PublicRelationProjector::new();
         assert_eq!(
@@ -382,7 +382,31 @@ mod tests {
         let mut projector = PublicRelationProjector::new();
         assert_eq!(
             projector.project(NodeId::new(3), NodeId::new(4), relation),
-            "[REDACTED:bearer_token]#e0"
+            "[REDACTED:bearer_token]#e00000000000000000000"
         );
+    }
+
+    #[test]
+    fn projected_relation_ordinals_remain_sorted_and_stable_after_replay() {
+        let mut projector = PublicRelationProjector::new();
+        let projected: Vec<String> = (0..12)
+            .map(|index| {
+                projector.project(
+                    NodeId::new(1),
+                    NodeId::new(2),
+                    &format!("api_key=value{index}"),
+                )
+            })
+            .collect();
+        let mut sorted = projected.clone();
+        sorted.sort_unstable();
+        assert_eq!(sorted, projected);
+
+        let mut replay = PublicRelationProjector::new();
+        let replayed: Vec<String> = sorted
+            .iter()
+            .map(|relation| replay.project(NodeId::new(1), NodeId::new(2), relation))
+            .collect();
+        assert_eq!(replayed, projected);
     }
 }

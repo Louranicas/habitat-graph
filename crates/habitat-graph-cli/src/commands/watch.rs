@@ -46,6 +46,7 @@ pub const DEBOUNCE: Duration = Duration::from_millis(200);
 pub const DEFAULT_OUT: &str = "graphify-out";
 
 /// Primary artifact name inside the output directory.
+#[cfg(all(feature = "watch", feature = "live-bridges"))]
 const GRAPH_JSON: &str = "graph.json";
 
 // ── Single-writer lock ────────────────────────────────────────────────────────
@@ -61,8 +62,8 @@ pub static REBUILD_LOCK: Mutex<()> = Mutex::new(());
 
 // ── Core rebuild ──────────────────────────────────────────────────────────────
 
-/// Extracts a graph from every recognised source file under `dir` and writes the core artifacts
-/// (at minimum `graph.json`) into `out`.
+/// Extracts a graph from every recognised source file under `dir`, writes the core artifacts, and
+/// refreshes optional public artifacts already present in `out`.
 ///
 /// Returns the number of nodes in the resulting graph.
 ///
@@ -85,14 +86,7 @@ pub fn rebuild(dir: &Path, out: &Path) -> Result<usize> {
 
     let n = graph.nodes.len();
 
-    // Ensure output directory exists.
-    std::fs::create_dir_all(out)
-        .map_err(|e| GraphError::Io(format!("create out dir {}: {e}", out.display())))?;
-
-    // Write graph.json.
-    let json = habitat_graph_export::to_node_link(&graph)?;
-    std::fs::write(out.join(GRAPH_JSON), json.as_bytes())
-        .map_err(|e| GraphError::Io(format!("write graph.json: {e}")))?;
+    super::extract::write_public_artifacts(out, &graph, super::extract::ExtractOpts::default())?;
 
     Ok(n)
 }
@@ -475,6 +469,41 @@ mod tests {
         mk(&src, "lib.rs", "fn f() {}");
         rebuild(&src, &out).expect("rebuild");
         assert!(out.join("graph.json").exists());
+    }
+
+    #[test]
+    fn rebuild_refreshes_all_existing_public_artifacts() {
+        let src = tdir();
+        let out = tdir();
+        let raw_label = "api_key_assignment_refused";
+        mk(&src, "lib.rs", &format!("fn {raw_label}() {{}}"));
+        for artifact in ["graph.svg", "graph.graphml", "graph.cypher"] {
+            fs::write(out.join(artifact), raw_label).unwrap();
+        }
+        let wiki = out.join("wiki");
+        fs::create_dir(&wiki).unwrap();
+        fs::write(wiki.join("index.md"), raw_label).unwrap();
+        fs::write(wiki.join("node-4294967295.md"), raw_label).unwrap();
+
+        rebuild(&src, &out).expect("rebuild");
+
+        for artifact in [
+            "graph.json",
+            "GRAPH_REPORT.md",
+            "graph.html",
+            "graph.svg",
+            "graph.graphml",
+            "graph.cypher",
+        ] {
+            assert!(!fs::read_to_string(out.join(artifact))
+                .unwrap()
+                .contains(raw_label));
+        }
+        for entry in fs::read_dir(&wiki).unwrap() {
+            assert!(!fs::read_to_string(entry.unwrap().path())
+                .unwrap()
+                .contains(raw_label));
+        }
     }
 
     #[test]

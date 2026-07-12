@@ -1,7 +1,8 @@
 use std::collections::{HashMap, HashSet};
 
 use habitat_graph_core::{
-    content_id, is_canonical_redaction_marker, redact_public_text, Graph, Node, NodeId,
+    content_id, is_canonical_redaction_marker, project_public_relation, redact_public_text, Edge,
+    Graph, Node, NodeId, PublicRelationProjector,
 };
 
 #[derive(Clone, Debug, Eq, Hash, PartialEq)]
@@ -25,7 +26,12 @@ pub(crate) type NodeIdentityMap = HashMap<NodeId, NodeIdentity>;
 struct ProjectionCandidate {
     graph_index: usize,
     marker: bool,
-    raw_label: String,
+}
+
+#[derive(Clone, Debug, Eq, Hash, PartialEq)]
+pub(crate) enum RelationIdentity {
+    Exact(String),
+    Projected(String, usize),
 }
 
 pub(crate) fn node_identity_maps(
@@ -61,7 +67,6 @@ pub(crate) fn node_identity_maps(
                 .push(ProjectionCandidate {
                     graph_index,
                     marker,
-                    raw_label: node.label.clone(),
                 });
         }
     }
@@ -73,22 +78,8 @@ pub(crate) fn node_identity_maps(
 
         let lineage_anchor = lineage_root
             .filter(|root| group.iter().any(|candidate| candidate.graph_index == *root));
-        let raw_candidates: Vec<&ProjectionCandidate> =
-            group.iter().filter(|candidate| !candidate.marker).collect();
-        let raw_labels: HashSet<&str> = raw_candidates
-            .iter()
-            .map(|candidate| candidate.raw_label.as_str())
-            .collect();
-        let raw_anchor = (raw_labels.len() == 1)
-            .then(|| {
-                raw_candidates
-                    .iter()
-                    .map(|candidate| candidate.graph_index)
-                    .min()
-            })
-            .flatten();
 
-        if let Some(anchor) = lineage_anchor.or(raw_anchor) {
+        if let Some(anchor) = lineage_anchor {
             for candidate in group {
                 maps[candidate.graph_index]
                     .insert(id, NodeIdentity::Projected(id, marker.clone(), anchor));
@@ -104,6 +95,25 @@ pub(crate) fn node_identity_maps(
     }
 
     maps
+}
+
+pub(crate) fn relation_identities(
+    edges: &[Edge],
+    projected_provenance: usize,
+) -> Vec<RelationIdentity> {
+    let mut projector = PublicRelationProjector::new();
+    edges
+        .iter()
+        .map(|edge| {
+            let projected = projector.project(edge.source, edge.target, &edge.relation);
+            let marker = project_public_relation(&edge.relation);
+            if is_canonical_redaction_marker(&marker) && edge.relation.starts_with(&marker) {
+                RelationIdentity::Projected(projected, projected_provenance)
+            } else {
+                RelationIdentity::Exact(edge.relation.clone())
+            }
+        })
+        .collect()
 }
 
 pub(crate) fn node_identity(node: &Node, identities: &NodeIdentityMap) -> NodeIdentity {

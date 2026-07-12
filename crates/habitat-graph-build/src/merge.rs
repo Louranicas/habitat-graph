@@ -2,11 +2,12 @@
 
 use std::collections::{HashMap, HashSet};
 
-use habitat_graph_core::{Community, Edge, Graph, Manifest, Node, NodeId, PublicRelationProjector};
+use habitat_graph_core::{Community, Edge, Graph, Manifest, Node, NodeId};
 use indexmap::IndexMap;
 
 use crate::merge_identity::{
-    allocate_node_id, node_identity, node_identity_maps, NodeIdentity, NodeIdentityMap,
+    allocate_node_id, node_identity, node_identity_maps, relation_identities, NodeIdentity,
+    NodeIdentityMap, RelationIdentity,
 };
 
 /// Merges two [`Graph`]s whose [`NodeId`] spaces are **independent** into one coherent graph.
@@ -19,14 +20,13 @@ use crate::merge_identity::{
 ///    When the same identity appears in both graphs only one node is kept — the one from `a`.
 /// 2. Per-graph `old_id → new_id` maps let each graph's edges be remapped into the merged id
 ///    space.  An edge whose source **or** target lacks a mapping is silently dropped
-///    (dangling-edge policy). Raw and publicly projected forms of the same relation share one
-///    edge identity.
+///    (dangling-edge policy). Exact relations share identity across inputs, while lossy public
+///    projections retain input provenance.
 /// 3. Communities from both graphs are concatenated (higher-level callers may further dedup
 ///    them later).
 /// 4. Manifests are combined: inputs are concatenated; `tool_version` and `schema` are taken
 ///    from `a`; `generated_at` uses `a`'s value when present, falling back to `b`'s.
-/// 5. [`crate::dedup`] removes duplicate nodes (same id) and edges (same
-///    `source`/`target`/`relation`), then [`Graph::sorted`] canonicalizes the output (R4).
+/// 5. [`Graph::sorted`] canonicalizes the identity-interned output (R4).
 ///
 /// # Errors
 ///
@@ -105,10 +105,25 @@ pub fn merge(a: Graph, b: Graph) -> Graph {
 
     let edge_cap = a_edges.len().saturating_add(b_edges.len());
     let mut merged_edges: Vec<Edge> = Vec::with_capacity(edge_cap);
-    let mut edge_identities: HashSet<(NodeId, NodeId, String)> = HashSet::with_capacity(edge_cap);
+    let mut edge_identities: HashSet<(NodeId, NodeId, RelationIdentity)> =
+        HashSet::with_capacity(edge_cap);
+    let a_relation_identities = relation_identities(&a_edges, 0);
+    let b_relation_identities = relation_identities(&b_edges, 1);
 
-    append_remapped_edges(a_edges, &a_remap, &mut merged_edges, &mut edge_identities);
-    append_remapped_edges(b_edges, &b_remap, &mut merged_edges, &mut edge_identities);
+    append_remapped_edges(
+        a_edges,
+        a_relation_identities,
+        &a_remap,
+        &mut merged_edges,
+        &mut edge_identities,
+    );
+    append_remapped_edges(
+        b_edges,
+        b_relation_identities,
+        &b_remap,
+        &mut merged_edges,
+        &mut edge_identities,
+    );
 
     // ── Phase 3: community concatenation ─────────────────────────────────────
 
@@ -125,15 +140,15 @@ pub fn merge(a: Graph, b: Graph) -> Graph {
         generated_at: a_manifest.generated_at.or(b_manifest.generated_at),
     };
 
-    // ── Phase 5: dedup → sorted ───────────────────────────────────────────────
+    // ── Phase 5: sorted ───────────────────────────────────────────────────────
 
-    crate::dedup(Graph {
+    Graph {
         schema: a_schema,
         nodes: merged_nodes,
         edges: merged_edges,
         communities: merged_communities,
         manifest,
-    })
+    }
     .sorted()
 }
 
@@ -165,18 +180,16 @@ fn intern_node(
 
 fn append_remapped_edges(
     edges: Vec<Edge>,
+    relation_identities: Vec<RelationIdentity>,
     remap: &HashMap<NodeId, NodeId>,
     merged_edges: &mut Vec<Edge>,
-    edge_identities: &mut HashSet<(NodeId, NodeId, String)>,
+    edge_identities: &mut HashSet<(NodeId, NodeId, RelationIdentity)>,
 ) {
-    let mut relation_projector = PublicRelationProjector::new();
-    for edge in edges {
+    for (edge, relation_identity) in edges.into_iter().zip(relation_identities) {
         let (Some(&source), Some(&target)) = (remap.get(&edge.source), remap.get(&edge.target))
         else {
             continue;
         };
-        let relation_identity =
-            relation_projector.project(edge.source, edge.target, &edge.relation);
         let identity = (source, target, relation_identity);
         if edge_identities.insert(identity) {
             merged_edges.push(Edge {
@@ -744,7 +757,7 @@ mod tests {
     }
 
     #[test]
-    fn public_redaction_markers_merge_by_stable_id_without_collapsing() {
+    fn ambiguous_raw_and_public_nodes_keep_independent_topology() {
         let secret_id = content_id("api_key_alpha");
         let mut new_graph = Graph::new();
         new_graph
@@ -764,26 +777,32 @@ mod tests {
         prior_public.edges.push(edge(30, 40, "calls"));
 
         let result = merge(new_graph, prior_public);
-        assert_eq!(result.nodes.len(), 4);
+        assert_eq!(result.nodes.len(), 5);
+        let raw = result
+            .nodes
+            .iter()
+            .find(|node| node.label == "api_key_alpha")
+            .unwrap();
+        let projected = result
+            .nodes
+            .iter()
+            .find(|node| node.id.get() == secret_id)
+            .unwrap();
+        assert_ne!(raw.id, projected.id);
         assert_eq!(
-            result
-                .nodes
-                .iter()
-                .filter(|node| node.id.get() == secret_id)
-                .count(),
-            1
-        );
-        assert_eq!(
-            result
-                .nodes
-                .iter()
-                .find(|node| node.id.get() == secret_id)
-                .map(|node| node.label.as_str()),
-            Some("api_key_alpha"),
-            "new raw graph metadata must win for the same stable id"
+            projected.label, "[REDACTED:api_key]",
+            "an unverified public node must retain its own identity"
         );
         assert!(result.nodes.iter().any(|node| node.id.get() == 30));
-        assert_eq!(result.edges.len(), 2, "both stable-id edges survive");
+        assert_eq!(result.edges.len(), 2, "both independent edges survive");
+        assert!(result
+            .edges
+            .iter()
+            .any(|edge| edge.source == raw.id && edge.relation == "calls"));
+        assert!(result
+            .edges
+            .iter()
+            .any(|edge| edge.source == NodeId::new(30) && edge.relation == "calls"));
     }
 
     #[test]
@@ -881,7 +900,7 @@ mod tests {
     }
 
     #[test]
-    fn collision_probed_secret_node_matches_its_public_projection() {
+    fn collision_probed_secret_does_not_alias_unverified_public_node() {
         let probed_id = content_id("api_key_alpha").wrapping_add(1);
         let mut raw = Graph::new();
         raw.nodes.push(node(probed_id, "api_key_alpha", "raw.rs"));
@@ -891,13 +910,23 @@ mod tests {
             .push(node(probed_id, "[REDACTED:api_key]", "public.rs"));
 
         let result = merge(raw, public);
-        assert_eq!(result.nodes.len(), 1);
-        assert_eq!(result.nodes[0].id.get(), probed_id);
-        assert_eq!(result.nodes[0].label, "api_key_alpha");
+        assert_eq!(result.nodes.len(), 2);
+        let raw = result
+            .nodes
+            .iter()
+            .find(|node| node.label == "api_key_alpha")
+            .unwrap();
+        let projected = result
+            .nodes
+            .iter()
+            .find(|node| node.label == "[REDACTED:api_key]")
+            .unwrap();
+        assert_ne!(raw.id, projected.id);
+        assert_eq!(projected.id.get(), probed_id);
     }
 
     #[test]
-    fn raw_and_projected_relations_share_merge_identity() {
+    fn raw_and_unverified_projected_relations_remain_distinct() {
         let mut raw = Graph::new();
         raw.nodes.push(node(1, "A", "raw.rs"));
         raw.nodes.push(node(2, "B", "raw.rs"));
@@ -911,8 +940,55 @@ mod tests {
             .push(edge(10, 20, &project_public_relation("api_key=alpha")));
 
         let result = merge(raw, public);
-        assert_eq!(result.edges.len(), 1);
-        assert_eq!(result.edges[0].relation, "api_key=alpha");
+        assert_eq!(result.edges.len(), 2);
+        assert!(result
+            .edges
+            .iter()
+            .any(|edge| edge.relation == "api_key=alpha"));
+        assert!(result
+            .edges
+            .iter()
+            .any(|edge| edge.relation == "[REDACTED:api_key]"));
+    }
+
+    #[test]
+    fn independent_secret_relations_do_not_share_projected_ordinals() {
+        let mut a = Graph::new();
+        a.nodes.push(node(1, "A", "a.rs"));
+        a.nodes.push(node(2, "B", "a.rs"));
+        a.edges.push(edge(1, 2, "api_key=alpha"));
+
+        let mut b = Graph::new();
+        b.nodes.push(node(10, "A", "b.rs"));
+        b.nodes.push(node(20, "B", "b.rs"));
+        b.edges.push(edge(10, 20, "api_key=beta"));
+
+        let result = merge(a, b);
+        assert_eq!(result.edges.len(), 2);
+        assert!(result
+            .edges
+            .iter()
+            .any(|edge| edge.relation == "api_key=alpha"));
+        assert!(result
+            .edges
+            .iter()
+            .any(|edge| edge.relation == "api_key=beta"));
+    }
+
+    #[test]
+    fn independent_projected_relations_keep_distinct_provenance() {
+        let mut a = Graph::new();
+        a.nodes.push(node(1, "A", "a.rs"));
+        a.nodes.push(node(2, "B", "a.rs"));
+        a.edges.push(edge(1, 2, "[REDACTED:api_key]#e0"));
+
+        let mut b = Graph::new();
+        b.nodes.push(node(10, "A", "b.rs"));
+        b.nodes.push(node(20, "B", "b.rs"));
+        b.edges.push(edge(10, 20, "[REDACTED:api_key]#e0"));
+
+        let result = merge(a, b);
+        assert_eq!(result.edges.len(), 2);
     }
 
     #[test]

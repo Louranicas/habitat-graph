@@ -41,8 +41,6 @@ use habitat_graph_core::{Graph, GraphError, Manifest, NodeId, Result, SCHEMA_VER
 
 /// Sidecar filename storing the full internal [`Graph`] JSON (relative to the output directory).
 const SIDECAR: &str = ".habitat-graph-state.json";
-/// Primary artifact filename (node-link format, graphify-compatible).
-const GRAPH_JSON: &str = "graph.json";
 /// Monotonic suffix for collision-free private sidecar temporary files.
 #[cfg(unix)]
 static SIDECAR_TEMP_SEQUENCE: AtomicU64 = AtomicU64::new(0);
@@ -339,24 +337,7 @@ fn do_full_build(out: &Path, files: &[PathBuf]) -> Result<()> {
 /// Returns [`GraphError::Io`] on any filesystem failure, or [`GraphError::Schema`] on
 /// serialization failure.
 fn write_artifacts(out: &Path, graph: &Graph, current_manifest: Manifest) -> Result<()> {
-    std::fs::create_dir_all(out).map_err(|e| GraphError::Io(e.to_string()))?;
-
-    // graph.json — NetworkX node-link envelope (graphify-compatible; P1-G12 schema_version key).
-    let json = habitat_graph_export::to_node_link(graph)?;
-    std::fs::write(out.join(GRAPH_JSON), json.as_bytes())
-        .map_err(|e| GraphError::Io(e.to_string()))?;
-
-    // GRAPH_REPORT.md — human-facing Markdown summary.
-    let report = habitat_graph_export::render_report(graph);
-    std::fs::write(out.join("GRAPH_REPORT.md"), report.as_bytes())
-        .map_err(|e| GraphError::Io(e.to_string()))?;
-
-    // graph.html — self-contained interactive viewer.
-    let html = habitat_graph_export::render_html(graph)?;
-    std::fs::write(out.join("graph.html"), html.as_bytes())
-        .map_err(|e| GraphError::Io(e.to_string()))?;
-
-    refresh_existing_optional_artifacts(out, graph)?;
+    super::extract::write_public_artifacts(out, graph, super::extract::ExtractOpts::default())?;
 
     // Sidecar — full internal Graph with the current content-hash manifest, written last so
     // that if it exists, the other artifacts were (at least attempted to be) written first.
@@ -364,68 +345,6 @@ fn write_artifacts(out: &Path, graph: &Graph, current_manifest: Manifest) -> Res
     sidecar.manifest = current_manifest;
     let sidecar_json = sidecar.to_json()?;
     write_private_sidecar(&out.join(SIDECAR), sidecar_json.as_bytes())?;
-
-    Ok(())
-}
-
-fn existing_artifact(path: &Path, directory: bool) -> Result<bool> {
-    let metadata = match std::fs::symlink_metadata(path) {
-        Ok(metadata) => metadata,
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(false),
-        Err(error) => {
-            return Err(GraphError::Io(format!(
-                "inspect optional artifact {}: {error}",
-                path.display()
-            )))
-        }
-    };
-    let expected_type = if directory {
-        metadata.file_type().is_dir()
-    } else {
-        metadata.file_type().is_file()
-    };
-    if !expected_type {
-        return Err(GraphError::Guard(format!(
-            "optional artifact has unexpected file type: {}",
-            path.display()
-        )));
-    }
-    Ok(true)
-}
-
-fn refresh_existing_optional_artifacts(out: &Path, graph: &Graph) -> Result<()> {
-    let svg_path = out.join("graph.svg");
-    if existing_artifact(&svg_path, false)? {
-        std::fs::write(
-            &svg_path,
-            habitat_graph_export::render_svg(graph).as_bytes(),
-        )
-        .map_err(|error| GraphError::Io(format!("graph.svg: {error}")))?;
-    }
-
-    let graphml_path = out.join("graph.graphml");
-    if existing_artifact(&graphml_path, false)? {
-        std::fs::write(
-            &graphml_path,
-            habitat_graph_export::render_graphml(graph).as_bytes(),
-        )
-        .map_err(|error| GraphError::Io(format!("graph.graphml: {error}")))?;
-    }
-
-    let cypher_path = out.join("graph.cypher");
-    if existing_artifact(&cypher_path, false)? {
-        std::fs::write(
-            &cypher_path,
-            habitat_graph_export::render_cypher(graph).as_bytes(),
-        )
-        .map_err(|error| GraphError::Io(format!("graph.cypher: {error}")))?;
-    }
-
-    let wiki_dir = out.join("wiki");
-    if existing_artifact(&wiki_dir, true)? {
-        let rendered = habitat_graph_export::render_wiki(graph);
-        super::extract::sync_generated_wiki(&wiki_dir, &rendered)?;
-    }
 
     Ok(())
 }
