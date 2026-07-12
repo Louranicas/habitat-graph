@@ -56,7 +56,10 @@ pub fn run_artifacts(dir: &Path, out: &Path, vault: Option<&Path>, opts: Extract
                 println!("cypher -> {}", out.join("graph.cypher").display());
             }
             if opts.wiki {
-                println!("wiki ({n} articles + index) -> {}", out.join("wiki").display());
+                println!(
+                    "wiki ({n} articles + index) -> {}",
+                    out.join("wiki").display()
+                );
             }
             0
         }
@@ -222,18 +225,34 @@ mod tests {
         let vault = TempDir::new().unwrap();
         mk_file(src.path(), "lib.rs", "fn a() { b(); } fn b() {}");
         assert_eq!(run(src.path(), out.path(), Some(vault.path())), 0);
-        assert!(vault.path().join("_MOC.md").exists(), "vault MOC must exist");
+        assert!(
+            vault.path().join("_MOC.md").exists(),
+            "vault MOC must exist"
+        );
         // At least one node note with frontmatter + a Dataview typed edge.
         let entries: Vec<_> = fs::read_dir(vault.path())
             .unwrap()
             .filter_map(std::result::Result::ok)
             .filter(|e| e.path().extension().is_some_and(|x| x == "md"))
             .collect();
-        assert!(entries.len() >= 2, "expected node notes + MOC, got {}", entries.len());
+        assert!(
+            entries.len() >= 2,
+            "expected node notes + MOC, got {}",
+            entries.len()
+        );
         let any = fs::read_to_string(vault.path().join("a.md")).expect("a.md");
-        assert!(any.starts_with("---\n"), "note must carry frontmatter: {any}");
-        assert!(any.contains("tags: [hg/node"), "note must carry tags: {any}");
-        assert!(any.contains(":: [["), "note must carry a Dataview typed edge: {any}");
+        assert!(
+            any.starts_with("---\n"),
+            "note must carry frontmatter: {any}"
+        );
+        assert!(
+            any.contains("tags: [hg/node"),
+            "note must carry tags: {any}"
+        );
+        assert!(
+            any.contains(":: [["),
+            "note must carry a Dataview typed edge: {any}"
+        );
     }
 
     // ── T1d: no vault written when not requested ─────────────────────────────
@@ -570,7 +589,10 @@ mod tests {
         };
         assert_eq!(run_artifacts(src.path(), out.path(), None, opts), 0);
         let svg = fs::read_to_string(out.path().join("graph.svg")).expect("graph.svg");
-        assert!(svg.starts_with("<svg"), "graph.svg must be an SVG: {svg:.60}");
+        assert!(
+            svg.starts_with("<svg"),
+            "graph.svg must be an SVG: {svg:.60}"
+        );
     }
 
     #[test]
@@ -598,7 +620,10 @@ mod tests {
         };
         assert_eq!(run_artifacts(src.path(), out.path(), None, opts), 0);
         let cy = fs::read_to_string(out.path().join("graph.cypher")).expect("graph.cypher");
-        assert!(cy.contains("cypher export"), "must be a Cypher script: {cy:.80}");
+        assert!(
+            cy.contains("cypher export"),
+            "must be a Cypher script: {cy:.80}"
+        );
     }
 
     #[test]

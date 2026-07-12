@@ -209,12 +209,7 @@ fn extract_type_definition(
 /// (`"myheader.h"`); both include their surrounding delimiters, which are stripped before
 /// emitting. The path is lowercased to match graphify's taxonomy. Empty or purely-delimiter
 /// paths are silently skipped.
-fn extract_include(
-    node: &tree_sitter::Node<'_>,
-    source: &[u8],
-    b: &str,
-    result: &mut Extraction,
-) {
+fn extract_include(node: &tree_sitter::Node<'_>, source: &[u8], b: &str, result: &mut Extraction) {
     let Some(path_node) = node.child_by_field_name("path") else {
         return;
     };
@@ -472,8 +467,16 @@ mod tests {
     fn d02_multiple_functions_all_have_contains_edges() {
         let src = "int f1(void) { return 1; }\nint f2(void) { return 2; }\n";
         let ex = extract(src, "two.c");
-        let contains: Vec<_> = ex.edges.iter().filter(|e| e.relation == "contains").collect();
-        assert_eq!(contains.len(), 2, "expected 2 contains edges; got {contains:?}");
+        let contains: Vec<_> = ex
+            .edges
+            .iter()
+            .filter(|e| e.relation == "contains")
+            .collect();
+        assert_eq!(
+            contains.len(),
+            2,
+            "expected 2 contains edges; got {contains:?}"
+        );
     }
 
     #[test]
@@ -524,7 +527,10 @@ mod tests {
     fn e03_void_return_function_extracted() {
         let src = "void my_init(void) { }\n";
         let ex = extract(src, "init.c");
-        assert!(has_node(&ex, "init_my_init"), "void-return function node missing");
+        assert!(
+            has_node(&ex, "init_my_init"),
+            "void-return function node missing"
+        );
     }
 
     // ── F. Named struct definition ───────────────────────────────────────────────────────────────
@@ -570,7 +576,10 @@ mod tests {
         let src = "struct Buffer { char data[256]; int len; };\n";
         let ex = extract(src, "buf.c");
         // b = "buf", struct = "buffer" → "buf_buffer"
-        assert!(has_node(&ex, "buf_buffer"), "qualified_id must be b_structname");
+        assert!(
+            has_node(&ex, "buf_buffer"),
+            "qualified_id must be b_structname"
+        );
     }
 
     // ── G. Struct skip cases ─────────────────────────────────────────────────────────────────────
@@ -595,7 +604,10 @@ mod tests {
         // The struct node IS emitted; the variable `my_foo` is NOT.
         let src = "struct Foo { int x; } my_foo;\n";
         let ex = extract(src, "var.c");
-        assert!(has_node(&ex, "var_foo"), "struct node must be emitted when body present");
+        assert!(
+            has_node(&ex, "var_foo"),
+            "struct node must be emitted when body present"
+        );
         assert!(
             !has_node(&ex, "var_my_foo"),
             "variable declaration must not produce a node"
@@ -660,7 +672,10 @@ mod tests {
         // `typedef struct { int x; int y; } Point;` — anonymous struct → only alias emitted.
         let src = "typedef struct { int x; int y; } Point;\n";
         let ex = extract(src, "pt.c");
-        assert!(has_node(&ex, "pt_point"), "typedef alias node must be emitted");
+        assert!(
+            has_node(&ex, "pt_point"),
+            "typedef alias node must be emitted"
+        );
         // No additional struct nodes for an anonymous struct.
         let extra: Vec<_> = ex
             .nodes
@@ -682,14 +697,21 @@ mod tests {
         let src = "typedef struct Foo { int x; } FooT;\n";
         let ex = extract(src, "foo.c");
         assert!(has_node(&ex, "foo_foo"), "struct node must be emitted");
-        assert!(has_node(&ex, "foo_foot"), "typedef alias node must be emitted");
+        assert!(
+            has_node(&ex, "foo_foot"),
+            "typedef alias node must be emitted"
+        );
     }
 
     #[test]
     fn i02_typedef_named_struct_emits_two_contains_edges() {
         let src = "typedef struct Vec { float x; float y; } Vec2;\n";
         let ex = extract(src, "v.c");
-        let contains: Vec<_> = ex.edges.iter().filter(|e| e.relation == "contains").collect();
+        let contains: Vec<_> = ex
+            .edges
+            .iter()
+            .filter(|e| e.relation == "contains")
+            .collect();
         assert_eq!(
             contains.len(),
             2,
@@ -753,9 +775,18 @@ mod tests {
             "#include \"config.h\"\n",
         );
         let ex = extract(src, "prog.c");
-        assert!(has_edge(&ex, "prog", "stdio.h", "imports_from"), "stdio.h missing");
-        assert!(has_edge(&ex, "prog", "stdlib.h", "imports_from"), "stdlib.h missing");
-        assert!(has_edge(&ex, "prog", "config.h", "imports_from"), "config.h missing");
+        assert!(
+            has_edge(&ex, "prog", "stdio.h", "imports_from"),
+            "stdio.h missing"
+        );
+        assert!(
+            has_edge(&ex, "prog", "stdlib.h", "imports_from"),
+            "stdlib.h missing"
+        );
+        assert!(
+            has_edge(&ex, "prog", "config.h", "imports_from"),
+            "config.h missing"
+        );
         let import_edges: Vec<_> = ex
             .edges
             .iter()
@@ -884,7 +915,10 @@ mod tests {
         let src = "int add(int a, int b) {\n    return a + b;\n}\n";
         let ex = extract(src, "span.c");
         let n = node(&ex, "span_add");
-        assert!(n.span.is_well_formed(), "function span must be well-formed: {n:?}");
+        assert!(
+            n.span.is_well_formed(),
+            "function span must be well-formed: {n:?}"
+        );
     }
 
     #[test]
@@ -900,7 +934,10 @@ mod tests {
         let src = "void dummy(void) {}\n";
         let ex = extract(src, "x.c");
         let file_node = node(&ex, "x");
-        assert_eq!(file_node.span.start_byte, 0, "file node span must start at byte 0");
+        assert_eq!(
+            file_node.span.start_byte, 0,
+            "file node span must start at byte 0"
+        );
     }
 
     #[test]
@@ -908,7 +945,10 @@ mod tests {
         let src = "void dummy(void) {}\n";
         let ex = extract(src, "x.c");
         let file_node = node(&ex, "x");
-        assert_eq!(file_node.span.start_line, 1, "file node must start at line 1");
+        assert_eq!(
+            file_node.span.start_line, 1,
+            "file node must start at line 1"
+        );
     }
 
     #[test]
@@ -929,7 +969,10 @@ mod tests {
         // tree-sitter is error-tolerant and produces a partial tree even for broken C.
         let src = "int ??? broken {{ syntax\n";
         let result = CExtractor.extract(Path::new("bad.c"), src.as_bytes());
-        assert!(result.is_ok(), "malformed C must not return Err: {result:?}");
+        assert!(
+            result.is_ok(),
+            "malformed C must not return Err: {result:?}"
+        );
     }
 
     #[test]
@@ -952,7 +995,10 @@ mod tests {
     fn o04_unicode_in_comment_does_not_affect_extraction() {
         let src = "/* copyright © 2024 */\nvoid work(void) {}\n";
         let ex = extract(src, "uc.c");
-        assert!(has_node(&ex, "uc_work"), "function after unicode comment must be extracted");
+        assert!(
+            has_node(&ex, "uc_work"),
+            "function after unicode comment must be extracted"
+        );
     }
 
     // ── P. Extractor metadata ────────────────────────────────────────────────────────────────────
@@ -979,7 +1025,11 @@ mod tests {
             "typedef int MyAlias;\n",
         );
         let ex = extract(src, "q1.c");
-        let contains: Vec<_> = ex.edges.iter().filter(|e| e.relation == "contains").collect();
+        let contains: Vec<_> = ex
+            .edges
+            .iter()
+            .filter(|e| e.relation == "contains")
+            .collect();
         for edge in &contains {
             assert_eq!(
                 edge.source, "q1",
@@ -1007,19 +1057,22 @@ mod tests {
         // Note: includes inside #ifndef/#endif guards are nested in `preproc_ifdef` and NOT
         // extracted (only top-level includes are processed, matching graphify's behaviour).
         let src = concat!(
-            "#include <stddef.h>\n",   // top-level include IS extracted
+            "#include <stddef.h>\n", // top-level include IS extracted
             "typedef struct Connection {\n",
             "    int fd;\n",
             "    int flags;\n",
             "} Connection;\n",
-            "void connection_init(void);\n",  // declaration — no body, not extracted
+            "void connection_init(void);\n", // declaration — no body, not extracted
             "void connection_close(void);\n", // declaration — no body, not extracted
         );
         let ex = extract(src, "mylib.h");
         // File node
         assert!(has_node(&ex, "mylib"), "file node missing");
         // Top-level include
-        assert!(has_edge(&ex, "mylib", "stddef.h", "imports_from"), "stddef.h import missing");
+        assert!(
+            has_edge(&ex, "mylib", "stddef.h", "imports_from"),
+            "stddef.h import missing"
+        );
         // Typedef + embedded named struct
         assert!(
             has_node(&ex, "mylib_connection"),
@@ -1045,8 +1098,14 @@ mod tests {
         );
         let ex = extract(src, "app.c");
         assert!(has_node(&ex, "app"), "file node missing");
-        assert!(has_edge(&ex, "app", "stdio.h", "imports_from"), "stdio.h missing");
-        assert!(has_edge(&ex, "app", "stdlib.h", "imports_from"), "stdlib.h missing");
+        assert!(
+            has_edge(&ex, "app", "stdio.h", "imports_from"),
+            "stdio.h missing"
+        );
+        assert!(
+            has_edge(&ex, "app", "stdlib.h", "imports_from"),
+            "stdlib.h missing"
+        );
         assert!(has_node(&ex, "app_config"), "Config struct missing");
         assert!(has_node(&ex, "app_status"), "Status typedef missing");
         assert!(has_node(&ex, "app_load_config"), "load_config fn missing");
@@ -1084,7 +1143,10 @@ mod tests {
         );
         let ex = extract(src, "shapes.c");
         assert!(has_node(&ex, "shapes"), "file node missing");
-        assert!(has_edge(&ex, "shapes", "string.h", "imports_from"), "include missing");
+        assert!(
+            has_edge(&ex, "shapes", "string.h", "imports_from"),
+            "include missing"
+        );
         // Named struct from typedef
         assert!(has_node(&ex, "shapes_rect"), "struct/typedef node missing");
         assert!(has_node(&ex, "shapes_area_fn"), "function node missing");
@@ -1126,8 +1188,14 @@ mod tests {
         assert!(has_node(&ex, "srv_servercfg"), "struct node missing");
         assert!(has_node(&ex, "srv_server_start"), "function node missing");
         // Both have contains edges.
-        assert!(has_edge(&ex, "srv", "srv_servercfg", "contains"), "struct edge missing");
-        assert!(has_edge(&ex, "srv", "srv_server_start", "contains"), "fn edge missing");
+        assert!(
+            has_edge(&ex, "srv", "srv_servercfg", "contains"),
+            "struct edge missing"
+        );
+        assert!(
+            has_edge(&ex, "srv", "srv_server_start", "contains"),
+            "fn edge missing"
+        );
     }
 
     #[test]
@@ -1155,7 +1223,10 @@ mod tests {
         let src = "struct BigS { int a; int b; int c; };\n";
         let ex = extract(src, "big.c");
         let n = node(&ex, "big_bigs");
-        assert!(n.span.is_well_formed(), "struct span must be well-formed: {n:?}");
+        assert!(
+            n.span.is_well_formed(),
+            "struct span must be well-formed: {n:?}"
+        );
         assert!(!n.span.is_empty(), "struct span must not be empty: {n:?}");
     }
 }

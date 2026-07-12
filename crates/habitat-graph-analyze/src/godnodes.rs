@@ -261,7 +261,10 @@ mod tests {
         g.nodes.push(node(20));
         g.edges.push(edge(10, 20));
         let result = god_nodes(&g, 2);
-        let n20 = result.iter().find(|x| x.id == nid(20)).expect("node 20 missing");
+        let n20 = result
+            .iter()
+            .find(|x| x.id == nid(20))
+            .expect("node 20 missing");
         assert_eq!(n20.degree, 1);
     }
 
@@ -273,7 +276,10 @@ mod tests {
         g.nodes.push(node(20));
         g.edges.push(edge(10, 20));
         let result = god_nodes(&g, 2);
-        let n10 = result.iter().find(|x| x.id == nid(10)).expect("node 10 missing");
+        let n10 = result
+            .iter()
+            .find(|x| x.id == nid(10))
+            .expect("node 10 missing");
         assert_eq!(n10.degree, 1);
     }
 
@@ -352,7 +358,10 @@ mod tests {
         g.edges.push(edge(1, 2));
         g.nodes.push(node(99)); // isolated
         let result = god_nodes(&g, 3);
-        let n99 = result.iter().find(|x| x.id == nid(99)).expect("isolated node missing");
+        let n99 = result
+            .iter()
+            .find(|x| x.id == nid(99))
+            .expect("isolated node missing");
         assert_eq!(n99.degree, 0);
     }
 
@@ -602,7 +611,10 @@ mod tests {
         g.edges.push(edge(1, 2));
         g.edges.push(edge(1, 3));
         let result = god_nodes(&g, 3);
-        let n2 = result.iter().find(|x| x.id == nid(2)).expect("node 2 missing");
+        let n2 = result
+            .iter()
+            .find(|x| x.id == nid(2))
+            .expect("node 2 missing");
         assert_eq!(n2.label, "spoke_fn");
     }
 
@@ -614,7 +626,10 @@ mod tests {
         // Node 99 is not declared in graph.nodes.
         g.edges.push(edge(1, 99));
         let result = god_nodes(&g, 2);
-        let ghost = result.iter().find(|x| x.id == nid(99)).expect("ghost node missing");
+        let ghost = result
+            .iter()
+            .find(|x| x.id == nid(99))
+            .expect("ghost node missing");
         assert_eq!(ghost.label, "");
     }
 
@@ -675,11 +690,20 @@ mod tests {
         g.edges.push(edge(1, 2));
         g.edges.push(edge(1, 3));
         let result = god_nodes(&g, 3);
-        let n1 = result.iter().find(|x| x.id == nid(1)).expect("node 1 missing");
+        let n1 = result
+            .iter()
+            .find(|x| x.id == nid(1))
+            .expect("node 1 missing");
         assert_eq!(n1.label, "a");
-        let n2 = result.iter().find(|x| x.id == nid(2)).expect("node 2 missing");
+        let n2 = result
+            .iter()
+            .find(|x| x.id == nid(2))
+            .expect("node 2 missing");
         assert_eq!(n2.label, "b");
-        let n3 = result.iter().find(|x| x.id == nid(3)).expect("node 3 missing");
+        let n3 = result
+            .iter()
+            .find(|x| x.id == nid(3))
+            .expect("node 3 missing");
         assert_eq!(n3.label, "c");
     }
 
@@ -703,7 +727,7 @@ mod tests {
     fn self_loop_node_ranks_above_isolated() {
         let mut g = Graph::new();
         g.nodes.push(node(10)); // isolated
-        g.nodes.push(node(1));  // self-loop
+        g.nodes.push(node(1)); // self-loop
         g.edges.push(edge(1, 1));
         let result = god_nodes(&g, 2);
         assert_eq!(result[0].id, nid(1));
@@ -896,24 +920,48 @@ mod tests {
     /// Differing `id` makes `GodNode`s unequal.
     #[test]
     fn godnode_ne_different_id() {
-        let a = GodNode { id: nid(1), label: "x".into(), degree: 1 };
-        let b = GodNode { id: nid(2), label: "x".into(), degree: 1 };
+        let a = GodNode {
+            id: nid(1),
+            label: "x".into(),
+            degree: 1,
+        };
+        let b = GodNode {
+            id: nid(2),
+            label: "x".into(),
+            degree: 1,
+        };
         assert_ne!(a, b);
     }
 
     /// Differing `label` makes `GodNode`s unequal.
     #[test]
     fn godnode_ne_different_label() {
-        let a = GodNode { id: nid(1), label: "alpha".into(), degree: 1 };
-        let b = GodNode { id: nid(1), label: "beta".into(), degree: 1 };
+        let a = GodNode {
+            id: nid(1),
+            label: "alpha".into(),
+            degree: 1,
+        };
+        let b = GodNode {
+            id: nid(1),
+            label: "beta".into(),
+            degree: 1,
+        };
         assert_ne!(a, b);
     }
 
     /// Differing `degree` makes `GodNode`s unequal.
     #[test]
     fn godnode_ne_different_degree() {
-        let a = GodNode { id: nid(1), label: "x".into(), degree: 2 };
-        let b = GodNode { id: nid(1), label: "x".into(), degree: 5 };
+        let a = GodNode {
+            id: nid(1),
+            label: "x".into(),
+            degree: 2,
+        };
+        let b = GodNode {
+            id: nid(1),
+            label: "x".into(),
+            degree: 5,
+        };
         assert_ne!(a, b);
     }
 

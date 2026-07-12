@@ -60,7 +60,10 @@ pub fn handle_jsonrpc(graph: &Graph, request: &str) -> String {
         Some(id) => id.clone(),
         None => return String::new(), // notification — no response
     };
-    let method = value.get("method").and_then(Value::as_str).unwrap_or_default();
+    let method = value
+        .get("method")
+        .and_then(Value::as_str)
+        .unwrap_or_default();
     match method {
         "initialize" => initialize_response(graph, &id),
         "tools/list" => tools_list_response(&id),
@@ -170,14 +173,24 @@ fn tools_call(graph: &Graph, id: &Value, params: Option<&Value>) -> String {
     let Some(params) = params else {
         return error_response(id, INVALID_PARAMS, "invalid params: missing params object");
     };
-    let name = params.get("name").and_then(Value::as_str).unwrap_or_default();
-    let args = params.get("arguments").cloned().unwrap_or_else(|| json!({}));
+    let name = params
+        .get("name")
+        .and_then(Value::as_str)
+        .unwrap_or_default();
+    let args = params
+        .get("arguments")
+        .cloned()
+        .unwrap_or_else(|| json!({}));
     match name {
         "graph_query" => tool_query(graph, id, &args),
         "graph_path" => tool_path(graph, id, &args),
         "graph_health" => tool_health(graph, id),
         "graph_explain" => tool_explain(graph, id, &args),
-        other => error_response(id, INVALID_PARAMS, &format!("invalid params: unknown tool {other}")),
+        other => error_response(
+            id,
+            INVALID_PARAMS,
+            &format!("invalid params: unknown tool {other}"),
+        ),
     }
 }
 
@@ -221,7 +234,11 @@ fn tool_query(graph: &Graph, id: &Value, args: &Value) -> String {
     let text = if let Some(max_tokens) = args.get("max_tokens").and_then(Value::as_u64) {
         let budget = usize::try_from(max_tokens).unwrap_or(usize::MAX);
         let seed = lines.first().map(String::as_str);
-        let rest = if lines.is_empty() { &[][..] } else { &lines[1..] };
+        let rest = if lines.is_empty() {
+            &[][..]
+        } else {
+            &lines[1..]
+        };
         crate::budget::pack(&header, seed, rest, budget)
     } else {
         let mut out = header;
@@ -290,7 +307,10 @@ fn tool_health(graph: &Graph, id: &Value) -> String {
     let (nodes, edges, communities) = graph.counts();
     tool_text_result(
         id,
-        &format!("nodes={nodes} edges={edges} communities={communities} schema={}", graph.schema),
+        &format!(
+            "nodes={nodes} edges={edges} communities={communities} schema={}",
+            graph.schema
+        ),
     )
 }
 
@@ -438,10 +458,21 @@ mod tests {
         let req = json!({ "jsonrpc": "2.0", "id": 1, "method": "tools/list" });
         let resp = call(&sample_graph(), &req.to_string());
         let tools = resp["result"]["tools"].as_array().expect("arr");
-        let q = tools.iter().find(|t| t["name"] == "graph_query").expect("query");
+        let q = tools
+            .iter()
+            .find(|t| t["name"] == "graph_query")
+            .expect("query");
         assert_eq!(q["inputSchema"]["required"][0], "query");
-        let p = tools.iter().find(|t| t["name"] == "graph_path").expect("path");
-        let req_args: Vec<&str> = p["inputSchema"]["required"].as_array().expect("arr").iter().filter_map(Value::as_str).collect();
+        let p = tools
+            .iter()
+            .find(|t| t["name"] == "graph_path")
+            .expect("path");
+        let req_args: Vec<&str> = p["inputSchema"]["required"]
+            .as_array()
+            .expect("arr")
+            .iter()
+            .filter_map(Value::as_str)
+            .collect();
         assert!(req_args.contains(&"from") && req_args.contains(&"to"));
     }
 
@@ -467,7 +498,12 @@ mod tests {
 
     #[test]
     fn graph_query_finds_a_node() {
-        let resp = tool_call(&sample_graph(), 1, "graph_query", json!({ "query": "Alph" }));
+        let resp = tool_call(
+            &sample_graph(),
+            1,
+            "graph_query",
+            json!({ "query": "Alph" }),
+        );
         let text = text_of(&resp);
         assert!(text.contains("Alpha"), "{text}");
         assert!(text.contains("1 node(s) match"));
@@ -476,7 +512,12 @@ mod tests {
 
     #[test]
     fn graph_query_is_case_insensitive() {
-        let resp = tool_call(&sample_graph(), 1, "graph_query", json!({ "query": "beta" }));
+        let resp = tool_call(
+            &sample_graph(),
+            1,
+            "graph_query",
+            json!({ "query": "beta" }),
+        );
         assert!(text_of(&resp).contains("Beta"));
     }
 
@@ -523,7 +564,12 @@ mod tests {
 
     #[test]
     fn graph_path_reports_a_path() {
-        let resp = tool_call(&sample_graph(), 1, "graph_path", json!({ "from": "Alpha", "to": "Gamma" }));
+        let resp = tool_call(
+            &sample_graph(),
+            1,
+            "graph_path",
+            json!({ "from": "Alpha", "to": "Gamma" }),
+        );
         let text = text_of(&resp);
         assert!(text.contains("Alpha -> Beta -> Gamma"), "{text}");
         assert!(text.contains("2 hop(s)"));
@@ -531,7 +577,12 @@ mod tests {
 
     #[test]
     fn graph_path_same_node_is_zero_hops() {
-        let resp = tool_call(&sample_graph(), 1, "graph_path", json!({ "from": "Beta", "to": "Beta" }));
+        let resp = tool_call(
+            &sample_graph(),
+            1,
+            "graph_path",
+            json!({ "from": "Beta", "to": "Beta" }),
+        );
         assert!(text_of(&resp).contains("0 hop(s)"));
     }
 
@@ -539,7 +590,12 @@ mod tests {
     fn graph_path_no_path_reports_so() {
         let mut g = sample_graph();
         g.nodes.push(node(9, "Island"));
-        let resp = tool_call(&g, 1, "graph_path", json!({ "from": "Alpha", "to": "Island" }));
+        let resp = tool_call(
+            &g,
+            1,
+            "graph_path",
+            json!({ "from": "Alpha", "to": "Island" }),
+        );
         assert!(text_of(&resp).contains("no path"));
     }
 
@@ -571,9 +627,15 @@ mod tests {
 
     #[test]
     fn success_and_error_are_mutually_exclusive() {
-        let ok = call(&sample_graph(), r#"{"jsonrpc":"2.0","id":1,"method":"tools/list"}"#);
+        let ok = call(
+            &sample_graph(),
+            r#"{"jsonrpc":"2.0","id":1,"method":"tools/list"}"#,
+        );
         assert!(ok.get("result").is_some() && ok.get("error").is_none());
-        let err = call(&sample_graph(), r#"{"jsonrpc":"2.0","id":1,"method":"nope"}"#);
+        let err = call(
+            &sample_graph(),
+            r#"{"jsonrpc":"2.0","id":1,"method":"nope"}"#,
+        );
         assert!(err.get("error").is_some() && err.get("result").is_none());
     }
 
@@ -614,8 +676,14 @@ mod tests {
     fn resources_list_advertises_report_and_schema() {
         let req = json!({ "jsonrpc": "2.0", "id": 1, "method": "resources/list" });
         let s = call(&sample_graph(), &req.to_string()).to_string();
-        assert!(s.contains("habitat-graph://report"), "report resource missing: {s}");
-        assert!(s.contains("habitat-graph://schema"), "schema resource missing: {s}");
+        assert!(
+            s.contains("habitat-graph://report"),
+            "report resource missing: {s}"
+        );
+        assert!(
+            s.contains("habitat-graph://schema"),
+            "schema resource missing: {s}"
+        );
     }
 
     #[test]
@@ -646,10 +714,18 @@ mod tests {
         for i in 1..=30_u32 {
             g.nodes.push(node(i, &format!("match_node_{i}")));
         }
-        let resp = tool_call(&g, 1, "graph_query", json!({ "query": "match_node", "max_tokens": 5 }));
+        let resp = tool_call(
+            &g,
+            1,
+            "graph_query",
+            json!({ "query": "match_node", "max_tokens": 5 }),
+        );
         let s = resp.to_string();
         assert!(s.contains("match"), "seed/header must be present: {s}");
-        assert!(s.contains("omitted"), "a tiny budget must omit candidates: {s}");
+        assert!(
+            s.contains("omitted"),
+            "a tiny budget must omit candidates: {s}"
+        );
     }
 
     #[test]
@@ -658,14 +734,25 @@ mod tests {
         let huge = "x".repeat(super::MAX_QUERY_LEN + 1);
         let resp = tool_call(&sample_graph(), 1, "graph_query", json!({ "query": huge }));
         // tool-level invalid-args surfaces as a JSON-RPC error.
-        assert!(resp.get("error").is_some(), "over-length query must be rejected: {resp}");
+        assert!(
+            resp.get("error").is_some(),
+            "over-length query must be rejected: {resp}"
+        );
     }
 
     #[test]
     fn graph_explain_summarises_a_concept() {
-        let resp = tool_call(&sample_graph(), 1, "graph_explain", json!({ "concept": "Alpha" }));
+        let resp = tool_call(
+            &sample_graph(),
+            1,
+            "graph_explain",
+            json!({ "concept": "Alpha" }),
+        );
         let s = resp.to_string();
-        assert!(s.contains("Alpha"), "explain must mention the matched concept: {s}");
+        assert!(
+            s.contains("Alpha"),
+            "explain must mention the matched concept: {s}"
+        );
     }
 
     #[test]

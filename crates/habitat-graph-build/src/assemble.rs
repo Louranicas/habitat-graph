@@ -226,14 +226,15 @@ mod tests {
         // FO-4: each node's id is content_id(label), independent of first-seen order, so adding a
         // symbol never renumbers the others. All three labels are present with their content ids.
         for n in &g.nodes {
-            assert_eq!(n.id.get(), content_id(&n.label), "id must be content_id(label)");
+            assert_eq!(
+                n.id.get(),
+                content_id(&n.label),
+                "id must be content_id(label)"
+            );
         }
         let labels: std::collections::BTreeSet<&str> =
             g.nodes.iter().map(|n| n.label.as_str()).collect();
-        assert_eq!(
-            labels,
-            ["First", "Second", "Third"].into_iter().collect()
-        );
+        assert_eq!(labels, ["First", "Second", "Third"].into_iter().collect());
     }
 
     // ── 8. edge with unknown target is dropped ────────────────────────────────

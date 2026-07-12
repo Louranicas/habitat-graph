@@ -542,10 +542,17 @@ mod tests {
         // FO-4: ids are reassigned to content_id(label) — NOT the arbitrary input ids — so a merge
         // produces the same ids as a full assemble of the same labels.
         for n in &result.nodes {
-            assert_eq!(n.id.get(), content_id(&n.label), "id must be content_id(label)");
+            assert_eq!(
+                n.id.get(),
+                content_id(&n.label),
+                "id must be content_id(label)"
+            );
         }
         assert!(
-            result.nodes.iter().all(|n| n.id.get() != 1_000 && n.id.get() != 2_000),
+            result
+                .nodes
+                .iter()
+                .all(|n| n.id.get() != 1_000 && n.id.get() != 2_000),
             "original input ids must not be retained"
         );
         assert_eq!(result.counts().1, 1, "edge must survive remapping");

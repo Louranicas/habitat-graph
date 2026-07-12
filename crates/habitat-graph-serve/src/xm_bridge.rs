@@ -195,8 +195,7 @@ mod tests {
 
     #[test]
     fn single_tool_parameters_match_input_schema() {
-        let schema =
-            json!({ "type": "object", "properties": { "q": { "type": "string" } } });
+        let schema = json!({ "type": "object", "properties": { "q": { "type": "string" } } });
         let tools = vec![json!({ "name": "t", "inputSchema": schema.clone() })];
         let fns = mcp_tools_to_openai_functions(&tools);
         assert_eq!(fns[0]["function"]["parameters"], schema);
@@ -574,8 +573,7 @@ mod tests {
 
     #[test]
     fn function_call_unicode_in_object_args_preserved() {
-        let mcp =
-            openai_function_call_to_mcp("t", &json!({ "label": "αβγ", "emoji": "🦀" }));
+        let mcp = openai_function_call_to_mcp("t", &json!({ "label": "αβγ", "emoji": "🦀" }));
         assert_eq!(mcp["arguments"]["label"], "αβγ");
         assert_eq!(mcp["arguments"]["emoji"], "🦀");
     }
@@ -698,9 +696,7 @@ mod tests {
         };
         let json = cap.to_json();
         assert_eq!(
-            json["supported_translations"]
-                .as_array()
-                .map(Vec::len),
+            json["supported_translations"].as_array().map(Vec::len),
             Some(3)
         );
     }
@@ -714,9 +710,7 @@ mod tests {
             supported_translations: vec!["alpha", "beta"],
         };
         let json = cap.to_json();
-        let arr = json["supported_translations"]
-            .as_array()
-            .expect("array");
+        let arr = json["supported_translations"].as_array().expect("array");
         assert_eq!(arr[0], "alpha");
         assert_eq!(arr[1], "beta");
     }
@@ -741,9 +735,7 @@ mod tests {
             supported_translations: vec![],
         };
         let json = cap.to_json();
-        let arr = json["supported_translations"]
-            .as_array()
-            .expect("array");
+        let arr = json["supported_translations"].as_array().expect("array");
         assert!(arr.is_empty());
     }
 
@@ -810,11 +802,7 @@ mod tests {
         // Comprehensive check across multiple fallback-path variants.
         for args in [json!(null), json!(true), json!(false), json!(0), json!([])] {
             let mcp = openai_function_call_to_mcp("t", &args);
-            assert_eq!(
-                mcp["arguments"],
-                json!({}),
-                "expected {{}} for args={args}"
-            );
+            assert_eq!(mcp["arguments"], json!({}), "expected {{}} for args={args}");
         }
     }
 }

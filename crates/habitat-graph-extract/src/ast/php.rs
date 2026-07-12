@@ -323,7 +323,15 @@ fn extract_interface(
     }
 
     if let Some(body) = node.child_by_field_name("body") {
-        extract_body_methods(&body, source, b, &iface_lower, &iface_label, source_file, result);
+        extract_body_methods(
+            &body,
+            source,
+            b,
+            &iface_lower,
+            &iface_label,
+            source_file,
+            result,
+        );
     }
 }
 
@@ -359,7 +367,15 @@ fn extract_trait(
     });
 
     if let Some(body) = node.child_by_field_name("body") {
-        extract_body_methods(&body, source, b, &trait_lower, &trait_label, source_file, result);
+        extract_body_methods(
+            &body,
+            source,
+            b,
+            &trait_lower,
+            &trait_label,
+            source_file,
+            result,
+        );
     }
 }
 
@@ -405,7 +421,15 @@ fn extract_enum(
     }
 
     if let Some(body) = node.child_by_field_name("body") {
-        extract_body_methods(&body, source, b, &enum_lower, &enum_label, source_file, result);
+        extract_body_methods(
+            &body,
+            source,
+            b,
+            &enum_lower,
+            &enum_label,
+            source_file,
+            result,
+        );
     }
 }
 
@@ -446,12 +470,7 @@ fn use_clause_path(clause: &tree_sitter::Node<'_>, source: &[u8]) -> Option<Stri
 ///    namespace and emits one `imports_from` edge.
 ///
 /// The `type` qualifier (`const` / `function`) does not affect extraction.
-fn extract_use_decl(
-    node: &tree_sitter::Node<'_>,
-    source: &[u8],
-    b: &str,
-    result: &mut Extraction,
-) {
+fn extract_use_decl(node: &tree_sitter::Node<'_>, source: &[u8], b: &str, result: &mut Extraction) {
     // Collect the namespace prefix (present in grouped imports) and emit simple-clause edges.
     let mut prefix: Option<String> = None;
 
@@ -576,24 +595,10 @@ impl Extractor for PhpExtractor {
                     extract_function(&child, source, &b, &source_file, &mut result);
                 }
                 "class_declaration" => {
-                    extract_class(
-                        &child,
-                        source,
-                        &b,
-                        &source_file,
-                        &local_types,
-                        &mut result,
-                    );
+                    extract_class(&child, source, &b, &source_file, &local_types, &mut result);
                 }
                 "interface_declaration" => {
-                    extract_interface(
-                        &child,
-                        source,
-                        &b,
-                        &source_file,
-                        &local_types,
-                        &mut result,
-                    );
+                    extract_interface(&child, source, &b, &source_file, &local_types, &mut result);
                 }
                 "trait_declaration" => {
                     extract_trait(&child, source, &b, &source_file, &mut result);
@@ -680,7 +685,10 @@ mod tests {
     fn malformed_source_returns_ok_tree_sitter_error_tolerant() {
         // tree-sitter is error-tolerant: garbled input always produces a (partial) tree.
         let ex = extract("!!!NOT VALID PHP @@@", "broken.php");
-        assert!(has_node(&ex, "broken"), "file node must be present for garbled source");
+        assert!(
+            has_node(&ex, "broken"),
+            "file node must be present for garbled source"
+        );
     }
 
     // ── B. File stem handling ──────────────────────────────────────────────────────────────────
@@ -981,16 +989,29 @@ class UserCtrl extends Controller {}";
         assert!(has_edge(&ex, "baz", "m_foo", "inherits"));
         assert!(has_edge(&ex, "qux", "m_foo", "inherits"));
         let inherits = ex.edges.iter().filter(|e| e.relation == "inherits").count();
-        assert_eq!(inherits, 3, "expected 3 inherits edges from multiple implements");
+        assert_eq!(
+            inherits, 3,
+            "expected 3 inherits edges from multiple implements"
+        );
     }
 
     #[test]
     fn both_extends_and_implements_emit_both_inherits_edges() {
         let src = "<?php\nclass Dog extends Animal implements Runnable {}";
         let ex = extract(src, "m.php");
-        assert!(has_edge(&ex, "animal", "m_dog", "inherits"), "extends edge missing");
-        assert!(has_edge(&ex, "runnable", "m_dog", "inherits"), "implements edge missing");
-        let inherits: Vec<_> = ex.edges.iter().filter(|e| e.relation == "inherits").collect();
+        assert!(
+            has_edge(&ex, "animal", "m_dog", "inherits"),
+            "extends edge missing"
+        );
+        assert!(
+            has_edge(&ex, "runnable", "m_dog", "inherits"),
+            "implements edge missing"
+        );
+        let inherits: Vec<_> = ex
+            .edges
+            .iter()
+            .filter(|e| e.relation == "inherits")
+            .collect();
         assert_eq!(inherits.len(), 2, "expected exactly 2 inherits edges");
     }
 
@@ -1011,7 +1032,10 @@ class UserCtrl extends Controller {}";
     fn interface_name_is_lowercased_in_label() {
         let src = "<?php\ninterface HTTPClient {}";
         let ex = extract(src, "iface.php");
-        assert!(has_node(&ex, "iface_httpclient"), "interface label must be lowercased");
+        assert!(
+            has_node(&ex, "iface_httpclient"),
+            "interface label must be lowercased"
+        );
     }
 
     #[test]
@@ -1053,7 +1077,10 @@ class UserCtrl extends Controller {}";
     fn trait_name_is_lowercased_in_label() {
         let src = "<?php\ntrait HTTPCacheable {}";
         let ex = extract(src, "t.php");
-        assert!(has_node(&ex, "t_httpcacheable"), "trait label must be lowercased");
+        assert!(
+            has_node(&ex, "t_httpcacheable"),
+            "trait label must be lowercased"
+        );
     }
 
     #[test]
@@ -1062,7 +1089,12 @@ class UserCtrl extends Controller {}";
         let ex = extract(src, "tr.php");
         assert!(has_node(&ex, "tr_serializable_serialize"));
         assert!(has_node(&ex, "tr_serializable_unserialize"));
-        assert!(has_edge(&ex, "tr_serializable", "tr_serializable_serialize", "method"));
+        assert!(has_edge(
+            &ex,
+            "tr_serializable",
+            "tr_serializable_serialize",
+            "method"
+        ));
     }
 
     // ── K. Enum declarations ───────────────────────────────────────────────────────────────────
@@ -1082,7 +1114,10 @@ class UserCtrl extends Controller {}";
     fn enum_name_is_lowercased_in_label() {
         let src = "<?php\nenum HTTPMethod: string { case GET = 'GET'; case POST = 'POST'; }";
         let ex = extract(src, "http.php");
-        assert!(has_node(&ex, "http_httpmethod"), "enum label must be lowercased");
+        assert!(
+            has_node(&ex, "http_httpmethod"),
+            "enum label must be lowercased"
+        );
     }
 
     #[test]
@@ -1115,7 +1150,12 @@ class UserCtrl extends Controller {}";
 use App\Http\Controllers\Controller;";
         let ex = extract(src, "mod.php");
         assert!(
-            has_edge(&ex, "mod", "app\\http\\controllers\\controller", "imports_from"),
+            has_edge(
+                &ex,
+                "mod",
+                "app\\http\\controllers\\controller",
+                "imports_from"
+            ),
             "qualified use must emit backslash-separated path; edges: {:?}",
             ex.edges
         );
@@ -1240,7 +1280,10 @@ class A extends B implements C {
         let src = "<?php\nclass Foo { public function bar() {} }";
         let ex = extract(src, "x.php");
         let n = node(&ex, "x_foo");
-        assert!(n.span.is_well_formed(), "class span must be well-formed: {n:?}");
+        assert!(
+            n.span.is_well_formed(),
+            "class span must be well-formed: {n:?}"
+        );
         assert!(!n.span.is_empty(), "class span must not be empty: {n:?}");
     }
 
@@ -1249,7 +1292,10 @@ class A extends B implements C {
         let src = "<?php\n\nclass Foo {\n    public function bar() {}\n}";
         let ex = extract(src, "x.php");
         let n = node(&ex, "x_foo_bar");
-        assert!(n.span.is_well_formed(), "method span must be well-formed: {n:?}");
+        assert!(
+            n.span.is_well_formed(),
+            "method span must be well-formed: {n:?}"
+        );
         // Method is on line 4 (1-indexed, 1 for <?php, 1 blank, 1 class, 1 method)
         assert!(
             n.span.start_line >= 3,
@@ -1356,21 +1402,41 @@ class GreeterService implements Greetable {
 
         // Trait
         assert!(has_node(&ex, "service_timestampable"));
-        assert!(has_edge(&ex, "service", "service_timestampable", "contains"));
+        assert!(has_edge(
+            &ex,
+            "service",
+            "service_timestampable",
+            "contains"
+        ));
         assert!(has_node(&ex, "service_timestampable_getcreatedat"));
 
         // Class
         assert!(has_node(&ex, "service_greeterservice"));
-        assert!(has_edge(&ex, "service", "service_greeterservice", "contains"));
+        assert!(has_edge(
+            &ex,
+            "service",
+            "service_greeterservice",
+            "contains"
+        ));
         // implements Greetable (local)
-        assert!(has_edge(&ex, "service_greetable", "service_greeterservice", "inherits"));
+        assert!(has_edge(
+            &ex,
+            "service_greetable",
+            "service_greeterservice",
+            "inherits"
+        ));
         // Methods
         assert!(has_node(&ex, "service_greeterservice_greet"));
         // _internal → "internal" (stripped _)
         assert!(has_node(&ex, "service_greeterservice_internal"));
 
         // Import
-        assert!(has_edge(&ex, "service", "psr\\log\\loggerinterface", "imports_from"));
+        assert!(has_edge(
+            &ex,
+            "service",
+            "psr\\log\\loggerinterface",
+            "imports_from"
+        ));
 
         // No calls or uses edges
         assert_eq!(ex.edges.iter().filter(|e| e.relation == "calls").count(), 0);
@@ -1394,18 +1460,18 @@ class GreeterService implements Greetable {
         let src = "<?php\n$fn = function() {};";
         let ex = extract(src, "anon.php");
         // Only the file node; no function node for anonymous function.
-        assert_eq!(ex.nodes.len(), 1, "anonymous function must not emit a function node");
+        assert_eq!(
+            ex.nodes.len(),
+            1,
+            "anonymous function must not emit a function node"
+        );
     }
 
     #[test]
     fn class_node_count_matches_declared_classes() {
         let src = "<?php\nclass X {}\nclass Y {}\nclass Z {}";
         let ex = extract(src, "three.php");
-        let class_nodes: Vec<_> = ex
-            .nodes
-            .iter()
-            .filter(|n| n.label != "three")
-            .collect();
+        let class_nodes: Vec<_> = ex.nodes.iter().filter(|n| n.label != "three").collect();
         assert_eq!(class_nodes.len(), 3, "expected exactly 3 class nodes");
     }
 
@@ -1414,7 +1480,10 @@ class GreeterService implements Greetable {
         let src = "<?php\nfinal class Config { public function get() {} }";
         let ex = extract(src, "cfg.php");
         assert!(has_node(&ex, "cfg_config"), "final class must be extracted");
-        assert!(has_node(&ex, "cfg_config_get"), "final class method must be extracted");
+        assert!(
+            has_node(&ex, "cfg_config_get"),
+            "final class method must be extracted"
+        );
     }
 
     #[test]
@@ -1448,8 +1517,7 @@ class GreeterService implements Greetable {
     fn file_node_source_file_is_exact_path_string() {
         let ex = extract("<?php\n", "some/path/to/file.php");
         assert_eq!(
-            ex.nodes[0].source_file,
-            "some/path/to/file.php",
+            ex.nodes[0].source_file, "some/path/to/file.php",
             "file node source_file must be the exact path string passed in"
         );
     }

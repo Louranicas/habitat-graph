@@ -27,7 +27,11 @@ fn main() {
         eprintln!("detect error: {e}");
         std::process::exit(1);
     });
-    eprintln!("detected {} JS file(s) in {}", files.len(), raw_dir.display());
+    eprintln!(
+        "detected {} JS file(s) in {}",
+        files.len(),
+        raw_dir.display()
+    );
 
     // Extract.
     let extractions = habitat_graph_extract::extract_files(&files).unwrap_or_else(|e| {
@@ -37,9 +41,8 @@ fn main() {
 
     // Assemble.
     let mut graph = habitat_graph_build::assemble(extractions);
-    graph.communities = habitat_graph_analyze::detect_communities(
-        &habitat_graph_analyze::trusted_subgraph(&graph),
-    );
+    graph.communities =
+        habitat_graph_analyze::detect_communities(&habitat_graph_analyze::trusted_subgraph(&graph));
     let graph = graph.sorted();
 
     // Build label-to-community mapping.

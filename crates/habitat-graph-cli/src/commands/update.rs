@@ -185,8 +185,9 @@ fn run_inner(dir: &Path, out: &Path) -> Result<()> {
     // ── Merge + global community detection (honest: Leiden is NOT incremental) ───
     // F12: cluster on the TRUSTED subgraph only (INFERRED/AMBIGUOUS edges excluded).
     let mut combined = habitat_graph_build::merge(new_partial, pruned_prior);
-    combined.communities =
-        habitat_graph_analyze::detect_communities(&habitat_graph_analyze::trusted_subgraph(&combined));
+    combined.communities = habitat_graph_analyze::detect_communities(
+        &habitat_graph_analyze::trusted_subgraph(&combined),
+    );
     let combined = combined.sorted();
 
     // ── Write artifacts + refresh sidecar ────────────────────────────────────────
@@ -211,8 +212,8 @@ fn try_load_prior(sidecar_path: &Path) -> Result<Option<Graph>> {
         return Ok(None);
     }
 
-    let bytes = std::fs::read(sidecar_path)
-        .map_err(|e| GraphError::Io(format!("sidecar read: {e}")))?;
+    let bytes =
+        std::fs::read(sidecar_path).map_err(|e| GraphError::Io(format!("sidecar read: {e}")))?;
     let text = String::from_utf8_lossy(&bytes);
 
     let graph = match Graph::from_json(&text) {
@@ -469,7 +470,10 @@ mod tests {
         let out = TempDir::new().unwrap();
         mk_file(src.path(), "lib.rs", "fn a() {}");
         let _ = run(src.path(), out.path());
-        assert!(out.path().join(SIDECAR).exists(), "sidecar must be written on first build");
+        assert!(
+            out.path().join(SIDECAR).exists(),
+            "sidecar must be written on first build"
+        );
     }
 
     // T4: first build writes GRAPH_REPORT.md.
@@ -538,7 +542,11 @@ mod tests {
         let src = TempDir::new().unwrap();
         let out = TempDir::new().unwrap();
         let _ = run(src.path(), out.path()); // first build (empty)
-        assert_eq!(run(src.path(), out.path()), 0, "empty-dir no-op must exit 0");
+        assert_eq!(
+            run(src.path(), out.path()),
+            0,
+            "empty-dir no-op must exit 0"
+        );
     }
 
     // ─────────────────────────────────────────────────────────────────────────────
@@ -617,7 +625,10 @@ mod tests {
         let g2 = parse_sidecar(out.path());
         let hash2 = &g2.manifest.inputs[0].content_hash;
 
-        assert_ne!(hash1, *hash2, "content_hash must change when file content changes");
+        assert_ne!(
+            hash1, *hash2,
+            "content_hash must change when file content changes"
+        );
     }
 
     // T15: nodes from unchanged files are preserved after an incremental update.
@@ -682,7 +693,10 @@ mod tests {
         mk_file(src.path(), "b.rs", "fn brand_new() {}");
         let _ = run(src.path(), out.path());
         let json = read_graph_json(out.path());
-        assert!(json.contains("brand_new"), "added file's function must appear");
+        assert!(
+            json.contains("brand_new"),
+            "added file's function must appear"
+        );
     }
 
     // T19: the sidecar tracks the newly added file's path and hash.
@@ -712,7 +726,10 @@ mod tests {
         mk_file(src.path(), "deep/sub/new.rs", "fn nested_fn() {}");
         let _ = run(src.path(), out.path());
         let json = read_graph_json(out.path());
-        assert!(json.contains("nested_fn"), "deeply nested file must be found after add");
+        assert!(
+            json.contains("nested_fn"),
+            "deeply nested file must be found after add"
+        );
     }
 
     // T21: adding a file increases the node count in graph.json.
@@ -727,7 +744,10 @@ mod tests {
         mk_file(src.path(), "b.rs", "fn fn_b() {}");
         let _ = run(src.path(), out.path());
         let after = count_nodes(out.path());
-        assert!(after > before, "node count must increase after adding a file");
+        assert!(
+            after > before,
+            "node count must increase after adding a file"
+        );
     }
 
     // ─────────────────────────────────────────────────────────────────────────────
@@ -757,8 +777,14 @@ mod tests {
         rm_file(src.path(), "b.rs");
         let _ = run(src.path(), out.path());
         let json = read_graph_json(out.path());
-        assert!(!json.contains("gone"), "node from removed file must be absent");
-        assert!(json.contains("keep"), "node from remaining file must still be present");
+        assert!(
+            !json.contains("gone"),
+            "node from removed file must be absent"
+        );
+        assert!(
+            json.contains("keep"),
+            "node from remaining file must still be present"
+        );
     }
 
     // T24: edges whose source or target was in a removed file are also dropped.
@@ -830,13 +856,15 @@ mod tests {
 
         // Corrupt the sidecar's schema field to simulate a taxonomy version bump.
         let sidecar_str = read_sidecar(out.path());
-        let corrupted = sidecar_str.replace(
-            "habitat-graph.graph.v0",
-            "habitat-graph.graph.OLD_VERSION",
-        );
+        let corrupted =
+            sidecar_str.replace("habitat-graph.graph.v0", "habitat-graph.graph.OLD_VERSION");
         fs::write(out.path().join(SIDECAR), corrupted).unwrap();
 
-        assert_eq!(run(src.path(), out.path()), 0, "schema mismatch must still succeed");
+        assert_eq!(
+            run(src.path(), out.path()),
+            0,
+            "schema mismatch must still succeed"
+        );
     }
 
     // T28: after a schema-mismatch full rebuild the sidecar carries the correct schema.
@@ -848,10 +876,8 @@ mod tests {
         let _ = run(src.path(), out.path());
 
         let sidecar_str = read_sidecar(out.path());
-        let corrupted = sidecar_str.replace(
-            "habitat-graph.graph.v0",
-            "habitat-graph.graph.OLD_VERSION",
-        );
+        let corrupted =
+            sidecar_str.replace("habitat-graph.graph.v0", "habitat-graph.graph.OLD_VERSION");
         fs::write(out.path().join(SIDECAR), corrupted).unwrap();
         let _ = run(src.path(), out.path());
 
@@ -873,10 +899,7 @@ mod tests {
 
         // Corrupt → forced full rebuild.
         let sidecar_str = read_sidecar(out.path());
-        let corrupted = sidecar_str.replace(
-            "habitat-graph.graph.v0",
-            "habitat-graph.graph.STALE",
-        );
+        let corrupted = sidecar_str.replace("habitat-graph.graph.v0", "habitat-graph.graph.STALE");
         fs::write(out.path().join(SIDECAR), corrupted).unwrap();
         let _ = run(src.path(), out.path()); // full rebuild
 
@@ -898,7 +921,11 @@ mod tests {
         mk_file(src.path(), "lib.rs", "fn fn1() {}");
         let _ = run(src.path(), out.path());
         fs::remove_file(out.path().join(SIDECAR)).unwrap();
-        assert_eq!(run(src.path(), out.path()), 0, "missing sidecar must trigger full rebuild");
+        assert_eq!(
+            run(src.path(), out.path()),
+            0,
+            "missing sidecar must trigger full rebuild"
+        );
     }
 
     // T31: a completely fresh output directory (no prior graph.json or sidecar) exits 0.
@@ -920,7 +947,11 @@ mod tests {
         let _ = run(src.path(), out.path());
         // Overwrite sidecar with garbage.
         fs::write(out.path().join(SIDECAR), b"NOT JSON AT ALL!!!").unwrap();
-        assert_eq!(run(src.path(), out.path()), 0, "corrupt sidecar must still succeed");
+        assert_eq!(
+            run(src.path(), out.path()),
+            0,
+            "corrupt sidecar must still succeed"
+        );
     }
 
     // T33: after a corrupted-sidecar full rebuild the new sidecar is valid.
@@ -954,7 +985,10 @@ mod tests {
 
         let j1 = fs::read(out1.path().join("graph.json")).unwrap();
         let j2 = fs::read(out2.path().join("graph.json")).unwrap();
-        assert_eq!(j1, j2, "two full builds must produce byte-identical graph.json");
+        assert_eq!(
+            j1, j2,
+            "two full builds must produce byte-identical graph.json"
+        );
     }
 
     // T35: incremental build (re-extract changed file) produces the same graph.json as a
@@ -1150,7 +1184,10 @@ mod tests {
 
         mk_file(src.path(), "extra.rs", "fn extra() {}");
         let _ = run(src.path(), out.path());
-        assert!(count_nodes(out.path()) > original_count, "add must increase count");
+        assert!(
+            count_nodes(out.path()) > original_count,
+            "add must increase count"
+        );
 
         rm_file(src.path(), "extra.rs");
         let _ = run(src.path(), out.path());

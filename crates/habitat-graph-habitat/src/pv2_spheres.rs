@@ -17,8 +17,8 @@
 //!
 //! [`CommunityId`]: habitat_graph_core::CommunityId
 
-use habitat_graph_core::{Community, GraphError, Result};
 use habitat_graph_core::sanitize_label;
+use habitat_graph_core::{Community, GraphError, Result};
 use std::sync::Mutex;
 
 // ─── SphereId ────────────────────────────────────────────────────────────────
@@ -159,9 +159,7 @@ impl SphereRegistrar for RecordingRegistrar {
     fn register(&self, reg: &SphereRegistration) -> Result<()> {
         self.inner
             .lock()
-            .map_err(|e| {
-                GraphError::Daemon(format!("RecordingRegistrar mutex poisoned: {e}"))
-            })?
+            .map_err(|e| GraphError::Daemon(format!("RecordingRegistrar mutex poisoned: {e}")))?
             .push(reg.clone());
         Ok(())
     }
@@ -259,9 +257,7 @@ impl SphereRegistrar for HttpRegistrar {
             .send_string(&body)
             .map(|_| ())
             .map_err(|e| {
-                GraphError::Daemon(format!(
-                    "PV2 sphere registration to {url} failed: {e}"
-                ))
+                GraphError::Daemon(format!("PV2 sphere registration to {url} failed: {e}"))
             })
     }
 }
@@ -389,18 +385,17 @@ mod tests {
         let c_plain = make_community(5, "plain", &[]);
         let c_bidi = make_community(5, "plain\u{202E}", &[]);
         // Same id → same sphere id, regardless of label content.
-        assert_eq!(sphere_id_for_community(&c_plain), sphere_id_for_community(&c_bidi));
+        assert_eq!(
+            sphere_id_for_community(&c_plain),
+            sphere_id_for_community(&c_bidi)
+        );
     }
 
     #[test]
     fn rtl_override_in_label_does_not_change_sphere_id() {
         // Additional Trojan-Source defense: full bidi isolation markers.
         let c_clean = make_community(99, "module", &[]);
-        let c_trojan = make_community(
-            99,
-            "\u{2066}module\u{2069}/* admin */",
-            &[],
-        );
+        let c_trojan = make_community(99, "\u{2066}module\u{2069}/* admin */", &[]);
         assert_eq!(
             sphere_id_for_community(&c_clean),
             sphere_id_for_community(&c_trojan)
@@ -412,14 +407,19 @@ mod tests {
         let c_empty = make_community(3, "", &[]);
         let c_full = make_community(3, "non-empty-label", &[]);
         // Empty vs non-empty label: sphere id depends only on id.
-        assert_eq!(sphere_id_for_community(&c_empty), sphere_id_for_community(&c_full));
+        assert_eq!(
+            sphere_id_for_community(&c_empty),
+            sphere_id_for_community(&c_full)
+        );
     }
 
     #[test]
     fn sphere_id_prefix_is_exact() {
         let c = make_community(100, "x", &[]);
         assert!(
-            sphere_id_for_community(&c).0.starts_with("habitat-graph.community."),
+            sphere_id_for_community(&c)
+                .0
+                .starts_with("habitat-graph.community."),
             "sphere id must start with the exact prefix"
         );
     }
@@ -621,18 +621,14 @@ mod tests {
     #[test]
     fn register_all_two_communities_returns_two() {
         let r = RecordingRegistrar::new();
-        let communities = [
-            make_community(1, "a", &[]),
-            make_community(2, "b", &[1, 2]),
-        ];
+        let communities = [make_community(1, "a", &[]), make_community(2, "b", &[1, 2])];
         assert_eq!(register_all(&r, &communities).expect("ok"), 2);
     }
 
     #[test]
     fn register_all_count_equals_communities_len() {
         let r = RecordingRegistrar::new();
-        let communities: Vec<Community> =
-            (0u32..10).map(|i| make_community(i, "c", &[])).collect();
+        let communities: Vec<Community> = (0u32..10).map(|i| make_community(i, "c", &[])).collect();
         let count = register_all(&r, &communities).expect("ok");
         assert_eq!(count, communities.len());
     }
@@ -640,8 +636,7 @@ mod tests {
     #[test]
     fn register_all_all_registrations_are_recorded() {
         let r = RecordingRegistrar::new();
-        let communities: Vec<Community> =
-            (0u32..5).map(|i| make_community(i, "x", &[i])).collect();
+        let communities: Vec<Community> = (0u32..5).map(|i| make_community(i, "x", &[i])).collect();
         register_all(&r, &communities).expect("ok");
         assert_eq!(r.len(), 5);
     }
@@ -658,8 +653,7 @@ mod tests {
     fn register_all_stops_at_first_error_not_after() {
         // fail_after=2: first 2 calls succeed, 3rd fails.
         let r = FailAfterRegistrar::new(2);
-        let communities: Vec<Community> =
-            (0u32..5).map(|i| make_community(i, "c", &[])).collect();
+        let communities: Vec<Community> = (0u32..5).map(|i| make_community(i, "c", &[])).collect();
         let result = register_all(&r, &communities);
         assert!(result.is_err(), "must propagate error");
         // Exactly 2 calls succeeded before the 3rd failed.
@@ -685,16 +679,26 @@ mod tests {
         ];
         register_all(&r, &communities).expect("ok");
         let recs = r.registrations();
-        assert_eq!(recs[0].sphere_id, sphere_id_for_community(&communities[0]).0);
-        assert_eq!(recs[1].sphere_id, sphere_id_for_community(&communities[1]).0);
-        assert_eq!(recs[2].sphere_id, sphere_id_for_community(&communities[2]).0);
+        assert_eq!(
+            recs[0].sphere_id,
+            sphere_id_for_community(&communities[0]).0
+        );
+        assert_eq!(
+            recs[1].sphere_id,
+            sphere_id_for_community(&communities[1]).0
+        );
+        assert_eq!(
+            recs[2].sphere_id,
+            sphere_id_for_community(&communities[2]).0
+        );
     }
 
     #[test]
     fn register_all_large_batch() {
         let r = RecordingRegistrar::new();
-        let communities: Vec<Community> =
-            (0u32..500).map(|i| make_community(i, "bulk", &[])).collect();
+        let communities: Vec<Community> = (0u32..500)
+            .map(|i| make_community(i, "bulk", &[]))
+            .collect();
         let count = register_all(&r, &communities).expect("ok");
         assert_eq!(count, 500);
         assert_eq!(r.len(), 500);
@@ -817,10 +821,7 @@ mod tests {
     #[test]
     fn http_registrar_with_base_url_builds_custom_endpoint() {
         let r = super::HttpRegistrar::with_base_url("http://staging:9132");
-        assert_eq!(
-            r.endpoint_url(),
-            "http://staging:9132/api/spheres/register"
-        );
+        assert_eq!(r.endpoint_url(), "http://staging:9132/api/spheres/register");
     }
 
     /// `default()` and `new()` must produce the same endpoint.

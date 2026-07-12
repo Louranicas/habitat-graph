@@ -449,14 +449,7 @@ impl Extractor for ScalaExtractor {
             };
             match child.kind() {
                 "class_definition" | "trait_definition" | "object_definition" => {
-                    extract_class_like(
-                        &child,
-                        source,
-                        &b,
-                        &source_file,
-                        &local_types,
-                        &mut result,
-                    );
+                    extract_class_like(&child, source, &b, &source_file, &local_types, &mut result);
                 }
                 "function_definition" | "function_declaration" => {
                     extract_function(&child, source, &b, &source_file, &mut result);
@@ -532,14 +525,20 @@ mod tests {
     #[test]
     fn empty_source_file_node_label_equals_stem() {
         let ex = extract("", "Client.scala");
-        assert_eq!(ex.nodes[0].label, "client", "file node label must equal lowercased stem");
+        assert_eq!(
+            ex.nodes[0].label, "client",
+            "file node label must equal lowercased stem"
+        );
     }
 
     #[test]
     fn malformed_source_returns_ok_and_file_node_present() {
         // tree-sitter is error-tolerant; broken source yields a partial tree, not an error.
         let ex = extract("@@@ NOT VALID SCALA !!! {{{{", "broken.scala");
-        assert!(has_node(&ex, "broken"), "file node must be present even for garbled source");
+        assert!(
+            has_node(&ex, "broken"),
+            "file node must be present even for garbled source"
+        );
     }
 
     // ── B. File stem handling ─────────────────────────────────────────────────────────────────────
@@ -621,7 +620,10 @@ mod tests {
 
     #[test]
     fn class_with_constructor_params_still_emits_node() {
-        let ex = extract("class Person(val name: String, val age: Int) { }", "p.scala");
+        let ex = extract(
+            "class Person(val name: String, val age: Int) { }",
+            "p.scala",
+        );
         assert!(
             has_node(&ex, "p_person"),
             "class with constructor params must produce a node"
@@ -731,7 +733,10 @@ mod tests {
         let src = "def myFn(x: Int): Int = x + 1";
         let ex = extract(src, "span.scala");
         let n = node(&ex, "span_myfn");
-        assert!(n.span.is_well_formed(), "function span must be well-formed: {n:?}");
+        assert!(
+            n.span.is_well_formed(),
+            "function span must be well-formed: {n:?}"
+        );
         assert!(!n.span.is_empty(), "function span must not be empty: {n:?}");
     }
 
@@ -790,7 +795,8 @@ mod tests {
 
     #[test]
     fn multiple_methods_on_same_class_all_emitted() {
-        let src = "class Dog { def bark(): Unit = {} \n def fetch(): Unit = {} \n def sit(): Unit = {} }";
+        let src =
+            "class Dog { def bark(): Unit = {} \n def fetch(): Unit = {} \n def sit(): Unit = {} }";
         let ex = extract(src, "dog.scala");
         assert!(has_node(&ex, "dog_dog_bark"), "bark missing");
         assert!(has_node(&ex, "dog_dog_fetch"), "fetch missing");
@@ -805,8 +811,14 @@ mod tests {
         let ex = extract(src, "ab.scala");
         assert!(has_node(&ex, "ab_a_doa"), "method doA missing");
         assert!(has_node(&ex, "ab_b_dob"), "method doB missing");
-        assert!(has_edge(&ex, "ab_a", "ab_a_doa", "method"), "method edge for A missing");
-        assert!(has_edge(&ex, "ab_b", "ab_b_dob", "method"), "method edge for B missing");
+        assert!(
+            has_edge(&ex, "ab_a", "ab_a_doa", "method"),
+            "method edge for A missing"
+        );
+        assert!(
+            has_edge(&ex, "ab_b", "ab_b_dob", "method"),
+            "method edge for B missing"
+        );
     }
 
     #[test]
@@ -895,9 +907,7 @@ mod tests {
         let ex = extract(src, "m.scala");
         assert!(
             ex.edges.iter().any(|e| {
-                e.target == "m_dog"
-                    && e.relation == "inherits"
-                    && e.source == "m_runnable"
+                e.target == "m_dog" && e.relation == "inherits" && e.source == "m_runnable"
             }),
             "local extends-trait must yield stem-prefixed base_id; edges: {:?}",
             ex.edges
@@ -949,8 +959,7 @@ mod tests {
 
     #[test]
     fn extends_chain_in_same_file_all_stem_prefixed() {
-        let src =
-            "class A { }\nclass B extends A { }\nclass C extends B { }";
+        let src = "class A { }\nclass B extends A { }\nclass C extends B { }";
         let ex = extract(src, "chain.scala");
         assert!(
             has_edge(&ex, "chain_a", "chain_b", "inherits"),
@@ -993,8 +1002,7 @@ mod tests {
 
     #[test]
     fn multiple_imports_all_produce_edges() {
-        let src =
-            "import scala.io.Source\nimport scala.util.Try\nimport scala.concurrent.Future";
+        let src = "import scala.io.Source\nimport scala.util.Try\nimport scala.concurrent.Future";
         let ex = extract(src, "multi.scala");
         // Each import produces one imports_from edge with the full dotted path.
         assert!(
@@ -1150,7 +1158,10 @@ mod tests {
         let src = "class BigClass { def a(): Unit = {} \n def b(): Unit = {} }";
         let ex = extract(src, "big.scala");
         let n = node(&ex, "big_bigclass");
-        assert!(n.span.is_well_formed(), "class span must be well-formed: {n:?}");
+        assert!(
+            n.span.is_well_formed(),
+            "class span must be well-formed: {n:?}"
+        );
         assert!(!n.span.is_empty(), "class span must not be empty: {n:?}");
     }
 
@@ -1158,7 +1169,8 @@ mod tests {
 
     #[test]
     fn two_classes_produce_correct_edge_totals() {
-        let src = "class A { def x(): Unit = {} \n def y(): Unit = {} }\nclass B { def p(): Unit = {} }";
+        let src =
+            "class A { def x(): Unit = {} \n def y(): Unit = {} }\nclass B { def p(): Unit = {} }";
         let ex = extract(src, "ab.scala");
         // file(1) + A(1) + B(1) + A.x(1) + A.y(1) + B.p(1) = 6 nodes
         assert_eq!(
@@ -1170,7 +1182,10 @@ mod tests {
         let method_edges = ex.edges.iter().filter(|e| e.relation == "method").count();
         let contains_edges = ex.edges.iter().filter(|e| e.relation == "contains").count();
         assert_eq!(method_edges, 3, "expected 3 method edges");
-        assert_eq!(contains_edges, 2, "expected 2 contains edges (file→A, file→B)");
+        assert_eq!(
+            contains_edges, 2,
+            "expected 2 contains edges (file→A, file→B)"
+        );
     }
 
     #[test]
@@ -1205,20 +1220,42 @@ mod tests {
         assert!(has_node(&ex, "animals_animal"), "Animal class node missing");
         assert!(has_node(&ex, "animals_dog"), "Dog class node missing");
         // Object.
-        assert!(has_node(&ex, "animals_animalfactory"), "AnimalFactory object missing");
+        assert!(
+            has_node(&ex, "animals_animalfactory"),
+            "AnimalFactory object missing"
+        );
         // Methods.
-        assert!(has_node(&ex, "animals_animal_speak"), "Animal.speak method missing");
-        assert!(has_node(&ex, "animals_dog_fetch"), "Dog.fetch method missing");
-        assert!(has_node(&ex, "animals_animalfactory_create"), "AnimalFactory.create missing");
+        assert!(
+            has_node(&ex, "animals_animal_speak"),
+            "Animal.speak method missing"
+        );
+        assert!(
+            has_node(&ex, "animals_dog_fetch"),
+            "Dog.fetch method missing"
+        );
+        assert!(
+            has_node(&ex, "animals_animalfactory_create"),
+            "AnimalFactory.create missing"
+        );
 
         // Contains edges (file → top-level symbols).
         assert!(has_edge(&ex, "animals", "animals_printable", "contains"));
         assert!(has_edge(&ex, "animals", "animals_animal", "contains"));
         assert!(has_edge(&ex, "animals", "animals_dog", "contains"));
-        assert!(has_edge(&ex, "animals", "animals_animalfactory", "contains"));
+        assert!(has_edge(
+            &ex,
+            "animals",
+            "animals_animalfactory",
+            "contains"
+        ));
 
         // Method edges.
-        assert!(has_edge(&ex, "animals_animal", "animals_animal_speak", "method"));
+        assert!(has_edge(
+            &ex,
+            "animals_animal",
+            "animals_animal_speak",
+            "method"
+        ));
         assert!(has_edge(&ex, "animals_dog", "animals_dog_fetch", "method"));
         assert!(has_edge(
             &ex,
@@ -1229,7 +1266,12 @@ mod tests {
 
         // imports_from: flat identifier path → "scala.collection.mutable.listbuffer".
         assert!(
-            has_edge(&ex, "animals", "scala.collection.mutable.listbuffer", "imports_from"),
+            has_edge(
+                &ex,
+                "animals",
+                "scala.collection.mutable.listbuffer",
+                "imports_from"
+            ),
             "imports_from edge for ListBuffer missing; edges: {:?}",
             ex.edges
         );
@@ -1245,9 +1287,7 @@ mod tests {
             "Dog must have at least one inherits edge; edges: {:?}",
             ex.edges
         );
-        let animal_inherits = inherits
-            .iter()
-            .any(|e| e.source == "animals_animal");
+        let animal_inherits = inherits.iter().any(|e| e.source == "animals_animal");
         assert!(
             animal_inherits,
             "Dog extends Animal (local) → inherits source must be 'animals_animal'; inherits: {:?}",

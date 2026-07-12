@@ -41,10 +41,7 @@ fn extract_trigrams(s: &str) -> Vec<[char; 3]> {
     if chars.len() < 3 {
         return Vec::new();
     }
-    chars
-        .windows(3)
-        .map(|w| [w[0], w[1], w[2]])
-        .collect()
+    chars.windows(3).map(|w| [w[0], w[1], w[2]]).collect()
 }
 
 /// Merge-intersects two sorted, deduplicated [`NodeId`] slices.
@@ -111,8 +108,7 @@ impl LabelIndex {
     /// [`Self::find`] immediately after construction.
     #[must_use]
     pub fn build(graph: &Graph) -> Self {
-        let mut lower_labels: HashMap<NodeId, String> =
-            HashMap::with_capacity(graph.nodes.len());
+        let mut lower_labels: HashMap<NodeId, String> = HashMap::with_capacity(graph.nodes.len());
         let mut trigram_index: HashMap<[char; 3], Vec<NodeId>> = HashMap::new();
 
         for node in &graph.nodes {
@@ -355,11 +351,7 @@ mod tests {
     #[test]
     fn multiple_matches_ascending_id_not_label_order() {
         // IDs out of label-alphabetic order; result must sort by id, not label.
-        let idx = LabelIndex::build(&graph(&[
-            (30, "node_c"),
-            (10, "node_a"),
-            (20, "node_b"),
-        ]));
+        let idx = LabelIndex::build(&graph(&[(30, "node_c"), (10, "node_a"), (20, "node_b")]));
         assert_eq!(ids_of(&idx.find("node")), vec![10, 20, 30]);
     }
 
@@ -619,7 +611,9 @@ mod tests {
     #[test]
     fn oracle_single_node_various_needles() {
         let g = graph(&[(1, "HttpClient")]);
-        for needle in ["", "h", "ht", "htt", "http", "Http", "HTTP", "client", "zzz"] {
+        for needle in [
+            "", "h", "ht", "htt", "http", "Http", "HTTP", "client", "zzz",
+        ] {
             check_oracle(&g, needle);
         }
     }
@@ -648,7 +642,9 @@ mod tests {
     #[test]
     fn oracle_unicode_labels() {
         let g = graph(&[(1, "λόγος"), (2, "Café"), (3, "hello"), (4, "Ünit")]);
-        for needle in ["", "λ", "λό", "λόγ", "caf", "Caf", "ell", "nit", "ünit", "Ü"] {
+        for needle in [
+            "", "λ", "λό", "λόγ", "caf", "Caf", "ell", "nit", "ünit", "Ü",
+        ] {
             check_oracle(&g, needle);
         }
     }

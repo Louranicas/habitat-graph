@@ -128,7 +128,9 @@ impl HttpTransport for UreqTransport {
             Ok(resp) => resp
                 .into_string()
                 .map_err(|e| GraphError::Backend(format!("could not read response body: {e}"))),
-            Err(e) => Err(GraphError::Backend(format!("http request to {url} failed: {e}"))),
+            Err(e) => Err(GraphError::Backend(format!(
+                "http request to {url} failed: {e}"
+            ))),
         }
     }
 }
@@ -165,7 +167,10 @@ mod tests {
         let t = StaticTransport::ok("r");
         let _ = t.post_json("http://h", "{}", &[("Authorization", "Bearer k")]);
         let rec = t.last_request().expect("recorded");
-        assert_eq!(rec.headers, vec![("Authorization".into(), "Bearer k".into())]);
+        assert_eq!(
+            rec.headers,
+            vec![("Authorization".into(), "Bearer k".into())]
+        );
     }
 
     #[test]

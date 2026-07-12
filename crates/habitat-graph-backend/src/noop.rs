@@ -43,7 +43,12 @@ mod tests {
     #[test]
     fn extraction_is_empty_for_any_text() {
         let b = NoopBackend;
-        for text in ["", "hello", "fn main() {}", "a very long string ".repeat(100).as_str()] {
+        for text in [
+            "",
+            "hello",
+            "fn main() {}",
+            "a very long string ".repeat(100).as_str(),
+        ] {
             let e = b.extract_semantic(text, "f.rs").expect("ok");
             assert!(e.is_empty(), "noop must never emit nodes/edges");
         }
@@ -53,7 +58,10 @@ mod tests {
     fn extraction_ignores_source_file() {
         let b = NoopBackend;
         assert!(b.extract_semantic("x", "").expect("ok").is_empty());
-        assert!(b.extract_semantic("x", "deep/path.md").expect("ok").is_empty());
+        assert!(b
+            .extract_semantic("x", "deep/path.md")
+            .expect("ok")
+            .is_empty());
     }
 
     #[test]

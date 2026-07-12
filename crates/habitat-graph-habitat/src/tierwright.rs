@@ -150,9 +150,7 @@ impl<T: HttpTransport> Backend for TierwrightBackend<T> {
         let body = self.request_body(text);
         let raw = self.transport.post_json(&self.endpoint(), &body, &[])?;
         let envelope: RouteEnvelope = serde_json::from_str(&raw).map_err(|e| {
-            GraphError::Backend(format!(
-                "TIERWRIGHT /v1/route envelope was malformed: {e}"
-            ))
+            GraphError::Backend(format!("TIERWRIGHT /v1/route envelope was malformed: {e}"))
         })?;
         parse_semantic(&envelope.output, source_file)
     }
@@ -219,8 +217,8 @@ mod tests {
 
     #[test]
     fn with_model_overrides_model() {
-        let b = TierwrightBackend::new(StaticTransport::ok(envelope("{}")))
-            .with_model("mixtral-8x7b");
+        let b =
+            TierwrightBackend::new(StaticTransport::ok(envelope("{}"))).with_model("mixtral-8x7b");
         assert_eq!(b.model, "mixtral-8x7b");
     }
 
@@ -248,10 +246,7 @@ mod tests {
     #[test]
     fn default_endpoint_is_v1_route() {
         let b = TierwrightBackend::new(StaticTransport::ok(envelope("{}")));
-        assert_eq!(
-            b.endpoint(),
-            format!("{DEFAULT_TIERWRIGHT_URL}/v1/route")
-        );
+        assert_eq!(b.endpoint(), format!("{DEFAULT_TIERWRIGHT_URL}/v1/route"));
     }
 
     #[test]
@@ -307,8 +302,8 @@ mod tests {
 
     #[test]
     fn request_body_contains_custom_model() {
-        let b = TierwrightBackend::new(StaticTransport::ok(envelope("{}")))
-            .with_model("llama3-70b");
+        let b =
+            TierwrightBackend::new(StaticTransport::ok(envelope("{}"))).with_model("llama3-70b");
         let _ = b.extract_semantic("text", "f.md");
         let rec = b.transport().last_request().expect("recorded");
         let v: Value = serde_json::from_str(&rec.body).expect("valid json");
@@ -368,7 +363,9 @@ mod tests {
     #[test]
     fn extracts_a_single_node_through_the_envelope() {
         let b = TierwrightBackend::new(StaticTransport::ok(envelope(one_node_payload())));
-        let e = b.extract_semantic("prose about a Concept", "doc.md").expect("ok");
+        let e = b
+            .extract_semantic("prose about a Concept", "doc.md")
+            .expect("ok");
         assert_eq!(e.counts(), (1, 0));
         assert_eq!(e.nodes[0].label, "Concept");
     }
@@ -376,7 +373,9 @@ mod tests {
     #[test]
     fn extracts_nodes_and_edges_through_the_envelope() {
         let b = TierwrightBackend::new(StaticTransport::ok(envelope(node_and_edge_payload())));
-        let e = b.extract_semantic("Auth queries DB", "arch.md").expect("ok");
+        let e = b
+            .extract_semantic("Auth queries DB", "arch.md")
+            .expect("ok");
         assert_eq!(e.counts(), (2, 1));
         assert_eq!(e.edges[0].relation, "queries");
         assert_eq!(e.edges[0].source, "Auth");
@@ -494,9 +493,9 @@ mod tests {
 
     #[test]
     fn works_behind_dyn_backend() {
-        let b: Box<dyn Backend> = Box::new(TierwrightBackend::new(StaticTransport::ok(
-            envelope(one_node_payload()),
-        )));
+        let b: Box<dyn Backend> = Box::new(TierwrightBackend::new(StaticTransport::ok(envelope(
+            one_node_payload(),
+        ))));
         assert_eq!(b.name(), "tierwright");
         assert!(b.is_local());
         let e = b.extract_semantic("text", "f.md").expect("ok");
@@ -525,8 +524,7 @@ mod tests {
 
     #[test]
     fn empty_relation_defaults_to_relates_to() {
-        let inner =
-            r#"{"edges":[{"source":"A","target":"B","relation":""}]}"#;
+        let inner = r#"{"edges":[{"source":"A","target":"B","relation":""}]}"#;
         let b = TierwrightBackend::new(StaticTransport::ok(envelope(inner)));
         let e = b.extract_semantic("text", "f.md").expect("ok");
         assert_eq!(e.edges[0].relation, habitat_graph_backend::DEFAULT_RELATION);
@@ -581,9 +579,7 @@ mod tests {
         let b = TierwrightBackend::new(StaticTransport::ok(envelope(
             r#"{"nodes":[{"label":"Solo"}]}"#,
         )));
-        let e = b
-            .extract_semantic("text", "single/node.rs")
-            .expect("ok");
+        let e = b.extract_semantic("text", "single/node.rs").expect("ok");
         assert_eq!(e.nodes.len(), 1);
         assert_eq!(e.nodes[0].source_file, "single/node.rs");
         assert_eq!(e.nodes[0].label, "Solo");

@@ -118,10 +118,7 @@ impl ServiceProbe for StaticProbe {
                 id: endpoint.id.clone(),
                 healthy: false,
                 status_code: None,
-                detail: display_safe(&format!(
-                    "no preset configured for URL: {}",
-                    endpoint.url
-                )),
+                detail: display_safe(&format!("no preset configured for URL: {}", endpoint.url)),
             },
         }
     }
@@ -282,8 +279,8 @@ impl ServiceProbe for HttpProbe {
 #[cfg(test)]
 mod tests {
     use super::{
-        HealthReport, ServiceEndpoint, ServiceProbe, StaticProbe, count_healthy,
-        default_factory_endpoints, probe_all,
+        count_healthy, default_factory_endpoints, probe_all, HealthReport, ServiceEndpoint,
+        ServiceProbe, StaticProbe,
     };
 
     // ── helpers ─────────────────────────────────────────────────────────────────
@@ -415,7 +412,10 @@ mod tests {
         let probe = StaticProbe::default();
         let ep = ep("any", "http://localhost:1/health");
         let r = probe.probe(&ep);
-        assert!(!r.healthy, "default probe has no presets; must be unhealthy");
+        assert!(
+            !r.healthy,
+            "default probe has no presets; must be unhealthy"
+        );
     }
 
     #[test]
@@ -441,7 +441,10 @@ mod tests {
         let preset = healthy_report("preset_id");
         let probe = static_probe_with_one(url, preset);
         let r = probe.probe(&ep("endpoint_id", url));
-        assert_eq!(r.id, "endpoint_id", "id must come from the endpoint, not the preset");
+        assert_eq!(
+            r.id, "endpoint_id",
+            "id must come from the endpoint, not the preset"
+        );
     }
 
     #[test]
@@ -494,10 +497,8 @@ mod tests {
     fn static_probe_multiple_presets_route_correctly() {
         let url_a = "http://localhost:8142/health";
         let url_b = "http://localhost:8200/health";
-        let probe = StaticProbe::new([
-            (url_a, healthy_report("a")),
-            (url_b, unhealthy_report("b")),
-        ]);
+        let probe =
+            StaticProbe::new([(url_a, healthy_report("a")), (url_b, unhealthy_report("b"))]);
         let ra = probe.probe(&ep("wfe", url_a));
         let rb = probe.probe(&ep("lcm", url_b));
         assert!(ra.healthy, "url_a preset is healthy");
@@ -574,7 +575,12 @@ mod tests {
     fn probe_all_result_length_matches_input_length() {
         let probe = StaticProbe::default();
         let endpoints: Vec<ServiceEndpoint> = (0..5)
-            .map(|i| ep(&format!("s{i}"), &format!("http://localhost:{}/health", 9000 + i)))
+            .map(|i| {
+                ep(
+                    &format!("s{i}"),
+                    &format!("http://localhost:{}/health", 9000 + i),
+                )
+            })
             .collect();
         let results = probe_all(&probe, &endpoints);
         assert_eq!(results.len(), endpoints.len());
@@ -602,10 +608,7 @@ mod tests {
     fn probe_all_ids_match_endpoints_in_order() {
         let url_a = "http://localhost:8142/health";
         let url_b = "http://localhost:8200/health";
-        let probe = StaticProbe::new([
-            (url_a, healthy_report("p")),
-            (url_b, healthy_report("q")),
-        ]);
+        let probe = StaticProbe::new([(url_a, healthy_report("p")), (url_b, healthy_report("q"))]);
         let endpoints = [ep("wfe", url_a), ep("lcm", url_b)];
         let results = probe_all(&probe, &endpoints);
         assert_eq!(results[0].id, "wfe");
@@ -616,7 +619,12 @@ mod tests {
     fn probe_all_all_unknown_urls_yields_all_unhealthy() {
         let probe = StaticProbe::default();
         let endpoints: Vec<ServiceEndpoint> = (0..3)
-            .map(|i| ep(&format!("s{i}"), &format!("http://localhost:{}/health", 9100 + i)))
+            .map(|i| {
+                ep(
+                    &format!("s{i}"),
+                    &format!("http://localhost:{}/health", 9100 + i),
+                )
+            })
             .collect();
         let results = probe_all(&probe, &endpoints);
         assert!(
@@ -632,10 +640,8 @@ mod tests {
             "http://localhost:8200/health",
             "http://localhost:8132/health",
         ];
-        let pairs: Vec<(&str, HealthReport)> = urls
-            .iter()
-            .map(|&u| (u, healthy_report("p")))
-            .collect();
+        let pairs: Vec<(&str, HealthReport)> =
+            urls.iter().map(|&u| (u, healthy_report("p"))).collect();
         let probe = StaticProbe::new(pairs);
         let endpoints: Vec<ServiceEndpoint> = urls
             .iter()
@@ -665,7 +671,11 @@ mod tests {
 
     #[test]
     fn count_healthy_all_healthy() {
-        let reports = vec![healthy_report("a"), healthy_report("b"), healthy_report("c")];
+        let reports = vec![
+            healthy_report("a"),
+            healthy_report("b"),
+            healthy_report("c"),
+        ];
         assert_eq!(count_healthy(&reports), 3);
     }
 
@@ -733,28 +743,40 @@ mod tests {
     #[test]
     fn default_factory_endpoints_contains_wfe() {
         let eps = default_factory_endpoints();
-        let wfe = eps.iter().find(|e| e.id == "wfe").expect("wfe entry must exist");
+        let wfe = eps
+            .iter()
+            .find(|e| e.id == "wfe")
+            .expect("wfe entry must exist");
         assert_eq!(wfe.url, "http://localhost:8142/health");
     }
 
     #[test]
     fn default_factory_endpoints_contains_lcm() {
         let eps = default_factory_endpoints();
-        let lcm = eps.iter().find(|e| e.id == "lcm").expect("lcm entry must exist");
+        let lcm = eps
+            .iter()
+            .find(|e| e.id == "lcm")
+            .expect("lcm entry must exist");
         assert_eq!(lcm.url, "http://localhost:8200/health");
     }
 
     #[test]
     fn default_factory_endpoints_contains_pv2() {
         let eps = default_factory_endpoints();
-        let pv2 = eps.iter().find(|e| e.id == "pv2").expect("pv2 entry must exist");
+        let pv2 = eps
+            .iter()
+            .find(|e| e.id == "pv2")
+            .expect("pv2 entry must exist");
         assert_eq!(pv2.url, "http://localhost:8132/health");
     }
 
     #[test]
     fn default_factory_endpoints_contains_povm() {
         let eps = default_factory_endpoints();
-        let povm = eps.iter().find(|e| e.id == "povm").expect("povm entry must exist");
+        let povm = eps
+            .iter()
+            .find(|e| e.id == "povm")
+            .expect("povm entry must exist");
         assert_eq!(povm.url, "http://localhost:8125/health");
     }
 
@@ -771,7 +793,10 @@ mod tests {
     #[test]
     fn default_factory_endpoints_contains_me() {
         let eps = default_factory_endpoints();
-        let me = eps.iter().find(|e| e.id == "me").expect("me (ME) entry must exist");
+        let me = eps
+            .iter()
+            .find(|e| e.id == "me")
+            .expect("me (ME) entry must exist");
         // Path-map special case: ME uses /api/health, NOT /health.
         assert_eq!(me.url, "http://localhost:8180/api/health");
     }

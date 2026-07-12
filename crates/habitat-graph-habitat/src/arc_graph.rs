@@ -185,12 +185,12 @@ mod tests {
     use habitat_graph_core::NodeId;
     use habitat_graph_core::Span;
 
-    use super::Arc;
-    use super::SeveredEarReport;
     use super::arc_coherence;
     use super::default_arc_relations;
     use super::diff_arcs;
     use super::extract_arcs;
+    use super::Arc;
+    use super::SeveredEarReport;
 
     // ── Helpers ──────────────────────────────────────────────────────────────
 
@@ -346,10 +346,7 @@ mod tests {
 
     #[test]
     fn extract_empty_relations_filter_returns_empty() {
-        let g = graph(
-            vec![node(1, "A"), node(2, "B")],
-            vec![edge(1, 2, "calls")],
-        );
+        let g = graph(vec![node(1, "A"), node(2, "B")], vec![edge(1, 2, "calls")]);
         assert!(extract_arcs(&g, &[]).is_empty());
     }
 
@@ -389,10 +386,7 @@ mod tests {
     #[test]
     fn extract_self_loop_arc_producer_equals_consumer() {
         // A node can have an edge back to itself; the arc must survive, not panic.
-        let g = graph(
-            vec![node(1, "recursive")],
-            vec![edge(1, 1, "calls")],
-        );
+        let g = graph(vec![node(1, "recursive")], vec![edge(1, 1, "calls")]);
         let arcs = extract_arcs(&g, &["calls"]);
         assert_eq!(arcs.len(), 1);
         assert_eq!(arcs[0].producer, "recursive");
@@ -402,10 +396,7 @@ mod tests {
     #[test]
     fn extract_dangling_source_is_skipped_not_panicked() {
         // Source id 99 has no node.
-        let g = graph(
-            vec![node(2, "B")],
-            vec![edge(99, 2, "calls")],
-        );
+        let g = graph(vec![node(2, "B")], vec![edge(99, 2, "calls")]);
         let arcs = extract_arcs(&g, &["calls"]);
         assert!(arcs.is_empty());
     }
@@ -413,10 +404,7 @@ mod tests {
     #[test]
     fn extract_dangling_target_is_skipped_not_panicked() {
         // Target id 99 has no node.
-        let g = graph(
-            vec![node(1, "A")],
-            vec![edge(1, 99, "calls")],
-        );
+        let g = graph(vec![node(1, "A")], vec![edge(1, 99, "calls")]);
         let arcs = extract_arcs(&g, &["calls"]);
         assert!(arcs.is_empty());
     }
@@ -518,7 +506,7 @@ mod tests {
             vec![node(1, "A"), node(2, "B"), node(3, "C")],
             vec![
                 edge(1, 2, "calls"),
-                edge(2, 3, "inherits"),    // not in filter
+                edge(2, 3, "inherits"), // not in filter
                 edge(3, 1, "imports_from"),
             ],
         );
@@ -568,10 +556,7 @@ mod tests {
 
     #[test]
     fn diff_all_present_coherence_one() {
-        let expected = vec![
-            arc("A", "B", "calls"),
-            arc("B", "C", "defines"),
-        ];
+        let expected = vec![arc("A", "B", "calls"), arc("B", "C", "defines")];
         let report = diff_arcs(&expected, &expected);
         assert_coherence(report.coherence, 1.0);
         assert!(report.severed.is_empty());
@@ -590,10 +575,7 @@ mod tests {
 
     #[test]
     fn diff_finds_specific_severed_ear() {
-        let expected = vec![
-            arc("A", "B", "calls"),
-            arc("B", "C", "defines"),
-        ];
+        let expected = vec![arc("A", "B", "calls"), arc("B", "C", "defines")];
         let actual = vec![arc("A", "B", "calls")]; // "B→C defines" is severed
         let report = diff_arcs(&expected, &actual);
         assert_eq!(report.present, vec![arc("A", "B", "calls")]);
@@ -602,10 +584,7 @@ mod tests {
 
     #[test]
     fn diff_half_present_coherence_half() {
-        let expected = vec![
-            arc("A", "B", "calls"),
-            arc("C", "D", "method"),
-        ];
+        let expected = vec![arc("A", "B", "calls"), arc("C", "D", "method")];
         let actual = vec![arc("A", "B", "calls")];
         let report = diff_arcs(&expected, &actual);
         assert_coherence(report.coherence, 0.5);
@@ -684,10 +663,7 @@ mod tests {
 
     #[test]
     fn diff_empty_actual_all_severed() {
-        let expected: Vec<Arc> = vec![
-            arc("A", "B", "calls"),
-            arc("C", "D", "defines"),
-        ];
+        let expected: Vec<Arc> = vec![arc("A", "B", "calls"), arc("C", "D", "defines")];
         let report = diff_arcs(&expected, &[]);
         assert_eq!(report.severed.len(), expected.len());
         assert!(report.present.is_empty());

@@ -170,9 +170,7 @@ fn hash_str(hasher: &mut blake3::Hasher, s: &str) {
 
 #[cfg(test)]
 mod tests {
-    use habitat_graph_core::{
-        Community, CommunityId, Confidence, Edge, Graph, Node, NodeId, Span,
-    };
+    use habitat_graph_core::{Community, CommunityId, Confidence, Edge, Graph, Node, NodeId, Span};
 
     use super::{generation_id, GENERATION_LEN};
 
@@ -755,8 +753,7 @@ mod tests {
     #[test]
     fn node_with_empty_source_file_differs_from_nonempty() {
         let mut a = Graph::new();
-        a.nodes
-            .push(node_full(1, "n", "", Span::new(0, 1, 1, 1)));
+        a.nodes.push(node_full(1, "n", "", Span::new(0, 1, 1, 1)));
 
         let mut b = Graph::new();
         b.nodes

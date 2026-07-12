@@ -450,12 +450,7 @@ fn extract_var_fns(
 /// Emits an `imports_from` edge from `B` to the lowercased, quote-stripped module specifier
 /// string. Side-effect-only imports (`import 'module'`) are included; the source field is always
 /// present for well-formed import statements.
-fn extract_import(
-    node: &tree_sitter::Node<'_>,
-    source: &[u8],
-    b: &str,
-    result: &mut Extraction,
-) {
+fn extract_import(node: &tree_sitter::Node<'_>, source: &[u8], b: &str, result: &mut Extraction) {
     let Some(source_node) = node.child_by_field_name("source") else {
         return;
     };
@@ -513,10 +508,12 @@ impl Extractor for TsExtractor {
                 file: source_file.clone(),
                 message: e.to_string(),
             })?;
-        let tree = parser.parse(source, None).ok_or_else(|| GraphError::Parse {
-            file: source_file.clone(),
-            message: "parse returned None".into(),
-        })?;
+        let tree = parser
+            .parse(source, None)
+            .ok_or_else(|| GraphError::Parse {
+                file: source_file.clone(),
+                message: "parse returned None".into(),
+            })?;
 
         let root = tree.root_node();
 
@@ -550,14 +547,7 @@ impl Extractor for TsExtractor {
                     }
                 }
                 _ => {
-                    dispatch_decl(
-                        &child,
-                        source,
-                        &b,
-                        &source_file,
-                        &local_types,
-                        &mut result,
-                    );
+                    dispatch_decl(&child, source, &b, &source_file, &local_types, &mut result);
                 }
             }
         }
@@ -631,7 +621,10 @@ mod tests {
     fn malformed_source_returns_ok_tree_sitter_is_error_tolerant() {
         // tree-sitter always returns a (partial) tree even for invalid input.
         let ex = extract("!!!! NOT VALID TYPESCRIPT @@@", "broken.ts");
-        assert!(has_node(&ex, "broken"), "file node must be present for garbled source");
+        assert!(
+            has_node(&ex, "broken"),
+            "file node must be present for garbled source"
+        );
     }
 
     // ── B. File stem handling ──────────────────────────────────────────────────────────────────
@@ -708,7 +701,10 @@ mod tests {
         let src = "\n\nfunction late(): void {}";
         let ex = extract(src, "sl.ts");
         let n = node(&ex, "sl_late");
-        assert_eq!(n.span.start_line, 3, "function on line 3 must have start_line=3");
+        assert_eq!(
+            n.span.start_line, 3,
+            "function on line 3 must have start_line=3"
+        );
     }
 
     #[test]
@@ -886,27 +882,34 @@ mod tests {
 
     #[test]
     fn both_extends_and_implements_emit_both_inherits_edges() {
-        let ex = extract(
-            "class Dog extends Animal implements Runnable {}",
-            "m.ts",
+        let ex = extract("class Dog extends Animal implements Runnable {}", "m.ts");
+        assert!(
+            has_edge(&ex, "animal", "m_dog", "inherits"),
+            "extends edge missing"
         );
-        assert!(has_edge(&ex, "animal", "m_dog", "inherits"), "extends edge missing");
-        assert!(has_edge(&ex, "runnable", "m_dog", "inherits"), "implements edge missing");
-        let inherits: Vec<_> = ex.edges.iter().filter(|e| e.relation == "inherits").collect();
+        assert!(
+            has_edge(&ex, "runnable", "m_dog", "inherits"),
+            "implements edge missing"
+        );
+        let inherits: Vec<_> = ex
+            .edges
+            .iter()
+            .filter(|e| e.relation == "inherits")
+            .collect();
         assert_eq!(inherits.len(), 2, "expected exactly 2 inherits edges");
     }
 
     #[test]
     fn multiple_implements_all_emit_inherits_edges() {
-        let ex = extract(
-            "class Foo implements Bar, Baz, Qux {}",
-            "m.ts",
-        );
+        let ex = extract("class Foo implements Bar, Baz, Qux {}", "m.ts");
         assert!(has_edge(&ex, "bar", "m_foo", "inherits"));
         assert!(has_edge(&ex, "baz", "m_foo", "inherits"));
         assert!(has_edge(&ex, "qux", "m_foo", "inherits"));
         let inherits = ex.edges.iter().filter(|e| e.relation == "inherits").count();
-        assert_eq!(inherits, 3, "expected 3 inherits edges from multiple implements");
+        assert_eq!(
+            inherits, 3,
+            "expected 3 inherits edges from multiple implements"
+        );
     }
 
     #[test]
@@ -952,15 +955,15 @@ mod tests {
     #[test]
     fn interface_name_is_lowercased_in_label() {
         let ex = extract("interface HTTPClient {}", "iface.ts");
-        assert!(has_node(&ex, "iface_httpclient"), "interface label must be lowercased");
+        assert!(
+            has_node(&ex, "iface_httpclient"),
+            "interface label must be lowercased"
+        );
     }
 
     #[test]
     fn multiple_interfaces_all_emitted() {
-        let ex = extract(
-            "interface A {} interface B {} interface C {}",
-            "ifaces.ts",
-        );
+        let ex = extract("interface A {} interface B {} interface C {}", "ifaces.ts");
         assert!(has_node(&ex, "ifaces_a"));
         assert!(has_node(&ex, "ifaces_b"));
         assert!(has_node(&ex, "ifaces_c"));
@@ -983,14 +986,20 @@ mod tests {
     #[test]
     fn enum_name_is_lowercased_in_label() {
         let ex = extract("enum HTTPMethod { GET, POST }", "http.ts");
-        assert!(has_node(&ex, "http_httpmethod"), "enum label must be lowercased");
+        assert!(
+            has_node(&ex, "http_httpmethod"),
+            "enum label must be lowercased"
+        );
     }
 
     // ── I. Variable / arrow functions ──────────────────────────────────────────────────────────
 
     #[test]
     fn const_arrow_function_emits_fn_node_and_contains_edge() {
-        let ex = extract("const greet = (name: string) => { return name; };", "utils.ts");
+        let ex = extract(
+            "const greet = (name: string) => { return name; };",
+            "utils.ts",
+        );
         assert!(has_node(&ex, "utils_greet"), "arrow fn node missing");
         assert!(
             has_edge(&ex, "utils", "utils_greet", "contains"),
@@ -1000,7 +1009,10 @@ mod tests {
 
     #[test]
     fn const_function_expression_emits_fn_node() {
-        let ex = extract("const add = function(a: number, b: number) { return a + b; };", "math.ts");
+        let ex = extract(
+            "const add = function(a: number, b: number) { return a + b; };",
+            "math.ts",
+        );
         assert!(has_node(&ex, "math_add"), "fn expr node missing");
         assert!(has_edge(&ex, "math", "math_add", "contains"));
     }
@@ -1026,7 +1038,10 @@ mod tests {
     #[test]
     fn arrow_fn_name_is_lowercased() {
         let ex = extract("const MyFunc = () => {};", "n.ts");
-        assert!(has_node(&ex, "n_myfunc"), "arrow fn label must be lowercased");
+        assert!(
+            has_node(&ex, "n_myfunc"),
+            "arrow fn label must be lowercased"
+        );
     }
 
     // ── J. Export statements ───────────────────────────────────────────────────────────────────
@@ -1041,14 +1056,20 @@ mod tests {
     #[test]
     fn export_class_declaration_is_extracted() {
         let ex = extract("export class Client {}", "client.ts");
-        assert!(has_node(&ex, "client_client"), "exported class node missing");
+        assert!(
+            has_node(&ex, "client_client"),
+            "exported class node missing"
+        );
         assert!(has_edge(&ex, "client", "client_client", "contains"));
     }
 
     #[test]
     fn export_interface_is_extracted() {
         let ex = extract("export interface Repo {}", "repo.ts");
-        assert!(has_node(&ex, "repo_repo"), "exported interface node missing");
+        assert!(
+            has_node(&ex, "repo_repo"),
+            "exported interface node missing"
+        );
     }
 
     #[test]
@@ -1107,7 +1128,11 @@ mod tests {
         assert!(has_edge(&ex, "multi", "alpha", "imports_from"));
         assert!(has_edge(&ex, "multi", "beta", "imports_from"));
         assert!(has_edge(&ex, "multi", "gamma", "imports_from"));
-        let imports = ex.edges.iter().filter(|e| e.relation == "imports_from").count();
+        let imports = ex
+            .edges
+            .iter()
+            .filter(|e| e.relation == "imports_from")
+            .count();
         assert_eq!(imports, 3, "expected 3 imports_from edges");
     }
 
@@ -1191,7 +1216,10 @@ mod tests {
     fn class_on_first_line_has_start_line_one() {
         let ex = extract("class Foo {}", "x.ts");
         let n = node(&ex, "x_foo");
-        assert_eq!(n.span.start_line, 1, "class on line 1 must have start_line=1");
+        assert_eq!(
+            n.span.start_line, 1,
+            "class on line 1 must have start_line=1"
+        );
     }
 
     #[test]
@@ -1199,7 +1227,10 @@ mod tests {
         let src = "\n\nclass Late {}";
         let ex = extract(src, "y.ts");
         let n = node(&ex, "y_late");
-        assert_eq!(n.span.start_line, 3, "class on line 3 must have start_line=3");
+        assert_eq!(
+            n.span.start_line, 3,
+            "class on line 3 must have start_line=3"
+        );
     }
 
     #[test]
@@ -1256,7 +1287,10 @@ mod tests {
         assert!(has_node(&ex, "chain_base"), "base class missing");
         assert!(has_node(&ex, "chain_derived"), "derived class missing");
         assert!(has_node(&ex, "chain_base_init"), "base method missing");
-        assert!(has_node(&ex, "chain_derived_work"), "derived method missing");
+        assert!(
+            has_node(&ex, "chain_derived_work"),
+            "derived method missing"
+        );
         assert!(
             has_edge(&ex, "chain_base", "chain_derived", "inherits"),
             "inherits edge missing"
@@ -1265,10 +1299,7 @@ mod tests {
 
     #[test]
     fn two_classes_two_methods_each_produce_correct_totals() {
-        let src = concat!(
-            "class A { x() {} y() {} }\n",
-            "class B { p() {} q() {} }\n",
-        );
+        let src = concat!("class A { x() {} y() {} }\n", "class B { p() {} q() {} }\n",);
         let ex = extract(src, "ab.ts");
         // file + 2 classes + 4 methods = 7 nodes
         assert_eq!(ex.nodes.len(), 7, "expected 7 nodes");
@@ -1281,7 +1312,10 @@ mod tests {
     #[test]
     fn abstract_class_methods_emitted_same_as_concrete() {
         let ex = extract("abstract class Shape { move() {} }", "shapes.ts");
-        assert!(has_node(&ex, "shapes_shape_move"), "abstract class method node missing");
+        assert!(
+            has_node(&ex, "shapes_shape_move"),
+            "abstract class method node missing"
+        );
         assert!(has_edge(&ex, "shapes_shape", "shapes_shape_move", "method"));
     }
 
@@ -1302,7 +1336,12 @@ mod tests {
         let ex = extract(src, "app.ts");
         // file, logger, level, base, app, base_basemethod, app_constructor, app_log, run, helper
         // = 10 nodes
-        assert_eq!(ex.nodes.len(), 10, "expected 10 nodes; got {:?}", ex.nodes.iter().map(|n| &n.label).collect::<Vec<_>>());
+        assert_eq!(
+            ex.nodes.len(),
+            10,
+            "expected 10 nodes; got {:?}",
+            ex.nodes.iter().map(|n| &n.label).collect::<Vec<_>>()
+        );
         assert!(has_node(&ex, "app"), "file node missing");
         assert!(has_node(&ex, "app_logger"), "interface node missing");
         assert!(has_node(&ex, "app_level"), "enum node missing");
@@ -1316,15 +1355,27 @@ mod tests {
         // imports_from: node:fs
         assert!(has_edge(&ex, "app", "node:fs", "imports_from"));
         // inherits: base (local) → app, logger (local) → app
-        assert!(has_edge(&ex, "app_base", "app_app", "inherits"), "extends inherits missing");
-        assert!(has_edge(&ex, "app_logger", "app_app", "inherits"), "implements inherits missing");
+        assert!(
+            has_edge(&ex, "app_base", "app_app", "inherits"),
+            "extends inherits missing"
+        );
+        assert!(
+            has_edge(&ex, "app_logger", "app_app", "inherits"),
+            "implements inherits missing"
+        );
     }
 
     #[test]
     fn tsx_file_extracts_class_declarations() {
         let src = "class MyComponent { render() { return null; } }";
         let ex = extract(src, "comp.tsx");
-        assert!(has_node(&ex, "comp_mycomponent"), "class node missing in TSX");
-        assert!(has_node(&ex, "comp_mycomponent_render"), "method node missing in TSX");
+        assert!(
+            has_node(&ex, "comp_mycomponent"),
+            "class node missing in TSX"
+        );
+        assert!(
+            has_node(&ex, "comp_mycomponent_render"),
+            "method node missing in TSX"
+        );
     }
 }

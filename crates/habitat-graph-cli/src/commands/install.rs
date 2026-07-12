@@ -89,7 +89,10 @@ pub fn resolve_config_path(override_path: Option<&Path>) -> Result<PathBuf> {
     }
 
     // Fall back to the highest-priority candidate.
-    Ok(candidates.into_iter().next().expect("non-empty checked above"))
+    Ok(candidates
+        .into_iter()
+        .next()
+        .expect("non-empty checked above"))
 }
 
 // ── JSON config helpers ───────────────────────────────────────────────────────
@@ -179,8 +182,8 @@ pub fn atomic_write_and_verify(path: &Path, config: &Value, name: &str) -> Resul
     }
 
     // 2. Serialize.
-    let text = serde_json::to_string_pretty(config)
-        .map_err(|e| GraphError::Schema(e.to_string()))?;
+    let text =
+        serde_json::to_string_pretty(config).map_err(|e| GraphError::Schema(e.to_string()))?;
 
     // 3. Write to .bak.
     let bak = path.with_extension("bak");
@@ -188,8 +191,9 @@ pub fn atomic_write_and_verify(path: &Path, config: &Value, name: &str) -> Resul
         .map_err(|e| GraphError::Io(format!("write bak {}: {e}", bak.display())))?;
 
     // 4. Atomic rename.
-    std::fs::rename(&bak, path)
-        .map_err(|e| GraphError::Io(format!("rename {}->{}: {e}", bak.display(), path.display())))?;
+    std::fs::rename(&bak, path).map_err(|e| {
+        GraphError::Io(format!("rename {}->{}: {e}", bak.display(), path.display()))
+    })?;
 
     // 5. Readback verify.
     let readback = read_config(path)?;
@@ -220,11 +224,7 @@ pub fn atomic_write_and_verify(path: &Path, config: &Value, name: &str) -> Resul
 ///
 /// All errors are surfaced as a non-zero exit code; see [`run_inner`] for the detailed error set.
 #[must_use]
-pub fn run(
-    graph: &Path,
-    config_path: Option<&Path>,
-    dry_run: bool,
-) -> u8 {
+pub fn run(graph: &Path, config_path: Option<&Path>, dry_run: bool) -> u8 {
     match run_inner(graph, config_path, dry_run) {
         Ok(msg) => {
             println!("{msg}");
@@ -251,8 +251,8 @@ fn run_inner(graph: &Path, config_path: Option<&Path>, dry_run: bool) -> Result<
     let merged = merge_entry(existing, MCP_SERVER_NAME, entry);
 
     if dry_run {
-        let preview = serde_json::to_string_pretty(&merged)
-            .map_err(|e| GraphError::Schema(e.to_string()))?;
+        let preview =
+            serde_json::to_string_pretty(&merged).map_err(|e| GraphError::Schema(e.to_string()))?;
         Ok(format!(
             "[dry-run] would write to {}:\n{}",
             resolved.display(),
@@ -458,7 +458,10 @@ mod tests {
         let d = tdir();
         let p = d.join("c.json");
         fs::write(&p, "{\"mcpServers\":{\"x\":{\"command\":\"y\"}}}").expect("seed");
-        assert_eq!(read_config(&p).expect("read")["mcpServers"]["x"]["command"], "y");
+        assert_eq!(
+            read_config(&p).expect("read")["mcpServers"]["x"]["command"],
+            "y"
+        );
     }
 
     // ── resolve_config_path ───────────────────────────────────────────────────
@@ -485,7 +488,10 @@ mod tests {
     fn candidate_paths_returns_at_least_one_when_home_set() {
         // $HOME is set in a normal test environment.
         if std::env::var("HOME").is_ok() {
-            assert!(!candidate_paths().is_empty(), "expected at least one candidate");
+            assert!(
+                !candidate_paths().is_empty(),
+                "expected at least one candidate"
+            );
         }
     }
 
@@ -525,7 +531,10 @@ mod tests {
         let p = d.join("mcp.json");
         let config = merge_entry(json!({}), "hg", build_entry("hg", &graph_path()));
         atomic_write_and_verify(&p, &config, "hg").expect("write");
-        assert!(!d.join("mcp.bak").exists(), ".bak must be absent after success");
+        assert!(
+            !d.join("mcp.bak").exists(),
+            ".bak must be absent after success"
+        );
     }
 
     #[test]

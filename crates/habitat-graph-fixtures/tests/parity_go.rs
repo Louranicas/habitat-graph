@@ -56,8 +56,7 @@ fn go_structural_parity() {
     let dir = go_dir();
 
     // 1. Extract the Go corpus.
-    let files =
-        habitat_graph_source::detect(&dir.join("src"), &["go"]).expect("detect go files");
+    let files = habitat_graph_source::detect(&dir.join("src"), &["go"]).expect("detect go files");
     assert!(
         !files.is_empty(),
         "expected ≥1 .go file in fixtures/worked/go/src; found none"
@@ -92,7 +91,14 @@ fn go_structural_parity() {
     eprintln!("EDGES by relation (matched / golden / ours):");
     let mut structural_matched = 0_usize;
     let mut structural_total = 0_usize;
-    for rel in ["contains", "method", "imports_from", "inherits", "calls", "uses"] {
+    for rel in [
+        "contains",
+        "method",
+        "imports_from",
+        "inherits",
+        "calls",
+        "uses",
+    ] {
         let g = golden.edges_with_relation(rel);
         let o = ours.edges_with_relation(rel);
         let matched = g.intersection(&o).count();
@@ -241,7 +247,11 @@ fn go_value_receiver_method_nodes_exist() {
 #[test]
 fn go_pointer_receiver_method_nodes_exist() {
     let g = extract_sample();
-    for name in ["sample_dog_setage", "sample_server_start", "sample_server_stop"] {
+    for name in [
+        "sample_dog_setage",
+        "sample_server_start",
+        "sample_server_stop",
+    ] {
         assert!(
             g.nodes.contains(name),
             "pointer-receiver method node '{name}' must exist; nodes: {:?}",
@@ -394,8 +404,8 @@ fn go_method_edge_count_floor() {
 #[test]
 fn go_extractor_raw_emits_imports_from_edges() {
     // Bypass assemble — call GoExtractor directly to inspect raw Extraction output.
-    use habitat_graph_extract::ast::go::GoExtractor;
     use crate::registry::Extractor as _;
+    use habitat_graph_extract::ast::go::GoExtractor;
 
     let src_path = go_dir().join("src").join("sample.go");
     let source = std::fs::read(&src_path).expect("read sample.go");

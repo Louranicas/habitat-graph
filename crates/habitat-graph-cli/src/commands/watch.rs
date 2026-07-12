@@ -79,9 +79,8 @@ pub fn rebuild(dir: &Path, out: &Path) -> Result<usize> {
     let mut graph = habitat_graph_build::assemble(extractions);
 
     // Re-run community detection on the trusted subgraph (consistent with F12).
-    graph.communities = habitat_graph_analyze::detect_communities(
-        &habitat_graph_analyze::trusted_subgraph(&graph),
-    );
+    graph.communities =
+        habitat_graph_analyze::detect_communities(&habitat_graph_analyze::trusted_subgraph(&graph));
     let graph = graph.sorted();
 
     let n = graph.nodes.len();
@@ -142,26 +141,20 @@ pub fn try_rebuild_locked(dir: &Path, out: &Path) -> Result<usize> {
 /// Returns an empty `Vec` on any parse failure (I/O, malformed JSON, missing fields) so the
 /// watch loop can keep running without a hard error.
 #[cfg(all(feature = "watch", feature = "live-bridges"))]
-fn extract_arcs_from_out(
-    out: &Path,
-) -> Vec<habitat_graph_habitat::arc_graph::Arc> {
+fn extract_arcs_from_out(out: &Path) -> Vec<habitat_graph_habitat::arc_graph::Arc> {
     use std::collections::{HashMap, HashSet};
 
     let json = match std::fs::read_to_string(out.join(GRAPH_JSON)) {
         Ok(s) => s,
         Err(e) => {
-            eprintln!(
-                "[habitat-graph] arc-delta: failed to read graph.json: {e}"
-            );
+            eprintln!("[habitat-graph] arc-delta: failed to read graph.json: {e}");
             return Vec::new();
         }
     };
     let v: serde_json::Value = match serde_json::from_str(&json) {
         Ok(v) => v,
         Err(e) => {
-            eprintln!(
-                "[habitat-graph] arc-delta: graph.json is not valid JSON: {e}"
-            );
+            eprintln!("[habitat-graph] arc-delta: graph.json is not valid JSON: {e}");
             return Vec::new();
         }
     };
@@ -180,11 +173,10 @@ fn extract_arcs_from_out(
         .collect();
 
     // Materialise the default relation filter once.
-    let arc_relations: HashSet<&str> =
-        habitat_graph_habitat::arc_graph::default_arc_relations()
-            .iter()
-            .copied()
-            .collect();
+    let arc_relations: HashSet<&str> = habitat_graph_habitat::arc_graph::default_arc_relations()
+        .iter()
+        .copied()
+        .collect();
 
     let Some(links) = v.get("links").and_then(serde_json::Value::as_array) else {
         return Vec::new();
@@ -259,9 +251,7 @@ fn push_arc_delta(
     };
 
     if let Err(e) = pusher.push_delta(&delta) {
-        eprintln!(
-            "[habitat-graph] arc-delta: push_delta serialisation error (non-fatal): {e}"
-        );
+        eprintln!("[habitat-graph] arc-delta: push_delta serialisation error (non-fatal): {e}");
     }
 }
 
@@ -326,7 +316,10 @@ fn run_with_notify(dir: &Path, out: &Path) -> u8 {
     };
 
     if let Err(e) = watcher.watch(dir, RecursiveMode::Recursive) {
-        eprintln!("habitat-graph watch: failed to watch {}: {e}", dir.display());
+        eprintln!(
+            "habitat-graph watch: failed to watch {}: {e}",
+            dir.display()
+        );
         return 1;
     }
 
@@ -552,7 +545,10 @@ mod tests {
         mk(&src, "lib.rs", "fn f() {}");
         rebuild(&src, &out).expect("rebuild");
         let text = read_graph_json(&out);
-        assert!(text.contains("\"nodes\""), "graph.json must have 'nodes' key");
+        assert!(
+            text.contains("\"nodes\""),
+            "graph.json must have 'nodes' key"
+        );
     }
 
     #[test]
@@ -562,7 +558,10 @@ mod tests {
         mk(&src, "lib.rs", "fn f() {}");
         rebuild(&src, &out).expect("rebuild");
         let text = read_graph_json(&out);
-        assert!(text.contains("\"links\""), "graph.json must have 'links' key");
+        assert!(
+            text.contains("\"links\""),
+            "graph.json must have 'links' key"
+        );
     }
 
     // ── rebuild: after source changes ─────────────────────────────────────────
@@ -637,7 +636,10 @@ mod tests {
 
         let j1 = fs::read(out1.join("graph.json")).expect("j1");
         let j2 = fs::read(out2.join("graph.json")).expect("j2");
-        assert_eq!(j1, j2, "two full rebuilds must produce byte-identical output");
+        assert_eq!(
+            j1, j2,
+            "two full rebuilds must produce byte-identical output"
+        );
     }
 
     #[test]
@@ -649,7 +651,10 @@ mod tests {
         let first = fs::read(out.join("graph.json")).expect("read");
         rebuild(&src, &out).expect("second");
         let second = fs::read(out.join("graph.json")).expect("read");
-        assert_eq!(first, second, "repeated rebuild on unchanged source must be byte-identical");
+        assert_eq!(
+            first, second,
+            "repeated rebuild on unchanged source must be byte-identical"
+        );
     }
 
     // ── rebuild: error handling ───────────────────────────────────────────────
@@ -658,7 +663,10 @@ mod tests {
     fn rebuild_nonexistent_src_returns_error() {
         let phantom = PathBuf::from("/nonexistent_hg_watch_src_xyz");
         let out = tdir();
-        assert!(rebuild(&phantom, &out).is_err(), "nonexistent source must error");
+        assert!(
+            rebuild(&phantom, &out).is_err(),
+            "nonexistent source must error"
+        );
     }
 
     // ── try_rebuild_locked / do_try_rebuild_locked ───────────────────────────
@@ -689,8 +697,8 @@ mod tests {
         // Hold the local lock in the current thread.
         let _guard = local.lock().expect("acquire");
         // try_lock on a mutex already held → WouldBlock → Guard error.
-        let err = super::do_try_rebuild_locked(&local, &src, &out)
-            .expect_err("must fail when locked");
+        let err =
+            super::do_try_rebuild_locked(&local, &src, &out).expect_err("must fail when locked");
         assert!(
             matches!(err, habitat_graph_core::GraphError::Guard(_)),
             "expected Guard error, got {err:?}"
@@ -759,7 +767,10 @@ mod tests {
         let out = tdir();
         mk(&src, "lib.rs", "fn g() {}");
         super::run(&src, &out);
-        assert!(out.join("graph.json").exists(), "graph.json must be created");
+        assert!(
+            out.join("graph.json").exists(),
+            "graph.json must be created"
+        );
     }
 
     // ── rebuild: node-count correctness ───────────────────────────────────────
@@ -835,7 +846,10 @@ mod tests {
         let out = tdir();
         mk(&src, "lib.rs", "fn named_output() {}");
         rebuild(&src, &out).expect("rebuild");
-        assert!(out.join("graph.json").exists(), "output file must be named graph.json");
+        assert!(
+            out.join("graph.json").exists(),
+            "output file must be named graph.json"
+        );
     }
 
     #[test]
@@ -845,7 +859,10 @@ mod tests {
         mk(&src, "lib.rs", "fn utf8_check() {}");
         rebuild(&src, &out).expect("rebuild");
         let bytes = fs::read(out.join("graph.json")).expect("read");
-        assert!(std::str::from_utf8(&bytes).is_ok(), "graph.json must be valid UTF-8");
+        assert!(
+            std::str::from_utf8(&bytes).is_ok(),
+            "graph.json must be valid UTF-8"
+        );
     }
 
     #[test]
@@ -887,7 +904,10 @@ mod tests {
         let nodes = v["nodes"].as_array().expect("nodes array");
         assert!(!nodes.is_empty(), "must have at least one node");
         for node in nodes {
-            assert!(node.get("id").is_some(), "every node must have an 'id' field");
+            assert!(
+                node.get("id").is_some(),
+                "every node must have an 'id' field"
+            );
         }
     }
 
@@ -901,7 +921,10 @@ mod tests {
         let v: serde_json::Value = serde_json::from_str(&text).expect("parse");
         let nodes = v["nodes"].as_array().expect("nodes array");
         for node in nodes {
-            assert!(node.get("label").is_some(), "every node must have a 'label' field");
+            assert!(
+                node.get("label").is_some(),
+                "every node must have a 'label' field"
+            );
         }
     }
 
@@ -942,7 +965,10 @@ mod tests {
         mk(&src, "a/b/c/d/e.rs", "fn very_deep() {}");
         rebuild(&src, &out).expect("rebuild");
         let text = read_graph_json(&out);
-        assert!(text.contains("very_deep"), "deeply nested function must appear in graph");
+        assert!(
+            text.contains("very_deep"),
+            "deeply nested function must appear in graph"
+        );
     }
 
     #[test]
@@ -981,8 +1007,7 @@ mod tests {
     fn try_rebuild_locked_error_variant_is_guard() {
         let local = Mutex::new(());
         let _guard = local.lock().expect("acquire");
-        let err = super::do_try_rebuild_locked(&local, &tdir(), &tdir())
-            .expect_err("must fail");
+        let err = super::do_try_rebuild_locked(&local, &tdir(), &tdir()).expect_err("must fail");
         assert!(
             matches!(err, habitat_graph_core::GraphError::Guard(_)),
             "locked → must be Guard, not Io or Schema"
@@ -993,11 +1018,18 @@ mod tests {
     fn rebuild_multiple_functions_same_file_all_in_graph() {
         let src = tdir();
         let out = tdir();
-        mk(&src, "lib.rs", "fn one() {} fn two() {} fn three() {} fn four() {} fn five() {}");
+        mk(
+            &src,
+            "lib.rs",
+            "fn one() {} fn two() {} fn three() {} fn four() {} fn five() {}",
+        );
         rebuild(&src, &out).expect("rebuild");
         let text = read_graph_json(&out);
         for name in ["one", "two", "three", "four", "five"] {
-            assert!(text.contains(name), "function '{name}' must appear in graph");
+            assert!(
+                text.contains(name),
+                "function '{name}' must appear in graph"
+            );
         }
     }
 
@@ -1012,6 +1044,9 @@ mod tests {
         rebuild(&src, &out).expect("second");
         let text = read_graph_json(&out);
         // The graph must reflect the SECOND state, not the first.
-        assert!(text.contains("second_fn"), "second rebuild must overwrite first");
+        assert!(
+            text.contains("second_fn"),
+            "second rebuild must overwrite first"
+        );
     }
 }

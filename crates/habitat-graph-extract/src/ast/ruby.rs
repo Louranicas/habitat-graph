@@ -317,12 +317,7 @@ fn extract_toplevel_method(
 /// `require_relative` calls with a plain string-literal argument.
 ///
 /// Non-require calls and calls with non-literal arguments are silently ignored.
-fn extract_require(
-    node: &tree_sitter::Node<'_>,
-    source: &[u8],
-    b: &str,
-    result: &mut Extraction,
-) {
+fn extract_require(node: &tree_sitter::Node<'_>, source: &[u8], b: &str, result: &mut Extraction) {
     // `method` field must be a plain identifier named "require" or "require_relative".
     let Some(method_node) = node.child_by_field_name("method") else {
         return;
@@ -713,8 +708,14 @@ mod tests {
             "end\n"
         );
         let ex = extract(src, "config.rb");
-        assert!(has_node(&ex, "config_config_initialize"), "initialize missing");
-        assert!(has_node(&ex, "config_config_load"), "singleton load missing");
+        assert!(
+            has_node(&ex, "config_config_initialize"),
+            "initialize missing"
+        );
+        assert!(
+            has_node(&ex, "config_config_load"),
+            "singleton load missing"
+        );
         let method_edges: Vec<_> = ex.edges.iter().filter(|e| e.relation == "method").collect();
         assert_eq!(method_edges.len(), 2, "expected 2 method edges");
     }
@@ -823,7 +824,11 @@ mod tests {
     fn inherits_edge_source_is_base_target_is_derived() {
         let src = "class Child < Parent\nend\n";
         let ex = extract(src, "child.rb");
-        let inh: Vec<_> = ex.edges.iter().filter(|e| e.relation == "inherits").collect();
+        let inh: Vec<_> = ex
+            .edges
+            .iter()
+            .filter(|e| e.relation == "inherits")
+            .collect();
         assert_eq!(inh.len(), 1, "expected 1 inherits edge");
         assert_eq!(inh[0].source, "parent", "source must be base");
         assert_eq!(inh[0].target, "child_child", "target must be derived");
@@ -891,7 +896,11 @@ mod tests {
 
     #[test]
     fn multiple_requires_all_emitted() {
-        let src = concat!("require 'rails'\n", "require 'json'\n", "require 'logger'\n");
+        let src = concat!(
+            "require 'rails'\n",
+            "require 'json'\n",
+            "require 'logger'\n"
+        );
         let ex = extract(src, "app.rb");
         assert!(has_edge(&ex, "app", "rails", "imports_from"), "rails");
         assert!(has_edge(&ex, "app", "json", "imports_from"), "json");
@@ -921,7 +930,10 @@ mod tests {
     fn toplevel_method_emits_node_and_contains_edge() {
         let src = "def greet\nend\n";
         let ex = extract(src, "greet.rb");
-        assert!(has_node(&ex, "greet_greet"), "standalone method node missing");
+        assert!(
+            has_node(&ex, "greet_greet"),
+            "standalone method node missing"
+        );
         assert!(
             has_edge(&ex, "greet", "greet_greet", "contains"),
             "contains edge for standalone method missing"
@@ -1048,7 +1060,10 @@ mod tests {
         let src = "class Dog\ndef bark\nend\nend\n";
         let ex = extract(src, "dog.rb");
         let n = node(&ex, "dog_dog");
-        assert!(n.span.is_well_formed(), "class span must be well-formed: {n:?}");
+        assert!(
+            n.span.is_well_formed(),
+            "class span must be well-formed: {n:?}"
+        );
     }
 
     #[test]
@@ -1087,7 +1102,11 @@ mod tests {
             "def fn1\nend\n"
         );
         let ex = extract(src, "totals.rb");
-        let contains: Vec<_> = ex.edges.iter().filter(|e| e.relation == "contains").collect();
+        let contains: Vec<_> = ex
+            .edges
+            .iter()
+            .filter(|e| e.relation == "contains")
+            .collect();
         // A, B, M, fn1 = 4 contains edges
         assert_eq!(
             contains.len(),

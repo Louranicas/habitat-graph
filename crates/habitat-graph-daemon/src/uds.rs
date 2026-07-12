@@ -42,8 +42,7 @@ pub const MAX_CONNECTIONS: usize = 256;
 /// The JSON-RPC parse-error response sent when an incoming line exceeds [`MAX_LINE_BYTES`].
 ///
 /// A static literal avoids a runtime allocation in the error path.
-const LINE_TOO_LONG_RESPONSE: &str =
-    r#"{"jsonrpc":"2.0","id":null,"error":{"code":-32700,"message":"line exceeded maximum length"}}"#;
+const LINE_TOO_LONG_RESPONSE: &str = r#"{"jsonrpc":"2.0","id":null,"error":{"code":-32700,"message":"line exceeded maximum length"}}"#;
 
 // ── WarmState ─────────────────────────────────────────────────────────────────
 
@@ -196,7 +195,9 @@ async fn handle_conn(stream: tokio::net::UnixStream, state: Arc<WarmState>) -> i
             }
             Err(e) if e.kind() == io::ErrorKind::InvalidData => {
                 // Over-long line: send parse-error then close the connection.
-                let _ = write_half.write_all(LINE_TOO_LONG_RESPONSE.as_bytes()).await;
+                let _ = write_half
+                    .write_all(LINE_TOO_LONG_RESPONSE.as_bytes())
+                    .await;
                 let _ = write_half.write_all(b"\n").await;
                 break;
             }
@@ -622,7 +623,8 @@ mod tests {
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn socket_initialize_round_trip() {
         let (path, _st) = start_test_server(graph_with(&[(1, "hello")])).await;
-        let resp = request_response(&path, r#"{"jsonrpc":"2.0","id":1,"method":"initialize"}"#).await;
+        let resp =
+            request_response(&path, r#"{"jsonrpc":"2.0","id":1,"method":"initialize"}"#).await;
         let v: Value = serde_json::from_str(&resp).unwrap();
         assert!(v["result"]["protocolVersion"].is_string(), "{resp}");
         assert_eq!(v["id"], 1);
@@ -633,7 +635,8 @@ mod tests {
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn socket_tools_list_round_trip() {
         let (path, _st) = start_test_server(graph_with(&[(1, "x")])).await;
-        let resp = request_response(&path, r#"{"jsonrpc":"2.0","id":2,"method":"tools/list"}"#).await;
+        let resp =
+            request_response(&path, r#"{"jsonrpc":"2.0","id":2,"method":"tools/list"}"#).await;
         let v: Value = serde_json::from_str(&resp).unwrap();
         assert!(v["result"]["tools"].as_array().is_some(), "{resp}");
         let _ = std::fs::remove_file(&path);
@@ -729,11 +732,9 @@ mod tests {
     async fn socket_notification_no_response() {
         let (path, _st) = start_test_server(graph_with(&[(1, "x")])).await;
         let mut conn = UnixStream::connect(&path).await.unwrap();
-        conn.write_all(
-            b"{\"jsonrpc\":\"2.0\",\"method\":\"notifications/initialized\"}\n",
-        )
-        .await
-        .unwrap();
+        conn.write_all(b"{\"jsonrpc\":\"2.0\",\"method\":\"notifications/initialized\"}\n")
+            .await
+            .unwrap();
         conn.write_all(b"{\"jsonrpc\":\"2.0\",\"id\":99,\"method\":\"initialize\"}\n")
             .await
             .unwrap();
@@ -784,8 +785,11 @@ mod tests {
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn socket_resources_list_round_trip() {
         let (path, _st) = start_test_server(graph_with(&[(1, "x")])).await;
-        let resp =
-            request_response(&path, r#"{"jsonrpc":"2.0","id":1,"method":"resources/list"}"#).await;
+        let resp = request_response(
+            &path,
+            r#"{"jsonrpc":"2.0","id":1,"method":"resources/list"}"#,
+        )
+        .await;
         assert!(resp.contains("habitat-graph://"), "{resp}");
         let _ = std::fs::remove_file(&path);
     }
@@ -864,7 +868,8 @@ mod tests {
         // Use wait_for_server: it probes via actual connection, so we know the NEW listener
         // is active, not merely that the stale file still exists on disk.
         wait_for_server(&path).await;
-        let resp = request_response(&path, r#"{"jsonrpc":"2.0","id":1,"method":"initialize"}"#).await;
+        let resp =
+            request_response(&path, r#"{"jsonrpc":"2.0","id":1,"method":"initialize"}"#).await;
         let v: Value = serde_json::from_str(&resp).unwrap();
         assert!(v["result"]["protocolVersion"].is_string(), "{resp}");
         let _ = std::fs::remove_file(&path);
@@ -902,9 +907,11 @@ mod tests {
     async fn socket_large_valid_request_accepted() {
         let (path, _st) = start_test_server(graph_with(&[(1, "LargeReq")])).await;
         let pad = "P".repeat(64_000);
-        let req =
-            format!(r#"{{"jsonrpc":"2.0","id":55,"method":"initialize","_pad":"{pad}"}}"#);
-        assert!(req.len() < MAX_LINE_BYTES, "test request must be under the cap");
+        let req = format!(r#"{{"jsonrpc":"2.0","id":55,"method":"initialize","_pad":"{pad}"}}"#);
+        assert!(
+            req.len() < MAX_LINE_BYTES,
+            "test request must be under the cap"
+        );
         let resp_str = request_response(&path, &req).await;
         let v: Value = serde_json::from_str(&resp_str).unwrap();
         assert_eq!(v["id"], 55, "{resp_str}");
@@ -916,8 +923,11 @@ mod tests {
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn socket_unknown_method_error_response() {
         let (path, _st) = start_test_server(graph_with(&[(1, "x")])).await;
-        let resp =
-            request_response(&path, r#"{"jsonrpc":"2.0","id":1,"method":"no_such_method"}"#).await;
+        let resp = request_response(
+            &path,
+            r#"{"jsonrpc":"2.0","id":1,"method":"no_such_method"}"#,
+        )
+        .await;
         let v: Value = serde_json::from_str(&resp).unwrap();
         assert_eq!(v["error"]["code"], -32601, "{resp}");
         let _ = std::fs::remove_file(&path);
@@ -972,7 +982,8 @@ mod tests {
             // Abrupt drop — partial frame.
         }
         tokio::task::yield_now().await;
-        let resp = request_response(&path, r#"{"jsonrpc":"2.0","id":1,"method":"initialize"}"#).await;
+        let resp =
+            request_response(&path, r#"{"jsonrpc":"2.0","id":1,"method":"initialize"}"#).await;
         let v: Value = serde_json::from_str(&resp).unwrap();
         assert!(v["result"]["protocolVersion"].is_string(), "{resp}");
         let _ = std::fs::remove_file(&path);
@@ -983,7 +994,11 @@ mod tests {
     async fn socket_many_sequential_requests() {
         let (path, _st) = start_test_server(graph_with(&[(1, "x"), (2, "y"), (3, "z")])).await;
         for i in 0_u32..20 {
-            let method = if i % 3 == 0 { "initialize" } else { "tools/list" };
+            let method = if i % 3 == 0 {
+                "initialize"
+            } else {
+                "tools/list"
+            };
             let req = format!(r#"{{"jsonrpc":"2.0","id":{i},"method":"{method}"}}"#);
             let resp = request_response(&path, &req).await;
             let v: Value = serde_json::from_str(&resp).unwrap();

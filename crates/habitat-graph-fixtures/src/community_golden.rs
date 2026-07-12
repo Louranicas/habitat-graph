@@ -15,8 +15,8 @@ use habitat_graph_core::{GraphError, Result};
 /// Returns [`GraphError::Schema`] if the JSON is syntactically invalid or the `"nodes"` array
 /// is absent.
 pub fn communities_from_golden(json: &str) -> Result<BTreeMap<u32, BTreeSet<String>>> {
-    let root: serde_json::Value = serde_json::from_str(json)
-        .map_err(|e| GraphError::Schema(format!("invalid JSON: {e}")))?;
+    let root: serde_json::Value =
+        serde_json::from_str(json).map_err(|e| GraphError::Schema(format!("invalid JSON: {e}")))?;
 
     let nodes_arr = root
         .get("nodes")
@@ -117,7 +117,11 @@ mod tests {
     fn httpx_golden_largest_community_has_multiple_nodes() {
         let json = load_httpx_golden();
         let map = communities_from_golden(&json).expect("parse httpx golden");
-        let max_size = map.values().map(std::collections::BTreeSet::len).max().unwrap_or(0);
+        let max_size = map
+            .values()
+            .map(std::collections::BTreeSet::len)
+            .max()
+            .unwrap_or(0);
         assert!(
             max_size >= 4,
             "largest golden community must have >= 4 members; got {max_size}"

@@ -47,9 +47,11 @@ fn js_structural_parity() {
     let dir = js_dir();
 
     // Our extraction: detect → extract → assemble → normalize.
-    let files =
-        habitat_graph_source::detect(&dir.join("raw"), &["js"]).expect("detect .js files");
-    assert!(!files.is_empty(), "must find at least one JS file under goldens/js/raw");
+    let files = habitat_graph_source::detect(&dir.join("raw"), &["js"]).expect("detect .js files");
+    assert!(
+        !files.is_empty(),
+        "must find at least one JS file under goldens/js/raw"
+    );
 
     let extractions = habitat_graph_extract::extract_files(&files).expect("extract");
     let graph = habitat_graph_build::assemble(extractions);
@@ -254,7 +256,10 @@ fn js_golden_has_contains_edge_file_to_animal() {
         "sample_animal".to_owned(),
         "contains".to_owned(),
     );
-    assert!(g.edges.contains(&edge), "golden must have contains edge (sample, sample_animal)");
+    assert!(
+        g.edges.contains(&edge),
+        "golden must have contains edge (sample, sample_animal)"
+    );
 }
 
 #[test]
@@ -267,7 +272,10 @@ fn js_golden_has_method_edge_dog_to_speak() {
         "sample_dog_speak".to_owned(),
         "method".to_owned(),
     );
-    assert!(g.edges.contains(&edge), "golden must have method edge (sample_dog, sample_dog_speak)");
+    assert!(
+        g.edges.contains(&edge),
+        "golden must have method edge (sample_dog, sample_dog_speak)"
+    );
 }
 
 #[test]
@@ -332,8 +340,7 @@ fn js_golden_has_no_calls_or_uses_or_imports_from_edges() {
 #[test]
 fn our_extraction_finds_twenty_nodes() {
     let dir = js_dir();
-    let files =
-        habitat_graph_source::detect(&dir.join("raw"), &["js"]).expect("detect");
+    let files = habitat_graph_source::detect(&dir.join("raw"), &["js"]).expect("detect");
     let extractions = habitat_graph_extract::extract_files(&files).expect("extract");
     let graph = habitat_graph_build::assemble(extractions);
     let ours = from_core(&graph);
@@ -348,8 +355,7 @@ fn our_extraction_finds_twenty_nodes() {
 #[test]
 fn our_extraction_finds_private_method_validate() {
     let dir = js_dir();
-    let files =
-        habitat_graph_source::detect(&dir.join("raw"), &["js"]).expect("detect");
+    let files = habitat_graph_source::detect(&dir.join("raw"), &["js"]).expect("detect");
     let extractions = habitat_graph_extract::extract_files(&files).expect("extract");
     let graph = habitat_graph_build::assemble(extractions);
     let ours = from_core(&graph);
@@ -362,8 +368,7 @@ fn our_extraction_finds_private_method_validate() {
 #[test]
 fn our_extraction_finds_static_method_create() {
     let dir = js_dir();
-    let files =
-        habitat_graph_source::detect(&dir.join("raw"), &["js"]).expect("detect");
+    let files = habitat_graph_source::detect(&dir.join("raw"), &["js"]).expect("detect");
     let extractions = habitat_graph_extract::extract_files(&files).expect("extract");
     let graph = habitat_graph_build::assemble(extractions);
     let ours = from_core(&graph);
@@ -376,8 +381,7 @@ fn our_extraction_finds_static_method_create() {
 #[test]
 fn our_extraction_finds_local_inherits_edge() {
     let dir = js_dir();
-    let files =
-        habitat_graph_source::detect(&dir.join("raw"), &["js"]).expect("detect");
+    let files = habitat_graph_source::detect(&dir.join("raw"), &["js"]).expect("detect");
     let extractions = habitat_graph_extract::extract_files(&files).expect("extract");
     let graph = habitat_graph_build::assemble(extractions);
     let ours = from_core(&graph);
@@ -397,8 +401,7 @@ fn our_extraction_drops_external_inherits_edge() {
     // EventEmitter is not a node in the graph → the inherits edge is a dangling edge and
     // must be dropped by assemble (documented policy).
     let dir = js_dir();
-    let files =
-        habitat_graph_source::detect(&dir.join("raw"), &["js"]).expect("detect");
+    let files = habitat_graph_source::detect(&dir.join("raw"), &["js"]).expect("detect");
     let extractions = habitat_graph_extract::extract_files(&files).expect("extract");
     let graph = habitat_graph_build::assemble(extractions);
     let ours = from_core(&graph);
@@ -419,8 +422,7 @@ fn our_extraction_drops_external_inherits_edge() {
 #[test]
 fn our_extraction_emits_no_calls_or_uses_edges() {
     let dir = js_dir();
-    let files =
-        habitat_graph_source::detect(&dir.join("raw"), &["js"]).expect("detect");
+    let files = habitat_graph_source::detect(&dir.join("raw"), &["js"]).expect("detect");
     let extractions = habitat_graph_extract::extract_files(&files).expect("extract");
     let graph = habitat_graph_build::assemble(extractions);
     let ours = from_core(&graph);
@@ -434,10 +436,7 @@ fn our_extraction_emits_no_calls_or_uses_edges() {
 fn js_golden_parses_without_error() {
     let dir = js_dir();
     let json = std::fs::read_to_string(dir.join("graph.json")).expect("read golden");
-    assert!(
-        from_golden(&json).is_ok(),
-        "js golden must parse cleanly"
-    );
+    assert!(from_golden(&json).is_ok(), "js golden must parse cleanly");
 }
 
 #[test]

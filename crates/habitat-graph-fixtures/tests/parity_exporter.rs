@@ -26,8 +26,7 @@ fn httpx_exporter_round_trip_parity() {
     let dir = httpx_dir();
 
     // D4 step 1: extract pipeline (mirrors D2's parity_httpx test).
-    let files =
-        habitat_graph_source::detect(&dir.join("raw"), &["py"]).expect("detect py files");
+    let files = habitat_graph_source::detect(&dir.join("raw"), &["py"]).expect("detect py files");
     let extractions = habitat_graph_extract::extract_files(&files).expect("extract");
     let graph = habitat_graph_build::assemble(extractions);
 
@@ -45,8 +44,7 @@ fn httpx_exporter_round_trip_parity() {
 
     // D4 step 4: normalise the round-tripped graph and compare against the golden.
     let ours = from_core(&round_tripped);
-    let golden_json =
-        std::fs::read_to_string(dir.join("graph.json")).expect("read httpx golden");
+    let golden_json = std::fs::read_to_string(dir.join("graph.json")).expect("read httpx golden");
     let golden = from_golden(&golden_json).expect("parse golden");
 
     let report = classify(&ours, &golden);

@@ -92,7 +92,7 @@ pub fn diff_reports(before: &SeveredEarReport, after: &SeveredEarReport) -> ArcD
 mod tests {
     use crate::arc_graph::{Arc, SeveredEarReport};
 
-    use super::{ArcDelta, diff_reports};
+    use super::{diff_reports, ArcDelta};
 
     // ── Helpers ───────────────────────────────────────────────────────────────
 
@@ -133,10 +133,7 @@ mod tests {
 
     /// Assert two `f64` values agree to within a generous floating-point tolerance.
     fn assert_close(a: f64, b: f64) {
-        assert!(
-            (a - b).abs() < 1e-12,
-            "expected {b:.15}, got {a:.15}"
-        );
+        assert!((a - b).abs() < 1e-12, "expected {b:.15}, got {a:.15}");
     }
 
     // ── ArcDelta struct ───────────────────────────────────────────────────────
@@ -484,8 +481,8 @@ mod tests {
     fn coherence_delta_exact_partial_drop() {
         let a = arc("a", "b");
         let x = arc("x", "y");
-        let before = report(&[a.clone(), x.clone()], &[]);   // coherence = 1.0
-        let after = report(std::slice::from_ref(&a), std::slice::from_ref(&x));  // coherence = 0.5
+        let before = report(&[a.clone(), x.clone()], &[]); // coherence = 1.0
+        let after = report(std::slice::from_ref(&a), std::slice::from_ref(&x)); // coherence = 0.5
         let d = diff_reports(&before, &after);
         assert_close(d.coherence_delta, -0.5);
     }

@@ -62,7 +62,9 @@ pub fn install(repo: &Path) -> u8 {
             println!(
                 "  git config merge.habitat-graph.name 'habitat-graph deterministic graph.json merge'"
             );
-            println!("  git config merge.habitat-graph.driver 'habitat-graph merge-driver %O %A %B'");
+            println!(
+                "  git config merge.habitat-graph.driver 'habitat-graph merge-driver %O %A %B'"
+            );
             0
         }
         Err(e) => {
@@ -168,7 +170,11 @@ mod tests {
     }
 
     fn labels_in(path: &Path) -> BTreeSet<String> {
-        load_graph(path).nodes.iter().map(|n| n.label.clone()).collect()
+        load_graph(path)
+            .nodes
+            .iter()
+            .map(|n| n.label.clone())
+            .collect()
     }
 
     /// Writes base/ours/theirs from label lists, runs the driver, returns (exit, merged-labels).
@@ -369,7 +375,11 @@ mod tests {
         write_labels(&t.ours, &["m", "a", "z"]);
         write_labels(&t.theirs, &["q", "b"]);
         assert_eq!(run_merge_driver(&t.base, &t.ours, &t.theirs), 0);
-        let ids: Vec<u32> = load_graph(&t.ours).nodes.iter().map(|n| n.id.get()).collect();
+        let ids: Vec<u32> = load_graph(&t.ours)
+            .nodes
+            .iter()
+            .map(|n| n.id.get())
+            .collect();
         let mut sorted = ids.clone();
         sorted.sort_unstable();
         assert_eq!(ids, sorted, "R4: nodes sorted by id");
@@ -403,7 +413,10 @@ mod tests {
         write_g(&t.ours, &graph_with_edge());
         write_g(&t.theirs, &Graph::new());
         assert_eq!(run_merge_driver(&t.base, &t.ours, &t.theirs), 0);
-        assert!(load_graph(&t.ours).edges.iter().any(|e| e.relation == "calls"));
+        assert!(load_graph(&t.ours)
+            .edges
+            .iter()
+            .any(|e| e.relation == "calls"));
     }
 
     #[test]
@@ -413,7 +426,10 @@ mod tests {
         write_g(&t.ours, &graph_with_edge());
         write_g(&t.theirs, &Graph::new());
         assert_eq!(run_merge_driver(&t.base, &t.ours, &t.theirs), 0);
-        assert_eq!(load_graph(&t.ours).edges[0].confidence, Confidence::Extracted);
+        assert_eq!(
+            load_graph(&t.ours).edges[0].confidence,
+            Confidence::Extracted
+        );
     }
 
     #[test]
@@ -450,8 +466,15 @@ mod tests {
         write_g(&t.theirs, &theirs);
         assert_eq!(run_merge_driver(&t.base, &t.ours, &t.theirs), 0);
         let merged = load_graph(&t.ours);
-        let shared = merged.nodes.iter().find(|n| n.label == "S").expect("S present");
-        assert_eq!(shared.source_file, "ours.rs", "ours data wins on shared label");
+        let shared = merged
+            .nodes
+            .iter()
+            .find(|n| n.label == "S")
+            .expect("S present");
+        assert_eq!(
+            shared.source_file, "ours.rs",
+            "ours data wins on shared label"
+        );
     }
 
     // ── Error paths — every one returns exit code 1 ───────────────────────────
@@ -461,7 +484,10 @@ mod tests {
         let t = trio();
         write_labels(&t.ours, &["A"]);
         write_labels(&t.theirs, &["B"]);
-        assert_eq!(run_merge_driver(&t.dir.join("absent.json"), &t.ours, &t.theirs), 1);
+        assert_eq!(
+            run_merge_driver(&t.dir.join("absent.json"), &t.ours, &t.theirs),
+            1
+        );
     }
 
     #[test]
@@ -469,7 +495,10 @@ mod tests {
         let t = trio();
         write_labels(&t.base, &[]);
         write_labels(&t.theirs, &["B"]);
-        assert_eq!(run_merge_driver(&t.base, &t.dir.join("absent.json"), &t.theirs), 1);
+        assert_eq!(
+            run_merge_driver(&t.base, &t.dir.join("absent.json"), &t.theirs),
+            1
+        );
     }
 
     #[test]
@@ -477,7 +506,10 @@ mod tests {
         let t = trio();
         write_labels(&t.base, &[]);
         write_labels(&t.ours, &["A"]);
-        assert_eq!(run_merge_driver(&t.base, &t.ours, &t.dir.join("absent.json")), 1);
+        assert_eq!(
+            run_merge_driver(&t.base, &t.ours, &t.dir.join("absent.json")),
+            1
+        );
     }
 
     #[test]
@@ -581,14 +613,22 @@ mod tests {
     #[test]
     fn install_already_present_returns_false() {
         let dir = tdir();
-        fs::write(dir.join(".gitattributes"), format!("{GITATTRIBUTES_LINE}\n")).expect("seed");
+        fs::write(
+            dir.join(".gitattributes"),
+            format!("{GITATTRIBUTES_LINE}\n"),
+        )
+        .expect("seed");
         assert!(!install_gitattributes(&dir).expect("install"));
     }
 
     #[test]
     fn install_recognizes_line_with_surrounding_whitespace() {
         let dir = tdir();
-        fs::write(dir.join(".gitattributes"), format!("  {GITATTRIBUTES_LINE}  \n")).expect("seed");
+        fs::write(
+            dir.join(".gitattributes"),
+            format!("  {GITATTRIBUTES_LINE}  \n"),
+        )
+        .expect("seed");
         assert!(!install_gitattributes(&dir).expect("install"));
     }
 
@@ -598,9 +638,15 @@ mod tests {
         fs::write(dir.join(".gitattributes"), "*.rs text").expect("seed");
         assert!(install_gitattributes(&dir).expect("install"));
         let ga = fs::read_to_string(dir.join(".gitattributes")).expect("read");
-        assert!(ga.contains("*.rs text"), "must not clobber pre-existing rules");
+        assert!(
+            ga.contains("*.rs text"),
+            "must not clobber pre-existing rules"
+        );
         assert!(ga.contains(GITATTRIBUTES_LINE));
-        assert!(ga.contains("text\ngraph.json"), "newline inserted before new line");
+        assert!(
+            ga.contains("text\ngraph.json"),
+            "newline inserted before new line"
+        );
     }
 
     #[test]
@@ -632,7 +678,11 @@ mod tests {
         .expect("seed");
         assert!(!install_gitattributes(&dir).expect("install"));
         let ga = fs::read_to_string(dir.join(".gitattributes")).expect("read");
-        assert_eq!(ga.matches(GITATTRIBUTES_LINE).count(), 1, "no duplicate line");
+        assert_eq!(
+            ga.matches(GITATTRIBUTES_LINE).count(),
+            1,
+            "no duplicate line"
+        );
     }
 
     #[test]

@@ -140,10 +140,7 @@ fn xm1_initialize_tools_list_round_trip() {
     );
 
     // Collect names dynamically — a cross-model client must do this, never hard-code.
-    let names: Vec<&str> = tools
-        .iter()
-        .filter_map(|t| t["name"].as_str())
-        .collect();
+    let names: Vec<&str> = tools.iter().filter_map(|t| t["name"].as_str()).collect();
     assert!(
         names.contains(&"graph_query"),
         "graph_query must appear in tools/list; got: {names:?}"
@@ -197,7 +194,10 @@ fn xm2_graph_query_typed_response_format() {
         .as_array()
         .expect("result.content must be an array");
     assert!(!content.is_empty(), "result.content must not be empty");
-    assert_eq!(content[0]["type"], "text", "content item type must be 'text'");
+    assert_eq!(
+        content[0]["type"], "text",
+        "content item type must be 'text'"
+    );
     assert!(
         content[0]["text"].is_string(),
         "content item text must be a string"
@@ -286,10 +286,7 @@ fn xm3_mcp_tools_to_openai_functions_translation() {
     let path_req = path_fn["function"]["parameters"]["required"]
         .as_array()
         .expect("graph_path must have a required array");
-    let path_req_strs: Vec<&str> = path_req
-        .iter()
-        .filter_map(Value::as_str)
-        .collect();
+    let path_req_strs: Vec<&str> = path_req.iter().filter_map(Value::as_str).collect();
     assert!(
         path_req_strs.contains(&"from") && path_req_strs.contains(&"to"),
         "graph_path function spec must require 'from' and 'to'; got: {path_req_strs:?}"
@@ -314,10 +311,8 @@ fn xm3_mcp_tools_to_openai_functions_translation() {
 #[test]
 fn xm4_openai_function_call_to_mcp_translation() {
     // Object arguments pass through directly.
-    let params = openai_function_call_to_mcp(
-        "graph_query",
-        &json!({"query": "Alpha", "max_tokens": 500}),
-    );
+    let params =
+        openai_function_call_to_mcp("graph_query", &json!({"query": "Alpha", "max_tokens": 500}));
     assert_eq!(params["name"], "graph_query");
     assert_eq!(params["arguments"]["query"], "Alpha");
     assert_eq!(params["arguments"]["max_tokens"], 500);
@@ -478,7 +473,10 @@ fn xm6_generation_id_changes_on_mutation() {
 
     // Empty graph has a stable id different from the sample graph.
     let gen_empty = generation_id(&Graph::new());
-    assert_ne!(gen_empty, gen1, "empty graph must have a different id from non-empty");
+    assert_ne!(
+        gen_empty, gen1,
+        "empty graph must have a different id from non-empty"
+    );
     assert_eq!(
         generation_id(&Graph::new()),
         gen_empty,

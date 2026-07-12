@@ -167,7 +167,8 @@ fn parse_link_at(s: &str) -> Option<(usize, String)> {
 /// an optional title attribute, fragment, and query string, it must end with `.md` or `.markdown`.
 fn is_relative_md_link(url: &str) -> bool {
     let trimmed = url.trim();
-    if trimmed.starts_with("http://") || trimmed.starts_with("https://") || trimmed.starts_with('#') {
+    if trimmed.starts_with("http://") || trimmed.starts_with("https://") || trimmed.starts_with('#')
+    {
         return false;
     }
     // Strip optional title attribute (space-separated after the URL).
@@ -431,7 +432,10 @@ mod tests {
         // `.markdown` extension must behave identically to `.md`.
         let ex = extract("# Hello\n", "guide.markdown");
         assert!(has_node(&ex, "guide"), "file node missing");
-        assert!(has_node(&ex, "guide_hello"), "heading node missing for .markdown extension");
+        assert!(
+            has_node(&ex, "guide_hello"),
+            "heading node missing for .markdown extension"
+        );
     }
 
     // ── Group 2: ATX heading levels ───────────────────────────────────────────────────────────
@@ -480,7 +484,11 @@ mod tests {
     fn seven_hashes_not_parsed_as_heading() {
         // ATX headings are only valid for 1–6 `#` characters.
         let ex = extract("####### NotAHeading\n", "doc.md");
-        assert_eq!(ex.nodes.len(), 1, "7 hashes must not produce a heading node");
+        assert_eq!(
+            ex.nodes.len(),
+            1,
+            "7 hashes must not produce a heading node"
+        );
         assert_eq!(ex.edges.len(), 0);
     }
 
@@ -488,7 +496,11 @@ mod tests {
     fn hash_without_space_not_parsed_as_heading() {
         // `#NoSpace` lacks the required space after `#` — not an ATX heading.
         let ex = extract("#NoSpace\n", "doc.md");
-        assert_eq!(ex.nodes.len(), 1, "#NoSpace must not produce a heading node");
+        assert_eq!(
+            ex.nodes.len(),
+            1,
+            "#NoSpace must not produce a heading node"
+        );
     }
 
     // ── Group 3: Slug computation ──────────────────────────────────────────────────────────────
@@ -592,7 +604,11 @@ mod tests {
         assert!(has_node(&ex, "doc_c"), "heading C missing");
         // 1 file node + 3 heading nodes = 4 nodes; 3 contains edges.
         assert_eq!(ex.nodes.len(), 4, "expected 4 nodes total");
-        assert_eq!(count_relation(&ex, "contains"), 3, "expected 3 contains edges");
+        assert_eq!(
+            count_relation(&ex, "contains"),
+            3,
+            "expected 3 contains edges"
+        );
     }
 
     // ── Group 4: Fenced code blocks ────────────────────────────────────────────────────────────
@@ -601,7 +617,11 @@ mod tests {
     fn heading_inside_backtick_fence_not_parsed() {
         let src = "```\n# Not a heading\n```\n";
         let ex = extract(src, "doc.md");
-        assert_eq!(ex.nodes.len(), 1, "heading inside ``` fence must not be emitted");
+        assert_eq!(
+            ex.nodes.len(),
+            1,
+            "heading inside ``` fence must not be emitted"
+        );
         assert_eq!(ex.edges.len(), 0);
     }
 
@@ -609,7 +629,10 @@ mod tests {
     fn heading_outside_fence_parsed_heading_inside_not() {
         let src = "# Real Heading\n```\n# Inside Fence\n```\n";
         let ex = extract(src, "doc.md");
-        assert!(has_node(&ex, "doc_real_heading"), "real heading must be parsed");
+        assert!(
+            has_node(&ex, "doc_real_heading"),
+            "real heading must be parsed"
+        );
         assert!(
             !has_node(&ex, "doc_inside_fence"),
             "heading inside fence must NOT be parsed"
@@ -621,16 +644,29 @@ mod tests {
     fn heading_inside_tilde_fence_not_parsed() {
         let src = "~~~\n# Not a heading\n~~~\n";
         let ex = extract(src, "doc.md");
-        assert_eq!(ex.nodes.len(), 1, "heading inside ~~~ fence must not be emitted");
+        assert_eq!(
+            ex.nodes.len(),
+            1,
+            "heading inside ~~~ fence must not be emitted"
+        );
     }
 
     #[test]
     fn two_fences_with_heading_between_them_parsed() {
         let src = "```\n# skip\n```\n# Visible\n```\n# skip2\n```\n";
         let ex = extract(src, "doc.md");
-        assert!(has_node(&ex, "doc_visible"), "heading between fences must be parsed");
-        assert!(!has_node(&ex, "doc_skip"), "heading in first fence must be skipped");
-        assert!(!has_node(&ex, "doc_skip2"), "heading in second fence must be skipped");
+        assert!(
+            has_node(&ex, "doc_visible"),
+            "heading between fences must be parsed"
+        );
+        assert!(
+            !has_node(&ex, "doc_skip"),
+            "heading in first fence must be skipped"
+        );
+        assert!(
+            !has_node(&ex, "doc_skip2"),
+            "heading in second fence must be skipped"
+        );
     }
 
     #[test]
@@ -638,16 +674,29 @@ mod tests {
         // A ``` line inside a ~~~ fence must NOT close it.
         let src = "~~~\n# skip\n```\n# still inside\n~~~\n# visible\n";
         let ex = extract(src, "doc.md");
-        assert!(has_node(&ex, "doc_visible"), "heading after closed ~~~ fence must be parsed");
-        assert!(!has_node(&ex, "doc_skip"), "heading inside ~~~ fence must be skipped");
-        assert!(!has_node(&ex, "doc_still_inside"), "``` does not close ~~~ fence");
+        assert!(
+            has_node(&ex, "doc_visible"),
+            "heading after closed ~~~ fence must be parsed"
+        );
+        assert!(
+            !has_node(&ex, "doc_skip"),
+            "heading inside ~~~ fence must be skipped"
+        );
+        assert!(
+            !has_node(&ex, "doc_still_inside"),
+            "``` does not close ~~~ fence"
+        );
     }
 
     #[test]
     fn link_inside_fenced_block_not_emitted() {
         let src = "```\n[guide](guide.md)\n```\n";
         let ex = extract(src, "doc.md");
-        assert_eq!(ex.edges.len(), 0, "link inside fence must not emit a references edge");
+        assert_eq!(
+            ex.edges.len(),
+            0,
+            "link inside fence must not emit a references edge"
+        );
     }
 
     // ── Group 5: Inline links ──────────────────────────────────────────────────────────────────
@@ -681,7 +730,11 @@ mod tests {
     fn https_link_skipped() {
         let ex = extract("[Secure](https://example.com/page.md)\n", "readme.md");
         // Even though the URL ends with `.md`, it's an external link → skip.
-        assert_eq!(ex.edges.len(), 0, "https:// link must be skipped even if ends with .md");
+        assert_eq!(
+            ex.edges.len(),
+            0,
+            "https:// link must be skipped even if ends with .md"
+        );
     }
 
     #[test]
@@ -806,7 +859,10 @@ mod tests {
     fn no_inherits_or_method_edges_ever_emitted() {
         let ex = extract("# A\n[b](b.md)\n", "doc.md");
         for edge in &ex.edges {
-            assert_ne!(edge.relation, "inherits", "inherits edge must never be emitted");
+            assert_ne!(
+                edge.relation, "inherits",
+                "inherits edge must never be emitted"
+            );
             assert_ne!(edge.relation, "method", "method edge must never be emitted");
         }
     }
@@ -847,7 +903,10 @@ mod tests {
     fn heading_node_span_is_well_formed() {
         let ex = extract("# Title\n", "doc.md");
         let n = get_node(&ex, "doc_title");
-        assert!(n.span.is_well_formed(), "heading span must be well-formed: {n:?}");
+        assert!(
+            n.span.is_well_formed(),
+            "heading span must be well-formed: {n:?}"
+        );
         assert!(!n.span.is_empty(), "heading span must not be empty");
     }
 
@@ -855,8 +914,14 @@ mod tests {
     fn heading_on_line_one_has_start_line_one() {
         let ex = extract("# Title\n", "doc.md");
         let n = get_node(&ex, "doc_title");
-        assert_eq!(n.span.start_line, 1, "heading on line 1 must have start_line=1");
-        assert_eq!(n.span.end_line, 1, "single-line heading must have end_line=1");
+        assert_eq!(
+            n.span.start_line, 1,
+            "heading on line 1 must have start_line=1"
+        );
+        assert_eq!(
+            n.span.end_line, 1,
+            "single-line heading must have end_line=1"
+        );
     }
 
     #[test]
@@ -949,8 +1014,16 @@ mod tests {
         let ex = extract(src, "doc.md");
         // 1 file + 2 heading nodes = 3 nodes.
         assert_eq!(ex.nodes.len(), 3, "expected 3 nodes");
-        assert_eq!(count_relation(&ex, "contains"), 2, "expected 2 contains edges");
-        assert_eq!(count_relation(&ex, "references"), 2, "expected 2 references edges");
+        assert_eq!(
+            count_relation(&ex, "contains"),
+            2,
+            "expected 2 contains edges"
+        );
+        assert_eq!(
+            count_relation(&ex, "references"),
+            2,
+            "expected 2 references edges"
+        );
     }
 
     #[test]
@@ -967,16 +1040,28 @@ mod tests {
     fn heading_and_link_on_same_source_coexist() {
         let ex = extract("# Guide\n\n[More](more.md)\n", "doc.md");
         assert!(has_node(&ex, "doc_guide"), "heading node missing");
-        assert!(has_edge(&ex, "doc", "doc_guide", "contains"), "contains edge missing");
-        assert!(has_edge(&ex, "doc", "more", "references"), "references edge missing");
+        assert!(
+            has_edge(&ex, "doc", "doc_guide", "contains"),
+            "contains edge missing"
+        );
+        assert!(
+            has_edge(&ex, "doc", "more", "references"),
+            "references edge missing"
+        );
     }
 
     #[test]
     fn heading_after_fenced_block_parsed_correctly() {
         let src = "# Before\n```python\nx = 1\n```\n# After\n";
         let ex = extract(src, "doc.md");
-        assert!(has_node(&ex, "doc_before"), "heading before fence must be parsed");
-        assert!(has_node(&ex, "doc_after"), "heading after fence must be parsed");
+        assert!(
+            has_node(&ex, "doc_before"),
+            "heading before fence must be parsed"
+        );
+        assert!(
+            has_node(&ex, "doc_after"),
+            "heading after fence must be parsed"
+        );
         assert_eq!(ex.nodes.len(), 3, "expected 3 nodes (file + 2 headings)");
     }
 
@@ -984,7 +1069,11 @@ mod tests {
     fn empty_heading_after_hash_emits_no_node_for_empty_slug() {
         // `# ` (hash + space, no content) → heading text = "" → slug = "" → skip.
         let ex = extract("# \n", "doc.md");
-        assert_eq!(ex.nodes.len(), 1, "heading with empty text must not emit a node");
+        assert_eq!(
+            ex.nodes.len(),
+            1,
+            "heading with empty text must not emit a node"
+        );
     }
 
     #[test]
@@ -1040,7 +1129,10 @@ mod tests {
         // An unclosed ``` fence — everything after it is inside the fence.
         let src = "# Before\n```\n# After\n";
         let ex = extract(src, "doc.md");
-        assert!(has_node(&ex, "doc_before"), "heading before unclosed fence must be parsed");
+        assert!(
+            has_node(&ex, "doc_before"),
+            "heading before unclosed fence must be parsed"
+        );
         assert!(
             !has_node(&ex, "doc_after"),
             "heading inside unclosed fence must be suppressed"

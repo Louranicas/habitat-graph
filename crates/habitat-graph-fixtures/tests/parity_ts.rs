@@ -244,7 +244,10 @@ fn inline_interface_emits_node() {
 fn exported_interface_is_extracted() {
     let src = "export interface Shape { area(): number; }";
     let ex = extract(src, "shapes.ts");
-    assert!(has_node(&ex, "shapes_shape"), "export interface must be extracted");
+    assert!(
+        has_node(&ex, "shapes_shape"),
+        "export interface must be extracted"
+    );
     assert!(
         has_edge(&ex, "shapes", "shapes_shape", "contains"),
         "contains edge expected for exported interface"
@@ -546,7 +549,12 @@ fn trainer_constructor_method_node() {
         "Trainer.constructor → 'sample_trainer_constructor' expected"
     );
     assert!(
-        has_edge(&ex, "sample_trainer", "sample_trainer_constructor", "method"),
+        has_edge(
+            &ex,
+            "sample_trainer",
+            "sample_trainer_constructor",
+            "method"
+        ),
         "method(sample_trainer, sample_trainer_constructor) expected"
     );
 }
@@ -767,11 +775,7 @@ fn all_node_labels_are_unique() {
     let ex = extract_sample();
     let labels: Vec<_> = ex.nodes.iter().map(|n| &n.label).collect();
     let unique: HashSet<_> = labels.iter().collect();
-    assert_eq!(
-        unique.len(),
-        labels.len(),
-        "duplicate node labels detected"
-    );
+    assert_eq!(unique.len(), labels.len(), "duplicate node labels detected");
 }
 
 // ── Group M: Property verification ────────────────────────────────────────────────────────────
@@ -856,7 +860,10 @@ fn inline_class_with_method_extracts() {
     let ex = extract(src, "greet.ts");
     assert!(has_node(&ex, "greet_greeter"), "class node");
     assert!(has_node(&ex, "greet_greeter_greet"), "method node");
-    assert!(has_edge(&ex, "greet", "greet_greeter", "contains"), "contains");
+    assert!(
+        has_edge(&ex, "greet", "greet_greeter", "contains"),
+        "contains"
+    );
     assert!(
         has_edge(&ex, "greet_greeter", "greet_greeter_greet", "method"),
         "method edge"
@@ -889,7 +896,8 @@ fn inline_extends_local_base_uses_qualified_label() {
 /// N-4: `implements` edge is also emitted for local interfaces.
 #[test]
 fn inline_implements_local_interface_inherits_edge() {
-    let src = "interface Runnable { run(): void; } class Task implements Runnable { run(): void {} }";
+    let src =
+        "interface Runnable { run(): void; } class Task implements Runnable { run(): void {} }";
     let ex = extract(src, "task.ts");
     assert!(
         has_edge(&ex, "task_runnable", "task_task", "inherits"),
@@ -926,7 +934,10 @@ fn method_dunder_underscores_stripped() {
 fn tsx_dialect_parses_without_error() {
     let src = "const App = (): JSX.Element => <div>Hello</div>;";
     let ex = extract(src, "app.tsx");
-    assert!(has_node(&ex, "app"), "file node 'app' must be present for tsx");
+    assert!(
+        has_node(&ex, "app"),
+        "file node 'app' must be present for tsx"
+    );
 }
 
 /// N-8: malformed source is tolerated (tree-sitter error recovery).
@@ -934,7 +945,10 @@ fn tsx_dialect_parses_without_error() {
 fn malformed_source_is_tolerated() {
     let src = "!!! INVALID @@@";
     let ex = extract(src, "bad.ts");
-    assert!(has_node(&ex, "bad"), "file node must survive malformed source");
+    assert!(
+        has_node(&ex, "bad"),
+        "file node must survive malformed source"
+    );
 }
 
 /// N-9: `function_expression` const (not arrow fn) is also extracted.
@@ -976,8 +990,7 @@ fn pipeline_detects_ts_file() {
         "{}/../../fixtures/worked/ts/src",
         env!("CARGO_MANIFEST_DIR")
     ));
-    let files =
-        habitat_graph_source::detect(&src_dir, &["ts"]).expect("detect ts files");
+    let files = habitat_graph_source::detect(&src_dir, &["ts"]).expect("detect ts files");
     assert!(
         !files.is_empty(),
         "detect must find at least one .ts file in fixtures/worked/ts/src/"
@@ -991,8 +1004,7 @@ fn pipeline_extract_files_succeeds() {
         "{}/../../fixtures/worked/ts/src",
         env!("CARGO_MANIFEST_DIR")
     ));
-    let files =
-        habitat_graph_source::detect(&src_dir, &["ts"]).expect("detect ts files");
+    let files = habitat_graph_source::detect(&src_dir, &["ts"]).expect("detect ts files");
     let extractions = habitat_graph_extract::extract_files(&files).expect("extract_files");
     assert!(
         !extractions.is_empty(),
@@ -1007,8 +1019,7 @@ fn pipeline_graph_node_count() {
         "{}/../../fixtures/worked/ts/src",
         env!("CARGO_MANIFEST_DIR")
     ));
-    let files =
-        habitat_graph_source::detect(&src_dir, &["ts"]).expect("detect");
+    let files = habitat_graph_source::detect(&src_dir, &["ts"]).expect("detect");
     let extractions = habitat_graph_extract::extract_files(&files).expect("extract_files");
     let graph = habitat_graph_build::assemble(extractions);
     assert_eq!(
@@ -1030,8 +1041,7 @@ fn pipeline_graph_edge_count() {
         "{}/../../fixtures/worked/ts/src",
         env!("CARGO_MANIFEST_DIR")
     ));
-    let files =
-        habitat_graph_source::detect(&src_dir, &["ts"]).expect("detect");
+    let files = habitat_graph_source::detect(&src_dir, &["ts"]).expect("detect");
     let extractions = habitat_graph_extract::extract_files(&files).expect("extract_files");
     let graph = habitat_graph_build::assemble(extractions);
     assert_eq!(
@@ -1049,7 +1059,10 @@ fn extraction_is_deterministic() {
     let ex2 = extract_sample();
     let labels1: Vec<_> = ex1.nodes.iter().map(|n| &n.label).collect();
     let labels2: Vec<_> = ex2.nodes.iter().map(|n| &n.label).collect();
-    assert_eq!(labels1, labels2, "two runs must produce identical node labels");
+    assert_eq!(
+        labels1, labels2,
+        "two runs must produce identical node labels"
+    );
     let edges1: Vec<_> = ex1
         .edges
         .iter()

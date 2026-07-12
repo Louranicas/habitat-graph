@@ -261,9 +261,7 @@ pub fn run(url: &str, out: &Path) -> u8 {
         }
         Err(e) => {
             // Exit code 2 specifically for the "live feature required" guard.
-            let code = if e.kind() == "guard"
-                && e.to_string().contains("--features live")
-            {
+            let code = if e.kind() == "guard" && e.to_string().contains("--features live") {
                 2
             } else {
                 1
@@ -315,8 +313,7 @@ mod tests {
     use habitat_graph_core::GraphError;
 
     use super::{
-        extract_from_bytes, fetch_bytes, infer_extension, merge_into_output, run,
-        MAX_CONTENT_BYTES,
+        extract_from_bytes, fetch_bytes, infer_extension, merge_into_output, run, MAX_CONTENT_BYTES,
     };
 
     static SEQ: AtomicU32 = AtomicU32::new(0);
@@ -372,7 +369,10 @@ mod tests {
 
     #[test]
     fn infer_strips_query_string() {
-        assert_eq!(infer_extension("https://example.com/file.py?version=3"), "py");
+        assert_eq!(
+            infer_extension("https://example.com/file.py?version=3"),
+            "py"
+        );
     }
 
     #[test]
@@ -426,7 +426,10 @@ mod tests {
     #[test]
     fn run_rejects_link_local_ip() {
         let d = tdir();
-        let rc = run("http://169.254.169.254/latest/meta-data/", &d.join("g.json"));
+        let rc = run(
+            "http://169.254.169.254/latest/meta-data/",
+            &d.join("g.json"),
+        );
         assert_eq!(rc, 1, "cloud metadata endpoint must be rejected");
     }
 

@@ -66,7 +66,11 @@ pub fn explain(graph: &Graph, concept: &str) -> String {
     }
 
     if total > MAX_CONCEPTS {
-        let _ = writeln!(out, "\n\u{2026} {} more node(s) not shown.", total - MAX_CONCEPTS);
+        let _ = writeln!(
+            out,
+            "\n\u{2026} {} more node(s) not shown.",
+            total - MAX_CONCEPTS
+        );
     }
 
     out
@@ -91,15 +95,9 @@ fn summarise_node(graph: &Graph, node: &Node, out: &mut String) {
 
 /// Writes the outbound-edge subsection for `node` into `out`.
 fn render_outbound(graph: &Graph, node: &Node, out: &mut String) {
-    let mut outbound: Vec<&Edge> = graph
-        .edges
-        .iter()
-        .filter(|e| e.source == node.id)
-        .collect();
+    let mut outbound: Vec<&Edge> = graph.edges.iter().filter(|e| e.source == node.id).collect();
     // Deterministic: primary key = target id (ascending), secondary = relation string.
-    outbound.sort_by(|a, b| {
-        (a.target, a.relation.as_str()).cmp(&(b.target, b.relation.as_str()))
-    });
+    outbound.sort_by(|a, b| (a.target, a.relation.as_str()).cmp(&(b.target, b.relation.as_str())));
 
     if outbound.is_empty() {
         let _ = writeln!(out, "  Outbound: (none)");
@@ -123,15 +121,9 @@ fn render_outbound(graph: &Graph, node: &Node, out: &mut String) {
 
 /// Writes the inbound-edge subsection for `node` into `out`.
 fn render_inbound(graph: &Graph, node: &Node, out: &mut String) {
-    let mut inbound: Vec<&Edge> = graph
-        .edges
-        .iter()
-        .filter(|e| e.target == node.id)
-        .collect();
+    let mut inbound: Vec<&Edge> = graph.edges.iter().filter(|e| e.target == node.id).collect();
     // Deterministic: primary key = source id (ascending), secondary = relation string.
-    inbound.sort_by(|a, b| {
-        (a.source, a.relation.as_str()).cmp(&(b.source, b.relation.as_str()))
-    });
+    inbound.sort_by(|a, b| (a.source, a.relation.as_str()).cmp(&(b.source, b.relation.as_str())));
 
     if inbound.is_empty() {
         let _ = writeln!(out, "  Inbound: (none)");
@@ -186,7 +178,7 @@ fn label_of(graph: &Graph, id: NodeId) -> String {
 #[cfg(test)]
 mod tests {
     use habitat_graph_core::{
-        Confidence, Community, CommunityId, Edge, Graph, Manifest, Node, NodeId, Span,
+        Community, CommunityId, Confidence, Edge, Graph, Manifest, Node, NodeId, Span,
         SCHEMA_VERSION,
     };
 
@@ -249,15 +241,24 @@ mod tests {
     #[test]
     fn no_match_empty_graph() {
         let s = explain(&Graph::new(), "anything");
-        assert!(s.contains("No nodes match"), "empty graph must report no-match: {s}");
+        assert!(
+            s.contains("No nodes match"),
+            "empty graph must report no-match: {s}"
+        );
     }
 
     #[test]
     fn no_match_concept_not_in_any_label() {
         let g = build_graph(vec![node(1, "alpha"), node(2, "beta")], vec![]);
         let s = explain(&g, "zzz");
-        assert!(s.contains("No nodes match"), "absent concept must report no-match: {s}");
-        assert!(!s.contains("alpha"), "non-matching node must not appear: {s}");
+        assert!(
+            s.contains("No nodes match"),
+            "absent concept must report no-match: {s}"
+        );
+        assert!(
+            !s.contains("alpha"),
+            "non-matching node must not appear: {s}"
+        );
     }
 
     #[test]
@@ -296,21 +297,30 @@ mod tests {
     fn isolated_node_outbound_none() {
         let g = build_graph(vec![node(1, "solo")], vec![]);
         let s = explain(&g, "solo");
-        assert!(s.contains("Outbound: (none)"), "isolated node must show no outbound: {s}");
+        assert!(
+            s.contains("Outbound: (none)"),
+            "isolated node must show no outbound: {s}"
+        );
     }
 
     #[test]
     fn isolated_node_inbound_none() {
         let g = build_graph(vec![node(1, "solo")], vec![]);
         let s = explain(&g, "solo");
-        assert!(s.contains("Inbound: (none)"), "isolated node must show no inbound: {s}");
+        assert!(
+            s.contains("Inbound: (none)"),
+            "isolated node must show no inbound: {s}"
+        );
     }
 
     #[test]
     fn isolated_node_community_none() {
         let g = build_graph(vec![node(1, "solo")], vec![]);
         let s = explain(&g, "solo");
-        assert!(s.contains("Community: (none)"), "isolated node must show no community: {s}");
+        assert!(
+            s.contains("Community: (none)"),
+            "isolated node must show no community: {s}"
+        );
     }
 
     #[test]
@@ -332,9 +342,15 @@ mod tests {
     fn single_match_output_has_section_headers() {
         let g = build_graph(vec![node(1, "alpha")], vec![]);
         let s = explain(&g, "alpha");
-        assert!(s.contains("Outbound"), "Outbound header must be present: {s}");
+        assert!(
+            s.contains("Outbound"),
+            "Outbound header must be present: {s}"
+        );
         assert!(s.contains("Inbound"), "Inbound header must be present: {s}");
-        assert!(s.contains("Community"), "Community header must be present: {s}");
+        assert!(
+            s.contains("Community"),
+            "Community header must be present: {s}"
+        );
     }
 
     // ═══ Group 3: Multiple matches ════════════════════════════════════════════
@@ -386,7 +402,10 @@ mod tests {
             vec![edge(1, 2, "calls")],
         );
         let s = explain(&g, "source_node");
-        assert!(s.contains("target_node"), "neighbour label must appear: {s}");
+        assert!(
+            s.contains("target_node"),
+            "neighbour label must appear: {s}"
+        );
     }
 
     #[test]
@@ -396,7 +415,10 @@ mod tests {
             vec![edge(1, 2, "calls"), edge(1, 3, "imports")],
         );
         let s = explain(&g, "hub");
-        assert!(s.contains("Outbound (2 relation(s))"), "outbound count must be 2: {s}");
+        assert!(
+            s.contains("Outbound (2 relation(s))"),
+            "outbound count must be 2: {s}"
+        );
     }
 
     #[test]
@@ -409,7 +431,10 @@ mod tests {
         let s = explain(&g, "hub");
         let pos_first = s.find("first").expect("first must appear");
         let pos_second = s.find("second").expect("second must appear");
-        assert!(pos_first < pos_second, "lower target-id (first) must be listed first: {s}");
+        assert!(
+            pos_first < pos_second,
+            "lower target-id (first) must be listed first: {s}"
+        );
     }
 
     #[test]
@@ -422,7 +447,10 @@ mod tests {
         let s = explain(&g, "hub");
         let pos_calls = s.find("calls").expect("calls must appear");
         let pos_imports = s.find("imports").expect("imports must appear");
-        assert!(pos_calls < pos_imports, "'calls' must precede 'imports': {s}");
+        assert!(
+            pos_calls < pos_imports,
+            "'calls' must precede 'imports': {s}"
+        );
     }
 
     #[test]
@@ -432,7 +460,10 @@ mod tests {
             vec![edge(1, 2, "calls")],
         );
         let s = explain(&g, "src");
-        assert!(s.contains("--[calls]-->"), "arrow notation must be present: {s}");
+        assert!(
+            s.contains("--[calls]-->"),
+            "arrow notation must be present: {s}"
+        );
     }
 
     // ═══ Group 5: Inbound edges ═══════════════════════════════════════════════
@@ -444,7 +475,10 @@ mod tests {
             vec![edge(1, 2, "calls")],
         );
         let s = explain(&g, "callee");
-        assert!(s.contains("calls"), "inbound relation 'calls' must appear: {s}");
+        assert!(
+            s.contains("calls"),
+            "inbound relation 'calls' must appear: {s}"
+        );
     }
 
     #[test]
@@ -454,7 +488,10 @@ mod tests {
             vec![edge(1, 2, "calls")],
         );
         let s = explain(&g, "callee_node");
-        assert!(s.contains("caller_node"), "source label must appear in inbound: {s}");
+        assert!(
+            s.contains("caller_node"),
+            "source label must appear in inbound: {s}"
+        );
     }
 
     #[test]
@@ -464,7 +501,10 @@ mod tests {
             vec![edge(2, 1, "calls"), edge(3, 1, "calls")],
         );
         let s = explain(&g, "sink");
-        assert!(s.contains("Inbound (2 relation(s))"), "inbound count must be 2: {s}");
+        assert!(
+            s.contains("Inbound (2 relation(s))"),
+            "inbound count must be 2: {s}"
+        );
     }
 
     #[test]
@@ -477,7 +517,10 @@ mod tests {
         let s = explain(&g, "sink");
         let pos_early = s.find("early").expect("early must appear");
         let pos_late = s.find("late").expect("late must appear");
-        assert!(pos_early < pos_late, "lower source-id (early) must be listed first: {s}");
+        assert!(
+            pos_early < pos_late,
+            "lower source-id (early) must be listed first: {s}"
+        );
     }
 
     #[test]
@@ -488,8 +531,14 @@ mod tests {
             vec![edge(1, 2, "calls"), edge(2, 3, "imports")],
         );
         let s = explain(&g, "middle");
-        assert!(s.contains("Outbound (1 relation(s))"), "outbound section: {s}");
-        assert!(s.contains("Inbound (1 relation(s))"), "inbound section: {s}");
+        assert!(
+            s.contains("Outbound (1 relation(s))"),
+            "outbound section: {s}"
+        );
+        assert!(
+            s.contains("Inbound (1 relation(s))"),
+            "inbound section: {s}"
+        );
     }
 
     #[test]
@@ -499,7 +548,10 @@ mod tests {
             vec![edge(1, 2, "calls")],
         );
         let s = explain(&g, "callee");
-        assert!(s.contains("<--[calls]--"), "inbound arrow notation must appear: {s}");
+        assert!(
+            s.contains("<--[calls]--"),
+            "inbound arrow notation must appear: {s}"
+        );
     }
 
     // ═══ Group 6: Community membership ═══════════════════════════════════════
@@ -523,7 +575,10 @@ mod tests {
             vec![community(0, "cluster-X", &[99])], // node 1 not a member
         );
         let s = explain(&g, "orphan");
-        assert!(s.contains("Community: (none)"), "non-member must show none: {s}");
+        assert!(
+            s.contains("Community: (none)"),
+            "non-member must show none: {s}"
+        );
     }
 
     #[test]
@@ -555,7 +610,10 @@ mod tests {
         let s = explain(&g, "multi");
         let pos_early = s.find("cluster-early").expect("cluster-early must appear");
         let pos_late = s.find("cluster-late").expect("cluster-late must appear");
-        assert!(pos_early < pos_late, "lower community-id must be listed first: {s}");
+        assert!(
+            pos_early < pos_late,
+            "lower community-id must be listed first: {s}"
+        );
     }
 
     // ═══ Group 7: Caps (concept cap + edge cap) ════════════════════════════════
@@ -582,7 +640,10 @@ mod tests {
             .collect();
         let g = build_graph(nodes, vec![]);
         let s = explain(&g, "item");
-        assert!(s.contains("more node(s) not shown"), "truncation note must appear: {s}");
+        assert!(
+            s.contains("more node(s) not shown"),
+            "truncation note must appear: {s}"
+        );
     }
 
     #[test]
@@ -610,7 +671,10 @@ mod tests {
         }
         let g = build_graph(nodes, edges);
         let s = explain(&g, "hub");
-        assert!(s.contains("more outbound"), "outbound cap note must appear: {s}");
+        assert!(
+            s.contains("more outbound"),
+            "outbound cap note must appear: {s}"
+        );
     }
 
     #[test]
@@ -624,7 +688,10 @@ mod tests {
         }
         let g = build_graph(nodes, edges);
         let s = explain(&g, "sink");
-        assert!(s.contains("more inbound"), "inbound cap note must appear: {s}");
+        assert!(
+            s.contains("more inbound"),
+            "inbound cap note must appear: {s}"
+        );
     }
 
     #[test]
@@ -666,7 +733,10 @@ mod tests {
     fn label_bidi_override_neutralised() {
         let g = build_graph(vec![node(1, "evil\u{202E}node")], vec![]);
         let s = explain(&g, "evil");
-        assert!(!s.contains('\u{202E}'), "bidi in label must be escaped: {s}");
+        assert!(
+            !s.contains('\u{202E}'),
+            "bidi in label must be escaped: {s}"
+        );
         assert!(s.contains("\\u{202E}"), "escaped form must appear: {s}");
     }
 
@@ -675,7 +745,10 @@ mod tests {
         let g = build_graph(vec![node(1, "concept\u{202E}safe")], vec![]);
         // Query with bidi in concept: bidi must be escaped in the header.
         let s = explain(&g, "concept\u{202E}safe");
-        assert!(!s.contains('\u{202E}'), "bidi in concept must be escaped: {s}");
+        assert!(
+            !s.contains('\u{202E}'),
+            "bidi in concept must be escaped: {s}"
+        );
     }
 
     #[test]
@@ -690,7 +763,10 @@ mod tests {
             }],
         );
         let s = explain(&g, "src");
-        assert!(!s.contains('\u{202E}'), "bidi in relation must be escaped: {s}");
+        assert!(
+            !s.contains('\u{202E}'),
+            "bidi in relation must be escaped: {s}"
+        );
         assert!(s.contains("\\u{202E}"), "escaped form must appear: {s}");
     }
 
@@ -701,7 +777,10 @@ mod tests {
             vec![edge(1, 2, "calls")],
         );
         let s = explain(&g, "src");
-        assert!(!s.contains('\u{202E}'), "bidi in neighbour label must be escaped: {s}");
+        assert!(
+            !s.contains('\u{202E}'),
+            "bidi in neighbour label must be escaped: {s}"
+        );
     }
 
     #[test]
@@ -711,7 +790,10 @@ mod tests {
             vec![edge(1, 2, "calls")],
         );
         let s = explain(&g, "callee");
-        assert!(!s.contains('\u{202E}'), "bidi in source label must be escaped: {s}");
+        assert!(
+            !s.contains('\u{202E}'),
+            "bidi in source label must be escaped: {s}"
+        );
     }
 
     #[test]
@@ -722,7 +804,10 @@ mod tests {
             vec![community(0, "evil\u{202E}cluster", &[1])],
         );
         let s = explain(&g, "member");
-        assert!(!s.contains('\u{202E}'), "bidi in community label must be escaped: {s}");
+        assert!(
+            !s.contains('\u{202E}'),
+            "bidi in community label must be escaped: {s}"
+        );
         assert!(s.contains("\\u{202E}"), "escaped form must appear: {s}");
     }
 
@@ -759,7 +844,10 @@ mod tests {
         let s = explain(&g, "hub");
         let pos_low = s.find("low_id").expect("low_id must appear");
         let pos_high = s.find("high_id").expect("high_id must appear");
-        assert!(pos_low < pos_high, "lower target id must be listed first: {s}");
+        assert!(
+            pos_low < pos_high,
+            "lower target id must be listed first: {s}"
+        );
     }
 
     #[test]
@@ -773,7 +861,10 @@ mod tests {
         let s = explain(&g, "sink");
         let pos_low = s.find("low_src").expect("low_src must appear");
         let pos_high = s.find("high_src").expect("high_src must appear");
-        assert!(pos_low < pos_high, "lower source id must be listed first: {s}");
+        assert!(
+            pos_low < pos_high,
+            "lower source id must be listed first: {s}"
+        );
     }
 
     // ═══ Group 10: Edge cases ════════════════════════════════════════════════
@@ -795,8 +886,14 @@ mod tests {
             vec![edge(1, 2, "calls"), edge(1, 3, "imports")],
         );
         let s = explain(&g, "source");
-        assert!(s.contains("--[calls]-->"), "calls relation must appear: {s}");
-        assert!(s.contains("--[imports]-->"), "imports relation must appear: {s}");
+        assert!(
+            s.contains("--[calls]-->"),
+            "calls relation must appear: {s}"
+        );
+        assert!(
+            s.contains("--[imports]-->"),
+            "imports relation must appear: {s}"
+        );
     }
 
     #[test]
@@ -823,7 +920,10 @@ mod tests {
     fn full_output_ends_with_newline() {
         let g = build_graph(vec![node(1, "alpha")], vec![]);
         let s = explain(&g, "alpha");
-        assert!(s.ends_with('\n'), "full output must end with newline: {s:?}");
+        assert!(
+            s.ends_with('\n'),
+            "full output must end with newline: {s:?}"
+        );
     }
 
     #[test]
@@ -833,7 +933,10 @@ mod tests {
             vec![edge(1, 2, "calls")],
         );
         let s = explain(&g, "source");
-        assert!(s.contains("Inbound: (none)"), "source node must show inbound none: {s}");
+        assert!(
+            s.contains("Inbound: (none)"),
+            "source node must show inbound none: {s}"
+        );
     }
 
     #[test]
@@ -843,7 +946,10 @@ mod tests {
             vec![edge(1, 2, "calls")],
         );
         let s = explain(&g, "target");
-        assert!(s.contains("Outbound: (none)"), "target node must show outbound none: {s}");
+        assert!(
+            s.contains("Outbound: (none)"),
+            "target node must show outbound none: {s}"
+        );
     }
 
     #[test]
@@ -851,7 +957,10 @@ mod tests {
         // Concept "ALPHA" should match label "alpha_module".
         let g = build_graph(vec![node(1, "alpha_module")], vec![]);
         let s = explain(&g, "ALPHA");
-        assert!(s.contains("alpha_module"), "case-insensitive match must work: {s}");
+        assert!(
+            s.contains("alpha_module"),
+            "case-insensitive match must work: {s}"
+        );
     }
 
     #[test]
@@ -860,7 +969,10 @@ mod tests {
         let g = build_graph(vec![node(1, "my_module_name"), node(2, "other")], vec![]);
         let s = explain(&g, "mod");
         assert!(s.contains("my_module_name"), "partial match must work: {s}");
-        assert!(!s.contains("other"), "non-matching node must not appear: {s}");
+        assert!(
+            !s.contains("other"),
+            "non-matching node must not appear: {s}"
+        );
     }
 
     // Extra tests to push well past 50 ────────────────────────────────────────
@@ -876,7 +988,10 @@ mod tests {
             manifest: Manifest::default(),
         };
         let s = explain(&g, "hub");
-        assert!(s.contains("<id 99>"), "fallback for missing node must appear: {s}");
+        assert!(
+            s.contains("<id 99>"),
+            "fallback for missing node must appear: {s}"
+        );
     }
 
     #[test]
@@ -889,7 +1004,10 @@ mod tests {
             manifest: Manifest::default(),
         };
         let s = explain(&g, "sink");
-        assert!(s.contains("<id 88>"), "fallback for missing source must appear: {s}");
+        assert!(
+            s.contains("<id 88>"),
+            "fallback for missing source must appear: {s}"
+        );
     }
 
     #[test]
@@ -901,14 +1019,21 @@ mod tests {
         let g = build_graph(nodes, vec![]);
         let s = explain(&g, "item");
         let expected = format!("showing first {MAX_CONCEPTS}");
-        assert!(s.contains(&expected), "header must state showing-first count: {s}");
+        assert!(
+            s.contains(&expected),
+            "header must state showing-first count: {s}"
+        );
     }
 
     #[test]
     fn multiple_relation_types_on_inbound_all_shown() {
         // Two different callers with different relations to the same node.
         let g = build_graph(
-            vec![node(1, "alpha_caller"), node(2, "beta_caller"), node(3, "sink_node")],
+            vec![
+                node(1, "alpha_caller"),
+                node(2, "beta_caller"),
+                node(3, "sink_node"),
+            ],
             vec![edge(1, 3, "calls"), edge(2, 3, "imports")],
         );
         let s = explain(&g, "sink_node");
@@ -925,7 +1050,10 @@ mod tests {
             vec![community(0, "clique", &[2])],
         );
         let s = explain(&g, "loner");
-        assert!(s.contains("Community: (none)"), "non-member must not see community: {s}");
+        assert!(
+            s.contains("Community: (none)"),
+            "non-member must not see community: {s}"
+        );
     }
 
     #[test]

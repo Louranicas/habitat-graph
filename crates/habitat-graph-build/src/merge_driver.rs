@@ -289,8 +289,11 @@ fn merge_graph_communities(
 ) -> Vec<Community> {
     let ours_comm_labels: HashSet<&str> =
         ours.communities.iter().map(|c| c.label.as_str()).collect();
-    let theirs_comm_labels: HashSet<&str> =
-        theirs.communities.iter().map(|c| c.label.as_str()).collect();
+    let theirs_comm_labels: HashSet<&str> = theirs
+        .communities
+        .iter()
+        .map(|c| c.label.as_str())
+        .collect();
 
     let ours_comm_map: HashMap<&str, &Community> = ours
         .communities
@@ -350,7 +353,10 @@ fn merge_manifest(ours: &Manifest, theirs: &Manifest) -> Manifest {
     Manifest {
         inputs,
         tool_version: ours.tool_version.clone(),
-        generated_at: ours.generated_at.clone().or_else(|| theirs.generated_at.clone()),
+        generated_at: ours
+            .generated_at
+            .clone()
+            .or_else(|| theirs.generated_at.clone()),
     }
 }
 
@@ -361,7 +367,8 @@ fn merge_manifest(ours: &Manifest, theirs: &Manifest) -> Manifest {
 #[cfg(test)]
 mod tests {
     use habitat_graph_core::{
-        content_id, Community, CommunityId, Confidence, Edge, Graph, InputRecord, Node, NodeId, Span,
+        content_id, Community, CommunityId, Confidence, Edge, Graph, InputRecord, Node, NodeId,
+        Span,
     };
 
     use super::merge3;
@@ -482,7 +489,11 @@ mod tests {
         let ours = nodes_graph(&[(0, "X")]);
         let theirs = Graph::new(); // deleted X
         let m = merge3(&base, &ours, &theirs);
-        assert_eq!(m.nodes.len(), 0, "X must be deleted since theirs dropped it");
+        assert_eq!(
+            m.nodes.len(),
+            0,
+            "X must be deleted since theirs dropped it"
+        );
     }
 
     // 8. Base has X; both sides keep X → exactly one X in result.
@@ -558,10 +569,16 @@ mod tests {
         let m = merge3(&Graph::new(), &ours, &Graph::new());
         // FO-4: each surviving node's id is content_id(label), NOT the arbitrary input id.
         for n in &m.nodes {
-            assert_eq!(n.id.get(), content_id(&n.label), "id must be content_id(label)");
+            assert_eq!(
+                n.id.get(),
+                content_id(&n.label),
+                "id must be content_id(label)"
+            );
         }
         assert!(
-            m.nodes.iter().all(|n| ![99, 100, 101].contains(&n.id.get())),
+            m.nodes
+                .iter()
+                .all(|n| ![99, 100, 101].contains(&n.id.get())),
             "original input ids must not be retained"
         );
     }
@@ -666,7 +683,11 @@ mod tests {
         let mut theirs = nodes_graph(&[(0, "A"), (1, "B")]);
         theirs.edges.push(edge(0, 1, "calls")); // edge kept
         let m = merge3(&base, &ours, &theirs);
-        assert_eq!(m.edges.len(), 0, "edge must be deleted since ours dropped it");
+        assert_eq!(
+            m.edges.len(),
+            0,
+            "edge must be deleted since ours dropped it"
+        );
     }
 
     // 24. Edge deletion on theirs respected (base has A→B, theirs drops it, ours keeps).
@@ -678,7 +699,11 @@ mod tests {
         ours.edges.push(edge(0, 1, "calls")); // edge kept
         let theirs = nodes_graph(&[(0, "A"), (1, "B")]); // edge dropped
         let m = merge3(&base, &ours, &theirs);
-        assert_eq!(m.edges.len(), 0, "edge must be deleted since theirs dropped it");
+        assert_eq!(
+            m.edges.len(),
+            0,
+            "edge must be deleted since theirs dropped it"
+        );
     }
 
     // 25. Edge present in base and kept by both → appears once.
@@ -913,8 +938,7 @@ mod tests {
     #[test]
     fn community_member_ids_remapped() {
         let mut ours = nodes_graph(&[(50, "Node-A"), (60, "Node-B")]);
-        ours.communities
-            .push(community(0, "grp", &[50, 60]));
+        ours.communities.push(community(0, "grp", &[50, 60]));
         let m = merge3(&Graph::new(), &ours, &Graph::new());
         let a_id = m
             .nodes
@@ -944,7 +968,7 @@ mod tests {
     fn community_deleted_member_pruned() {
         let mut ours = Graph::new();
         ours.nodes.push(node(1, "B")); // only B; A is absent
-        // Community references both A(0) and B(1), but A's id is dangling in ours.
+                                       // Community references both A(0) and B(1), but A's id is dangling in ours.
         ours.communities.push(community(0, "c", &[0, 1]));
         let m = merge3(&Graph::new(), &ours, &Graph::new());
         assert_eq!(m.communities.len(), 1, "community 'c' must survive");
@@ -991,12 +1015,7 @@ mod tests {
         });
         let m = merge3(&Graph::new(), &ours, &theirs);
         assert_eq!(m.manifest.inputs.len(), 2);
-        let paths: Vec<&str> = m
-            .manifest
-            .inputs
-            .iter()
-            .map(|i| i.path.as_str())
-            .collect();
+        let paths: Vec<&str> = m.manifest.inputs.iter().map(|i| i.path.as_str()).collect();
         assert!(paths.contains(&"a.rs"));
         assert!(paths.contains(&"b.rs"));
     }
