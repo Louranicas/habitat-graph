@@ -1,6 +1,7 @@
 //! CLI command implementations.
 
 pub mod add;
+mod atomic_file;
 pub mod extract;
 pub mod hook;
 pub mod install;

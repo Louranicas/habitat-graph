@@ -31,6 +31,9 @@ use habitat_graph_core::{display_safe, sanitize_label, Graph, NodeId};
 
 use crate::escape::{redact_public_text, PublicRelationProjector};
 
+/// Ownership marker embedded near the top of every generated wiki page.
+pub const GENERATED_WIKI_SIGNATURE: &str = "<!-- habitat-graph-generated:wiki:v1 -->";
+
 /// Renders `graph` as a plain-Markdown wiki: one article per node plus an `index.md`.
 ///
 /// Returns a [`Vec`] of `(filename, content)` pairs (same shape as
@@ -150,6 +153,7 @@ fn md_link_text(label: &str) -> String {
 #[must_use]
 fn render_index(graph: &Graph, label_map: &BTreeMap<NodeId, &str>) -> String {
     let mut out = String::from("# Index\n\n");
+    let _ = writeln!(out, "{GENERATED_WIKI_SIGNATURE}\n");
     for node in &graph.nodes {
         let label = label_map.get(&node.id).copied().unwrap_or("");
         let link_text = md_link_text(&sanitize_label(label));
@@ -186,6 +190,7 @@ fn render_node_article(
     let mut out = String::new();
     // H1 title.
     let _ = writeln!(out, "# {safe_label}\n");
+    let _ = writeln!(out, "{GENERATED_WIKI_SIGNATURE}\n");
     // Source location.
     let _ = writeln!(out, "Source: `{safe_file}` line {start_line}\n");
 

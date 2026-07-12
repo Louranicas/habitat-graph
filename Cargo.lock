@@ -743,6 +743,7 @@ dependencies = [
 name = "habitat-graph-cli"
 version = "0.0.0"
 dependencies = [
+ "blake3",
  "clap",
  "habitat-graph-analyze",
  "habitat-graph-build",

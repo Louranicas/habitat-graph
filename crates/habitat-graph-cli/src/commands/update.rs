@@ -2,11 +2,11 @@
 //!
 //! ## Honest cost model (C-4)
 //!
-//! File-level extraction is cached via a sidecar file
-//! (`<out>/.habitat-graph-state.json`), so only files whose `blake3` content hash has changed
-//! since the last build are re-parsed by the tree-sitter extractors.  **Community detection is
-//! not incremental**: Leiden is always re-run on the full combined graph after each incremental
-//! merge.  The sidecar saves AST-parsing work; it does not save analysis work.
+//! File-level extraction is cached via owner-only private state, so only files whose `blake3`
+//! content hash has changed since the last build are re-parsed by the tree-sitter extractors.
+//! **Community detection is not incremental**: Leiden is always re-run on the full combined graph
+//! after each incremental merge. The state cache saves AST-parsing work; it does not save analysis
+//! work.
 //!
 //! ## Sidecar format
 //!
@@ -75,16 +75,15 @@ pub fn run(dir: &Path, out: &Path) -> u8 {
 /// failures, [`GraphError::Schema`] on serialization failures, or [`GraphError::Guard`] when
 /// private sidecar permissions cannot be enforced.
 fn run_inner(dir: &Path, out: &Path) -> Result<()> {
-    super::private_state::ensure(&out.join(SIDECAR))?;
+    let (sidecar_path, legacy_sidecar_path) = prepare_private_state(out)?;
 
     // ── Detect all source files (sorted for R4 determinism) ─────────────────────
     let files = habitat_graph_source::detect(dir, &["rs"])?;
-    let sidecar_path = out.join(SIDECAR);
 
     // ── Load the prior sidecar (returns None on first run / mismatch) ───────────
-    let Some(prior_graph) = try_load_prior(&sidecar_path)? else {
+    let Some(prior_graph) = load_available_prior(&sidecar_path, &legacy_sidecar_path)? else {
         // No sidecar or schema mismatch → full rebuild.
-        return do_full_build(out, &files);
+        return do_full_build(out, &files, &sidecar_path, &legacy_sidecar_path);
     };
 
     // ── Hash every current file (needed for the diff) ───────────────────────────
@@ -153,7 +152,13 @@ fn run_inner(dir: &Path, out: &Path) -> Result<()> {
         // Export policy evolves independently of source hashes. Always rerender public artifacts
         // and atomically reharden the private sidecar so an upgrade cannot report success while
         // leaving legacy unredacted output or permissive cache permissions in place.
-        write_artifacts(out, &prior_graph, current_manifest)?;
+        write_artifacts(
+            out,
+            &prior_graph,
+            current_manifest,
+            &sidecar_path,
+            &legacy_sidecar_path,
+        )?;
         println!("update: 0 changed, {n} nodes (artifacts refreshed; analyze not re-run)");
         return Ok(());
     }
@@ -197,9 +202,34 @@ fn run_inner(dir: &Path, out: &Path) -> Result<()> {
 
     // ── Write artifacts + refresh sidecar ────────────────────────────────────────
     let n = combined.nodes.len();
-    write_artifacts(out, &combined, current_manifest)?;
+    write_artifacts(
+        out,
+        &combined,
+        current_manifest,
+        &sidecar_path,
+        &legacy_sidecar_path,
+    )?;
     println!("update: {need_reextract} changed, {n} nodes (analyze re-run globally)");
     Ok(())
+}
+
+fn load_available_prior(current: &Path, legacy: &Path) -> Result<Option<Graph>> {
+    if current.exists() {
+        try_load_prior(current)
+    } else {
+        try_load_prior(legacy)
+    }
+}
+
+fn prepare_private_state(out: &Path) -> Result<(PathBuf, PathBuf)> {
+    std::fs::create_dir_all(out).map_err(|error| GraphError::Io(error.to_string()))?;
+    let legacy = out.join(SIDECAR);
+    let current = super::private_state::path_for_output(&out.join("graph.json"), &legacy)?;
+    super::private_state::ensure(&current)?;
+    if current != legacy {
+        super::private_state::ensure(&legacy)?;
+    }
+    Ok((current, legacy))
 }
 
 /// Attempts to load the prior graph from the sidecar file.
@@ -252,7 +282,12 @@ fn try_load_prior(sidecar_path: &Path) -> Result<Option<Graph>> {
 /// # Errors
 ///
 /// Returns a [`GraphError`] on extraction, analysis, export, or IO failure.
-fn do_full_build(out: &Path, files: &[PathBuf]) -> Result<()> {
+fn do_full_build(
+    out: &Path,
+    files: &[PathBuf],
+    sidecar_path: &Path,
+    legacy_sidecar_path: &Path,
+) -> Result<()> {
     // Run the full pipeline (extract_files reads files internally).
     let extractions = habitat_graph_extract::extract_files(files)?;
     let mut graph = habitat_graph_build::assemble(extractions);
@@ -272,7 +307,7 @@ fn do_full_build(out: &Path, files: &[PathBuf]) -> Result<()> {
     let manifest = habitat_graph_source::build_manifest(&inputs, env!("CARGO_PKG_VERSION"));
 
     let n = graph.nodes.len();
-    write_artifacts(out, &graph, manifest)?;
+    write_artifacts(out, &graph, manifest, sidecar_path, legacy_sidecar_path)?;
     println!(
         "update: {} changed, {n} nodes (analyze re-run globally)",
         files.len()
@@ -281,8 +316,7 @@ fn do_full_build(out: &Path, files: &[PathBuf]) -> Result<()> {
 }
 
 /// Writes all three core artifacts (`graph.json`, `GRAPH_REPORT.md`, `graph.html`), refreshes any
-/// existing optional exports, and writes the sidecar (`<out>/.habitat-graph-state.json`) into
-/// `out`, creating the directory if needed.
+/// existing optional exports, and writes the private state cache.
 ///
 /// The sidecar stores `graph` with `current_manifest` substituted in: this ensures the sidecar
 /// tracks the actual content hashes of the current file-system snapshot, not the empty manifest
@@ -292,7 +326,13 @@ fn do_full_build(out: &Path, files: &[PathBuf]) -> Result<()> {
 ///
 /// Returns [`GraphError::Io`] on any filesystem failure, or [`GraphError::Schema`] on
 /// serialization failure.
-fn write_artifacts(out: &Path, graph: &Graph, current_manifest: Manifest) -> Result<()> {
+fn write_artifacts(
+    out: &Path,
+    graph: &Graph,
+    current_manifest: Manifest,
+    sidecar_path: &Path,
+    legacy_sidecar_path: &Path,
+) -> Result<()> {
     super::extract::write_public_artifacts(out, graph, super::extract::ExtractOpts::default())?;
 
     // Sidecar — full internal Graph with the current content-hash manifest, written last so
@@ -300,7 +340,10 @@ fn write_artifacts(out: &Path, graph: &Graph, current_manifest: Manifest) -> Res
     let mut sidecar = graph.clone();
     sidecar.manifest = current_manifest;
     let sidecar_json = sidecar.to_json()?;
-    super::private_state::write(&out.join(SIDECAR), sidecar_json.as_bytes())?;
+    super::private_state::write(sidecar_path, sidecar_json.as_bytes())?;
+    if sidecar_path != legacy_sidecar_path {
+        super::private_state::remove(legacy_sidecar_path, "legacy private state")?;
+    }
 
     Ok(())
 }
@@ -427,6 +470,40 @@ mod tests {
             use std::os::unix::fs::PermissionsExt as _;
             let mode = fs::metadata(sidecar).unwrap().permissions().mode() & 0o777;
             assert_eq!(mode, 0o600, "sidecar must be owner-readable/writable only");
+        }
+    }
+
+    #[test]
+    fn git_outputs_store_incremental_state_under_git_metadata() {
+        let repo = TempDir::new().unwrap();
+        fs::create_dir(repo.path().join(".git")).unwrap();
+        fs::create_dir(repo.path().join(".git/objects")).unwrap();
+        fs::write(repo.path().join(".git/HEAD"), "ref: refs/heads/main\n").unwrap();
+        let src = repo.path().join("src");
+        let out = repo.path().join("public");
+        fs::create_dir(&src).unwrap();
+        mk_file(&src, "lib.rs", "fn api_key_private_cache() {}");
+
+        assert_eq!(run(&src, &out), 0);
+        assert_eq!(run(&src, &out), 0);
+        assert!(!out.join(SIDECAR).exists());
+
+        let state_dir = repo.path().join(".git/habitat-graph/state");
+        let states: Vec<_> = fs::read_dir(&state_dir)
+            .unwrap()
+            .filter_map(std::result::Result::ok)
+            .collect();
+        assert_eq!(states.len(), 1);
+        assert!(fs::read_to_string(states[0].path())
+            .unwrap()
+            .contains("api_key_private_cache"));
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt as _;
+            assert_eq!(
+                fs::metadata(states[0].path()).unwrap().permissions().mode() & 0o777,
+                0o600
+            );
         }
     }
 

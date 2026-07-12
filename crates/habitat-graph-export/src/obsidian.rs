@@ -159,7 +159,7 @@ fn assign_filenames(graph: &Graph) -> Vec<String> {
         .zip(qualified.iter())
         .map(|((node, stem), qualified)| {
             if *qualified {
-                format!("{}_{}.md", stem, node.id)
+                format!("{}.md", qualified_stem(stem, node.id))
             } else {
                 format!("{stem}.md")
             }
@@ -193,7 +193,7 @@ fn assign_filenames(graph: &Graph) -> Vec<String> {
             continue;
         }
 
-        let base = format!("{}_{}", stems[index], graph.nodes[index].id);
+        let base = qualified_stem(&stems[index], graph.nodes[index].id);
         let mut attempt = 1_usize;
         loop {
             let fallback = if attempt == 1 {
@@ -218,13 +218,23 @@ fn portable_filename_key(filename: &str) -> String {
     filename.nfkd().flat_map(char::to_lowercase).collect()
 }
 
+fn qualified_stem(stem: &str, id: NodeId) -> String {
+    if let Some(separator) = stem.find('.').filter(|_| windows_reserved_stem(stem)) {
+        format!("{}_{}{}", &stem[..separator], id, &stem[separator..])
+    } else {
+        format!("{stem}_{id}")
+    }
+}
+
 fn windows_reserved_stem(stem: &str) -> bool {
-    let basename = stem
+    let basename: String = stem
         .split('.')
         .next()
         .unwrap_or_default()
         .trim_end_matches([' ', '.'])
-        .to_ascii_uppercase();
+        .nfkc()
+        .collect();
+    let basename = basename.to_ascii_uppercase();
     matches!(basename.as_str(), "CON" | "PRN" | "AUX" | "NUL" | "CLOCK$")
         || basename
             .strip_prefix("COM")
@@ -797,6 +807,29 @@ mod tests {
             .map(|filename| super::portable_filename_key(filename))
             .collect();
         assert_eq!(keys.len(), filenames.len());
+    }
+
+    #[test]
+    fn windows_reserved_stems_with_extensions_are_qualified_before_the_dot() {
+        let g = graph_with_nodes(vec![
+            make_node(1, "CON.txt", "a.rs"),
+            make_node(2, "NUL.foo", "b.rs"),
+            make_node(3, "COM1.rs", "c.rs"),
+            make_node(4, "LPT¹.log", "d.rs"),
+        ]);
+        let pairs = render_vault(&g);
+        let filenames: Vec<&str> = pairs
+            .iter()
+            .map(|(filename, _)| filename.as_str())
+            .collect();
+        assert!(filenames.contains(&"CON_n1.txt.md"));
+        assert!(filenames.contains(&"NUL_n2.foo.md"));
+        assert!(filenames.contains(&"COM1_n3.rs.md"));
+        assert!(filenames.contains(&"LPT¹_n4.log.md"));
+        assert!(filenames
+            .iter()
+            .filter(|filename| **filename != "_MOC.md")
+            .all(|filename| !super::windows_reserved_stem(filename)));
     }
 
     #[test]

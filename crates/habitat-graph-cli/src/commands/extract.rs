@@ -183,11 +183,12 @@ fn write_vault_manifest(vault_dir: &Path, names: &HashSet<String>) -> Result<()>
         "files": files,
     }))
     .map_err(|error| GraphError::Schema(format!("vault manifest serialize: {error}")))?;
-    let temporary = vault_dir.join(format!(".{VAULT_MANIFEST}.tmp.{}", std::process::id()));
-    std::fs::write(&temporary, manifest.as_bytes())
-        .map_err(|error| GraphError::Io(format!("vault manifest temp write: {error}")))?;
-    std::fs::rename(&temporary, vault_dir.join(VAULT_MANIFEST))
-        .map_err(|error| GraphError::Io(format!("vault manifest rename: {error}")))
+    super::atomic_file::write(
+        &vault_dir.join(VAULT_MANIFEST),
+        manifest.as_bytes(),
+        false,
+        "vault manifest",
+    )
 }
 
 /// Synchronizes generated notes exactly while preserving every unowned/user-authored file.
@@ -300,6 +301,12 @@ fn generated_wiki_ownership(wiki_dir: &Path, claim_unowned: bool) -> Result<Hash
         }
         let filename = entry.file_name().to_string_lossy().into_owned();
         if generated_wiki_filename(&filename) {
+            let content = std::fs::read_to_string(entry.path()).map_err(|error| {
+                GraphError::Io(format!("unowned wiki page {filename}: {error}"))
+            })?;
+            if !has_generated_wiki_signature(&content) {
+                continue;
+            }
             owned.insert(filename);
         }
     }
@@ -314,11 +321,19 @@ fn write_wiki_manifest(wiki_dir: &Path, names: &HashSet<String>) -> Result<()> {
         "files": files,
     }))
     .map_err(|error| GraphError::Schema(format!("wiki manifest serialize: {error}")))?;
-    let temporary = wiki_dir.join(format!(".{WIKI_MANIFEST}.tmp.{}", std::process::id()));
-    std::fs::write(&temporary, manifest.as_bytes())
-        .map_err(|error| GraphError::Io(format!("wiki manifest temp write: {error}")))?;
-    std::fs::rename(&temporary, wiki_dir.join(WIKI_MANIFEST))
-        .map_err(|error| GraphError::Io(format!("wiki manifest rename: {error}")))
+    super::atomic_file::write(
+        &wiki_dir.join(WIKI_MANIFEST),
+        manifest.as_bytes(),
+        false,
+        "wiki manifest",
+    )
+}
+
+fn has_generated_wiki_signature(content: &str) -> bool {
+    let mut lines = content.lines();
+    lines.next().is_some()
+        && lines.next() == Some("")
+        && lines.next() == Some(habitat_graph_export::wiki::GENERATED_WIKI_SIGNATURE)
 }
 
 fn wiki_manifest_exists(wiki_dir: &Path) -> Result<bool> {
@@ -527,7 +542,10 @@ mod tests {
 
     use tempfile::TempDir;
 
-    use super::{run, run_artifacts, sync_generated_vault, write_vault_manifest, ExtractOpts};
+    use super::{
+        run, run_artifacts, sync_generated_vault, write_vault_manifest, write_wiki_manifest,
+        ExtractOpts,
+    };
 
     // ── Helpers ───────────────────────────────────────────────────────────────
 
@@ -746,6 +764,36 @@ mod tests {
             fs::read_to_string(vault.path().join("user.md")).unwrap(),
             "# Human note\n"
         );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn manifest_writes_do_not_follow_predictable_temporary_symlinks() {
+        use std::os::unix::fs::symlink;
+
+        let vault = TempDir::new().unwrap();
+        let vault_victim = vault.path().join("vault-victim");
+        fs::write(&vault_victim, "vault sentinel").unwrap();
+        let vault_temporary = vault.path().join(format!(
+            ".{}.tmp.{}",
+            super::VAULT_MANIFEST,
+            std::process::id()
+        ));
+        symlink(&vault_victim, &vault_temporary).unwrap();
+        write_vault_manifest(vault.path(), &std::collections::HashSet::new()).unwrap();
+        assert_eq!(fs::read_to_string(&vault_victim).unwrap(), "vault sentinel");
+
+        let wiki = TempDir::new().unwrap();
+        let wiki_victim = wiki.path().join("wiki-victim");
+        fs::write(&wiki_victim, "wiki sentinel").unwrap();
+        let wiki_temporary = wiki.path().join(format!(
+            ".{}.tmp.{}",
+            super::WIKI_MANIFEST,
+            std::process::id()
+        ));
+        symlink(&wiki_victim, &wiki_temporary).unwrap();
+        write_wiki_manifest(wiki.path(), &std::collections::HashSet::new()).unwrap();
+        assert_eq!(fs::read_to_string(&wiki_victim).unwrap(), "wiki sentinel");
     }
 
     // ── T1d: no vault written when not requested ─────────────────────────────
@@ -1195,27 +1243,64 @@ mod tests {
     }
 
     #[test]
-    fn wiki_flag_claims_generated_names_and_records_ownership() {
+    fn wiki_flag_refuses_to_claim_unsigned_generated_names() {
         let src = TempDir::new().unwrap();
         let out = TempDir::new().unwrap();
         mk_file(src.path(), "lib.rs", "fn generated() {}");
         let wiki = out.path().join("wiki");
         fs::create_dir(&wiki).unwrap();
-        fs::write(wiki.join("index.md"), "legacy index").unwrap();
-        fs::write(wiki.join("node-1.md"), "legacy node").unwrap();
+        fs::write(wiki.join("index.md"), "user index").unwrap();
+        fs::write(wiki.join("node-1.md"), "user node").unwrap();
         let opts = ExtractOpts {
             wiki: true,
             ..ExtractOpts::default()
         };
 
-        assert_eq!(run_artifacts(src.path(), out.path(), None, opts), 0);
-        assert_ne!(
+        assert_eq!(run_artifacts(src.path(), out.path(), None, opts), 4);
+        assert_eq!(
             fs::read_to_string(wiki.join("index.md")).unwrap(),
-            "legacy index"
+            "user index"
         );
-        assert!(!wiki.join("node-1.md").exists());
-        let manifest = fs::read_to_string(wiki.join(super::WIKI_MANIFEST)).unwrap();
-        assert!(manifest.contains(super::WIKI_MANIFEST_SCHEMA));
+        assert_eq!(
+            fs::read_to_string(wiki.join("node-1.md")).unwrap(),
+            "user node"
+        );
+        assert!(!wiki.join(super::WIKI_MANIFEST).exists());
+    }
+
+    #[test]
+    fn wiki_flag_recovers_signed_pages_when_the_manifest_is_missing() {
+        let src = TempDir::new().unwrap();
+        let out = TempDir::new().unwrap();
+        let opts = ExtractOpts {
+            wiki: true,
+            ..ExtractOpts::default()
+        };
+        mk_file(src.path(), "lib.rs", "fn old_generated() {}");
+        assert_eq!(run_artifacts(src.path(), out.path(), None, opts), 0);
+        let wiki = out.path().join("wiki");
+        fs::remove_file(wiki.join(super::WIKI_MANIFEST)).unwrap();
+        let old_pages: std::collections::HashSet<String> = fs::read_dir(&wiki)
+            .unwrap()
+            .filter_map(std::result::Result::ok)
+            .map(|entry| entry.file_name().to_string_lossy().into_owned())
+            .filter(|filename| filename.starts_with("node-"))
+            .collect();
+
+        mk_file(src.path(), "lib.rs", "fn new_generated() {}");
+        assert_eq!(run_artifacts(src.path(), out.path(), None, opts), 0);
+        assert!(old_pages
+            .iter()
+            .all(|filename| !wiki.join(filename).exists()));
+        assert!(wiki.join(super::WIKI_MANIFEST).exists());
+        for entry in fs::read_dir(&wiki).unwrap() {
+            let entry = entry.unwrap();
+            if entry.file_name() == super::WIKI_MANIFEST {
+                continue;
+            }
+            let content = fs::read_to_string(entry.path()).unwrap();
+            assert!(content.contains(habitat_graph_export::wiki::GENERATED_WIKI_SIGNATURE));
+        }
     }
 
     #[test]
