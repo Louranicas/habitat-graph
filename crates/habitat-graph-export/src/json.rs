@@ -7,7 +7,7 @@ use habitat_graph_core::{
 };
 use serde_json::Value;
 
-use crate::escape::{project_relation, redact_public_text};
+use crate::escape::{redact_public_text, PublicRelationProjector};
 
 /// Renders `graph` as `NetworkX` node-link JSON.
 ///
@@ -79,6 +79,7 @@ pub fn to_node_link(graph: &Graph) -> Result<String> {
         .collect();
 
     // Build links array.
+    let mut relation_projector = PublicRelationProjector::new();
     let links: Vec<Value> = graph
         .edges
         .iter()
@@ -89,7 +90,8 @@ pub fn to_node_link(graph: &Graph) -> Result<String> {
             } else {
                 0.8
             };
-            let projected_relation = project_relation(&edge.relation);
+            let projected_relation =
+                relation_projector.project(edge.source, edge.target, &edge.relation);
             serde_json::json!({
                 "source": edge.source.get(),
                 "target": edge.target.get(),
@@ -115,7 +117,7 @@ pub fn to_node_link(graph: &Graph) -> Result<String> {
 
 #[cfg(test)]
 mod tests {
-    use super::{project_relation, to_node_link};
+    use super::to_node_link;
     use habitat_graph_core::{
         Community, CommunityId, Confidence, Edge, Graph, Node, NodeId, Span, SCHEMA_VERSION,
     };
@@ -557,7 +559,7 @@ mod tests {
         let v = parse(&to_node_link(&g).unwrap());
         assert_eq!(v["nodes"][0]["source_file"], "[REDACTED:api_key]");
         let relation = v["links"][0]["relation"].as_str().expect("relation");
-        assert!(relation.starts_with("[REDACTED:bearer_token]#r"));
+        assert_eq!(relation, "[REDACTED:bearer_token]#e0");
     }
 
     #[test]
@@ -578,14 +580,22 @@ mod tests {
         assert_ne!(relations[0], relations[1]);
         assert!(relations
             .iter()
-            .all(|relation| relation.starts_with("[REDACTED:api_key]#r")));
+            .all(|relation| relation.starts_with("[REDACTED:api_key]#e")));
         assert!(!to_node_link(&g).unwrap().contains("api_key=alpha"));
     }
 
     #[test]
     fn projected_relation_identity_is_idempotent() {
-        let projected = project_relation("api_key=alpha");
-        assert_eq!(project_relation(&projected), projected);
+        let mut g = Graph::new();
+        g.edges
+            .push(edge(1, 2, "api_key=alpha", Confidence::Extracted));
+        let first = to_node_link(&g).unwrap();
+        let projected = parse(&first)["links"][0]["relation"]
+            .as_str()
+            .expect("relation")
+            .to_owned();
+        g.edges[0].relation = projected;
+        assert_eq!(to_node_link(&g).unwrap(), first);
     }
 
     #[test]

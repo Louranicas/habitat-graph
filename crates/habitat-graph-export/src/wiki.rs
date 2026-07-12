@@ -29,7 +29,7 @@ use std::fmt::Write as FmtWrite;
 
 use habitat_graph_core::{display_safe, sanitize_label, Graph, NodeId};
 
-use crate::escape::redact_public_text;
+use crate::escape::{redact_public_text, PublicRelationProjector};
 
 /// Renders `graph` as a plain-Markdown wiki: one article per node plus an `index.md`.
 ///
@@ -68,16 +68,18 @@ pub fn render_wiki(graph: &Graph) -> Vec<(String, String)> {
     let mut outbound: BTreeMap<NodeId, Vec<(String, NodeId)>> = BTreeMap::new();
     let mut inbound: BTreeMap<NodeId, Vec<(String, NodeId)>> = BTreeMap::new();
 
+    let mut relation_projector = PublicRelationProjector::new();
     for edge in &graph.edges {
         if label_map.contains_key(&edge.source) && label_map.contains_key(&edge.target) {
+            let relation = relation_projector.project(edge.source, edge.target, &edge.relation);
             outbound
                 .entry(edge.source)
                 .or_default()
-                .push((edge.relation.clone(), edge.target));
+                .push((relation.clone(), edge.target));
             inbound
                 .entry(edge.target)
                 .or_default()
-                .push((edge.relation.clone(), edge.source));
+                .push((relation, edge.source));
         }
     }
 
@@ -198,8 +200,7 @@ fn render_node_article(
         for (relation, target_id) in ob_edges {
             let target_label = label_map.get(target_id).copied().unwrap_or("");
             let link_text = md_link_text(&sanitize_label(target_label));
-            let redacted_relation = redact_public_text(relation);
-            let safe_rel = display_safe(&sanitize_label(&redacted_relation));
+            let safe_rel = display_safe(&sanitize_label(relation));
             let _ = writeln!(
                 out,
                 "- [{link_text}](node-{}.md) ({safe_rel})",
@@ -221,8 +222,7 @@ fn render_node_article(
         for (relation, source_id) in ib_edges {
             let source_label = label_map.get(source_id).copied().unwrap_or("");
             let link_text = md_link_text(&sanitize_label(source_label));
-            let redacted_relation = redact_public_text(relation);
-            let safe_rel = display_safe(&sanitize_label(&redacted_relation));
+            let safe_rel = display_safe(&sanitize_label(relation));
             let _ = writeln!(
                 out,
                 "- [{link_text}](node-{}.md) ({safe_rel})",

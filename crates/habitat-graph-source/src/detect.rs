@@ -66,12 +66,25 @@ fn is_git_metadata(path: &Path) -> bool {
     if path.is_dir() {
         path.join("HEAD").is_file()
     } else if path.is_file() {
-        std::fs::read_to_string(path).ok().is_some_and(|contents| {
-            contents
-                .lines()
-                .next()
-                .is_some_and(|line| line.trim().starts_with("gitdir:"))
-        })
+        std::fs::read_to_string(path)
+            .ok()
+            .and_then(|contents| {
+                contents
+                    .lines()
+                    .next()
+                    .and_then(|line| line.trim().strip_prefix("gitdir:"))
+                    .map(str::trim)
+                    .filter(|gitdir| !gitdir.is_empty())
+                    .map(PathBuf::from)
+            })
+            .map(|gitdir| {
+                if gitdir.is_absolute() {
+                    gitdir
+                } else {
+                    path.parent().unwrap_or_else(|| Path::new("")).join(gitdir)
+                }
+            })
+            .is_some_and(|gitdir| gitdir.is_dir() && gitdir.join("HEAD").is_file())
     } else {
         false
     }
@@ -400,9 +413,27 @@ mod tests {
     }
 
     #[test]
+    fn stale_worktree_pointer_does_not_enable_parent_ignores() {
+        let repository = TempDir::new().unwrap();
+        fs::write(repository.path().join(".git"), "gitdir: .missing-gitdir\n").unwrap();
+        fs::create_dir_all(repository.path().join("src")).unwrap();
+        fs::write(repository.path().join("src/ignored.rs"), b"").unwrap();
+        fs::write(repository.path().join(".gitignore"), "ignored.rs\n").unwrap();
+
+        let got = detect(&repository.path().join("src"), &["rs"]).unwrap();
+        assert_eq!(filenames(&got), vec!["ignored.rs"]);
+    }
+
+    #[test]
     fn worktree_subdirectory_scan_inherits_repository_gitignore() {
         let repository = TempDir::new().unwrap();
-        fs::write(repository.path().join(".git"), "gitdir: /unused\n").unwrap();
+        fs::create_dir_all(repository.path().join(".git-data")).unwrap();
+        fs::write(
+            repository.path().join(".git-data/HEAD"),
+            "ref: refs/heads/main\n",
+        )
+        .unwrap();
+        fs::write(repository.path().join(".git"), "gitdir: .git-data\n").unwrap();
         fs::create_dir_all(repository.path().join("src")).unwrap();
         fs::write(repository.path().join("src/ignored.rs"), b"").unwrap();
         fs::write(repository.path().join(".gitignore"), "ignored.rs\n").unwrap();

@@ -254,7 +254,7 @@ fn generated_wiki_filename(filename: &str) -> bool {
         && id.parse::<u32>().is_ok()
 }
 
-fn sync_generated_wiki(wiki_dir: &Path, rendered: &[(String, String)]) -> Result<()> {
+pub(super) fn sync_generated_wiki(wiki_dir: &Path, rendered: &[(String, String)]) -> Result<()> {
     std::fs::create_dir_all(wiki_dir).map_err(|error| GraphError::Io(error.to_string()))?;
     let mut current_names = HashSet::with_capacity(rendered.len());
     for (filename, _) in rendered {

@@ -326,8 +326,9 @@ fn do_full_build(out: &Path, files: &[PathBuf]) -> Result<()> {
     Ok(())
 }
 
-/// Writes all three core artifacts (`graph.json`, `GRAPH_REPORT.md`, `graph.html`) and the
-/// sidecar (`<out>/.habitat-graph-state.json`) into `out`, creating the directory if needed.
+/// Writes all three core artifacts (`graph.json`, `GRAPH_REPORT.md`, `graph.html`), refreshes any
+/// existing optional exports, and writes the sidecar (`<out>/.habitat-graph-state.json`) into
+/// `out`, creating the directory if needed.
 ///
 /// The sidecar stores `graph` with `current_manifest` substituted in: this ensures the sidecar
 /// tracks the actual content hashes of the current file-system snapshot, not the empty manifest
@@ -355,12 +356,76 @@ fn write_artifacts(out: &Path, graph: &Graph, current_manifest: Manifest) -> Res
     std::fs::write(out.join("graph.html"), html.as_bytes())
         .map_err(|e| GraphError::Io(e.to_string()))?;
 
+    refresh_existing_optional_artifacts(out, graph)?;
+
     // Sidecar — full internal Graph with the current content-hash manifest, written last so
     // that if it exists, the other artifacts were (at least attempted to be) written first.
     let mut sidecar = graph.clone();
     sidecar.manifest = current_manifest;
     let sidecar_json = sidecar.to_json()?;
     write_private_sidecar(&out.join(SIDECAR), sidecar_json.as_bytes())?;
+
+    Ok(())
+}
+
+fn existing_artifact(path: &Path, directory: bool) -> Result<bool> {
+    let metadata = match std::fs::symlink_metadata(path) {
+        Ok(metadata) => metadata,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(false),
+        Err(error) => {
+            return Err(GraphError::Io(format!(
+                "inspect optional artifact {}: {error}",
+                path.display()
+            )))
+        }
+    };
+    let expected_type = if directory {
+        metadata.file_type().is_dir()
+    } else {
+        metadata.file_type().is_file()
+    };
+    if !expected_type {
+        return Err(GraphError::Guard(format!(
+            "optional artifact has unexpected file type: {}",
+            path.display()
+        )));
+    }
+    Ok(true)
+}
+
+fn refresh_existing_optional_artifacts(out: &Path, graph: &Graph) -> Result<()> {
+    let svg_path = out.join("graph.svg");
+    if existing_artifact(&svg_path, false)? {
+        std::fs::write(
+            &svg_path,
+            habitat_graph_export::render_svg(graph).as_bytes(),
+        )
+        .map_err(|error| GraphError::Io(format!("graph.svg: {error}")))?;
+    }
+
+    let graphml_path = out.join("graph.graphml");
+    if existing_artifact(&graphml_path, false)? {
+        std::fs::write(
+            &graphml_path,
+            habitat_graph_export::render_graphml(graph).as_bytes(),
+        )
+        .map_err(|error| GraphError::Io(format!("graph.graphml: {error}")))?;
+    }
+
+    let cypher_path = out.join("graph.cypher");
+    if existing_artifact(&cypher_path, false)? {
+        std::fs::write(
+            &cypher_path,
+            habitat_graph_export::render_cypher(graph).as_bytes(),
+        )
+        .map_err(|error| GraphError::Io(format!("graph.cypher: {error}")))?;
+    }
+
+    let wiki_dir = out.join("wiki");
+    if existing_artifact(&wiki_dir, true)? {
+        let rendered = habitat_graph_export::render_wiki(graph);
+        super::extract::sync_generated_wiki(&wiki_dir, &rendered)?;
+    }
 
     Ok(())
 }
@@ -455,6 +520,7 @@ fn prune_graph(mut graph: Graph, stale_files: &HashSet<&str>) -> Graph {
 
 #[cfg(all(test, unix))]
 mod tests {
+    use std::collections::HashSet;
     use std::fs;
     use std::path::Path;
 
@@ -632,6 +698,22 @@ mod tests {
         for artifact in ["graph.json", "GRAPH_REPORT.md", "graph.html"] {
             fs::write(out.path().join(artifact), raw_label).unwrap();
         }
+        for artifact in ["graph.svg", "graph.graphml", "graph.cypher"] {
+            fs::write(out.path().join(artifact), raw_label).unwrap();
+        }
+        let existing_ids: HashSet<u32> = parse_sidecar(out.path())
+            .nodes
+            .iter()
+            .map(|node| node.id.get())
+            .collect();
+        let stale_id = (0..=u32::MAX)
+            .find(|candidate| !existing_ids.contains(candidate))
+            .unwrap();
+        let wiki = out.path().join("wiki");
+        fs::create_dir(&wiki).unwrap();
+        fs::write(wiki.join("index.md"), raw_label).unwrap();
+        fs::write(wiki.join(format!("node-{stale_id}.md")), raw_label).unwrap();
+        fs::write(wiki.join("user.md"), "keep me").unwrap();
         #[cfg(unix)]
         {
             use std::os::unix::fs::PermissionsExt as _;
@@ -640,12 +722,29 @@ mod tests {
         }
 
         assert_eq!(run(src.path(), out.path()), 0);
-        for artifact in ["graph.json", "GRAPH_REPORT.md", "graph.html"] {
+        for artifact in [
+            "graph.json",
+            "GRAPH_REPORT.md",
+            "graph.html",
+            "graph.svg",
+            "graph.graphml",
+            "graph.cypher",
+        ] {
             let refreshed = fs::read_to_string(out.path().join(artifact)).unwrap();
             assert!(
                 !refreshed.contains(raw_label),
                 "legacy raw label survived refresh in {artifact}"
             );
+        }
+        assert!(!wiki.join(format!("node-{stale_id}.md")).exists());
+        assert_eq!(fs::read_to_string(wiki.join("user.md")).unwrap(), "keep me");
+        for entry in fs::read_dir(&wiki).unwrap() {
+            let entry = entry.unwrap();
+            if entry.file_name() == "user.md" {
+                continue;
+            }
+            let refreshed = fs::read_to_string(entry.path()).unwrap();
+            assert!(!refreshed.contains(raw_label));
         }
         #[cfg(unix)]
         {

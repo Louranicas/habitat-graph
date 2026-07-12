@@ -23,7 +23,8 @@ pub use error::{GraphError, Result};
 pub use extraction::{Extraction, RawEdge, RawNode};
 pub use guard::{
     confine_to, display_safe, is_canonical_redaction_marker, project_public_relation,
-    redact_public_text, sanitize_label, screen_for_secrets, validate_url, SECRET_TAG_ORDER,
+    redact_public_text, sanitize_label, screen_for_secrets, validate_url, PublicRelationProjector,
+    SECRET_TAG_ORDER,
 };
 pub use ids::{content_id, CommunityId, EdgeId, NodeId};
 pub use schema::{Community, Edge, Graph, InputRecord, Manifest, Node, SCHEMA_VERSION};

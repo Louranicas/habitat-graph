@@ -8,8 +8,10 @@
 //! format drift such as JSON being redacted while SVG or generated Markdown still exposes the
 //! original label.
 
-pub(crate) use habitat_graph_core::project_public_relation as project_relation;
 pub use habitat_graph_core::redact_public_text;
+pub(crate) use habitat_graph_core::{
+    project_public_relation as project_relation, PublicRelationProjector,
+};
 
 /// Escapes a string for safe embedding inside XML text or a double-quoted XML attribute.
 ///

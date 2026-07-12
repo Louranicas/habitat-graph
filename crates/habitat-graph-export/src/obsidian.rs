@@ -1,13 +1,13 @@
 //! Obsidian vault export: one note per node with `[[wikilinks]]`.
 
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::fmt::Write as FmtWrite;
 
 use habitat_graph_core::{
     display_safe, is_canonical_redaction_marker, sanitize_label, CommunityId, Graph, Node, NodeId,
 };
 
-use crate::escape::redact_public_text;
+use crate::escape::{project_relation, redact_public_text, PublicRelationProjector};
 
 /// Renders `graph` as an Obsidian vault: a deterministic list of `(filename, markdown)` pairs —
 /// one note per node (its `source_file` + `[[wikilinks]]` to connected nodes) plus a
@@ -135,21 +135,69 @@ fn assign_filenames(graph: &Graph) -> Vec<String> {
         *stem_count.entry(s.as_str()).or_default() += 1;
     }
 
-    graph
+    let qualified: Vec<bool> = graph
         .nodes
         .iter()
         .zip(stems.iter())
         .map(|(node, stem)| {
             let projected = redact_public_text(&node.label);
-            if is_canonical_redaction_marker(&projected)
+            is_canonical_redaction_marker(&projected)
                 || stem_count.get(stem.as_str()).copied().unwrap_or(0) > 1
-            {
+        })
+        .collect();
+    let preferred: Vec<String> = graph
+        .nodes
+        .iter()
+        .zip(stems.iter())
+        .zip(qualified.iter())
+        .map(|((node, stem), qualified)| {
+            if *qualified {
                 format!("{}_{}.md", stem, node.id)
             } else {
                 format!("{stem}.md")
             }
         })
-        .collect()
+        .collect();
+
+    let mut preferred_count: HashMap<&str, usize> = HashMap::new();
+    preferred_count.insert("_MOC.md", 1);
+    for filename in &preferred {
+        *preferred_count.entry(filename).or_default() += 1;
+    }
+    let reserved: HashSet<&str> = preferred_count.keys().copied().collect();
+    let mut assigned = vec![String::new(); graph.nodes.len()];
+    let mut used = HashSet::from(["_MOC.md".to_owned()]);
+    let mut order: Vec<usize> = (0..graph.nodes.len()).collect();
+    order.sort_unstable_by_key(|index| (!qualified[*index], graph.nodes[*index].id, *index));
+
+    for index in order {
+        let candidate = &preferred[index];
+        if !used.contains(candidate)
+            && (qualified[index] || preferred_count.get(candidate.as_str()) == Some(&1))
+        {
+            assigned[index].clone_from(candidate);
+            used.insert(candidate.clone());
+            continue;
+        }
+
+        let base = format!("{}_{}", stems[index], graph.nodes[index].id);
+        let mut attempt = 1_usize;
+        loop {
+            let fallback = if attempt == 1 {
+                format!("{base}.md")
+            } else {
+                format!("{base}_{attempt}.md")
+            };
+            if !used.contains(&fallback) && !reserved.contains(fallback.as_str()) {
+                used.insert(fallback.clone());
+                assigned[index] = fallback;
+                break;
+            }
+            attempt = attempt.saturating_add(1);
+        }
+    }
+
+    assigned
 }
 
 /// Builds a per-node sorted adjacency list: `NodeId → [(relation, neighbour_id)]`.
@@ -159,14 +207,16 @@ fn assign_filenames(graph: &Graph) -> Vec<String> {
 #[must_use]
 fn build_adjacency(graph: &Graph) -> HashMap<NodeId, Vec<(String, NodeId)>> {
     let mut adj: HashMap<NodeId, Vec<(String, NodeId)>> = HashMap::new();
+    let mut relation_projector = PublicRelationProjector::new();
     for edge in &graph.edges {
+        let relation = relation_projector.project(edge.source, edge.target, &edge.relation);
         adj.entry(edge.source)
             .or_default()
-            .push((redact_public_text(&edge.relation).into_owned(), edge.target));
+            .push((relation.clone(), edge.target));
         if edge.source != edge.target {
             adj.entry(edge.target)
                 .or_default()
-                .push((redact_public_text(&edge.relation).into_owned(), edge.source));
+                .push((relation, edge.source));
         }
     }
     for neighbours in adj.values_mut() {
@@ -201,7 +251,7 @@ fn yaml_dq(s: &str) -> String {
 /// (`[`, `]`, `:`) (STRIDE-T hardening — closes the raw-`relation` boundary that `node.label`
 /// already guards).
 fn field_key(relation: &str) -> String {
-    display_safe(&redact_public_text(relation))
+    display_safe(&project_relation(relation))
         .chars()
         .filter(|c| !matches!(c, '[' | ']' | ':'))
         .collect()
@@ -358,10 +408,11 @@ fn wikilink_alias(label: &str) -> String {
 #[must_use]
 fn make_stem(label: &str) -> String {
     let redacted = redact_public_text(label);
-    if let Some(tags) = redacted
-        .strip_prefix("[REDACTED:")
-        .and_then(|rest| rest.strip_suffix(']'))
-    {
+    if is_canonical_redaction_marker(&redacted) {
+        let tags = redacted
+            .strip_prefix("[REDACTED:")
+            .and_then(|rest| rest.strip_suffix(']'))
+            .unwrap_or_default();
         return format!("REDACTED_{}", tags.replace(',', "_"));
     }
     let sanitized = display_safe(&sanitize_label(&redacted));
@@ -1075,5 +1126,60 @@ mod tests {
             joined.contains("file: \"src/a\\\"evil: true.rs\""),
             "source_file quote must be YAML-escaped: {joined}"
         );
+    }
+
+    #[test]
+    fn noncanonical_marker_cannot_create_path_components() {
+        let g = graph_with_nodes(vec![make_node(
+            1,
+            "[REDACTED:x/../../../escape]",
+            "src/lib.rs",
+        )]);
+        let rendered = render_vault(&g);
+        let filename = rendered
+            .iter()
+            .find(|(filename, _)| filename != "_MOC.md")
+            .map(|(filename, _)| filename)
+            .unwrap();
+
+        assert!(!filename.contains('/'));
+        assert!(!filename.contains('\\'));
+        assert_eq!(std::path::Path::new(filename).components().count(), 1);
+    }
+
+    #[test]
+    fn final_filename_allocation_handles_cross_stem_collisions() {
+        let g = graph_with_nodes(vec![
+            make_node(1, "[REDACTED:aws_access_key_id]", "a.rs"),
+            make_node(2, "REDACTED_aws_access_key_id_n1", "b.rs"),
+        ]);
+        let filenames: Vec<String> = render_vault(&g)
+            .into_iter()
+            .map(|(filename, _)| filename)
+            .collect();
+
+        assert!(filenames.contains(&"REDACTED_aws_access_key_id_n1.md".to_owned()));
+        assert!(filenames.contains(&"REDACTED_aws_access_key_id_n1_n2.md".to_owned()));
+        let unique: std::collections::HashSet<&str> =
+            filenames.iter().map(String::as_str).collect();
+        assert_eq!(unique.len(), filenames.len());
+    }
+
+    #[test]
+    fn node_filename_cannot_replace_the_moc() {
+        let g = graph_with_nodes(vec![make_node(4, "_MOC", "a.rs")]);
+        let filenames: Vec<String> = render_vault(&g)
+            .into_iter()
+            .map(|(filename, _)| filename)
+            .collect();
+
+        assert_eq!(
+            filenames
+                .iter()
+                .filter(|filename| filename.as_str() == "_MOC.md")
+                .count(),
+            1
+        );
+        assert!(filenames.contains(&"_MOC_n4.md".to_owned()));
     }
 }

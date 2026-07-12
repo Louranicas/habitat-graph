@@ -9,7 +9,7 @@ use std::fmt::Write as FmtWrite;
 
 use habitat_graph_core::{sanitize_label, Graph};
 
-use crate::escape::{redact_public_text, xml_escape};
+use crate::escape::{redact_public_text, xml_escape, PublicRelationProjector};
 
 /// `GraphML` attribute key identifier for a node's `label` field.
 const KEY_LABEL: &str = "d_label";
@@ -119,11 +119,13 @@ pub fn render_graphml(graph: &Graph) -> String {
     }
 
     // One <edge> element per graph edge; deterministic (follows graph.edges order).
+    let mut relation_projector = PublicRelationProjector::new();
     for edge in &graph.edges {
         let src = edge.source.get();
         let tgt = edge.target.get();
-        let redacted_relation = redact_public_text(&edge.relation);
-        let relation = xml_escape(&sanitize_label(&redacted_relation));
+        let projected_relation =
+            relation_projector.project(edge.source, edge.target, &edge.relation);
+        let relation = xml_escape(&sanitize_label(&projected_relation));
         // Confidence values are always ASCII uppercase identifiers; xml_escape is a no-op here
         // but is applied for belt-and-suspenders STRIDE-T compliance.
         let confidence = xml_escape(edge.confidence.as_str());

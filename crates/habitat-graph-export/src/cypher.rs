@@ -11,7 +11,7 @@ use std::fmt::Write as FmtWrite;
 
 use habitat_graph_core::Graph;
 
-use crate::escape::{cypher_escape, project_relation, redact_public_text};
+use crate::escape::{cypher_escape, redact_public_text, PublicRelationProjector};
 
 /// Renders `graph` as a Neo4j Cypher import script (deterministic, infallible).
 ///
@@ -72,12 +72,14 @@ pub fn render_cypher(graph: &Graph) -> String {
         );
     }
 
+    let mut relation_projector = PublicRelationProjector::new();
     for edge in &graph.edges {
         let src = edge.source.get();
         let tgt = edge.target.get();
         // `relation` is attacker-influenced — escaped AND stored as a property, never as the
         // relationship-type identifier (which is always the fixed literal :REL).
-        let projected_relation = project_relation(&edge.relation);
+        let projected_relation =
+            relation_projector.project(edge.source, edge.target, &edge.relation);
         let relation = cypher_escape(&projected_relation);
         // `confidence` is a bounded enum string from this library's own code; cypher_escape
         // is applied for uniformity (the canonical strings contain no escapable characters).
@@ -991,7 +993,7 @@ mod tests {
         assert_ne!(relationships[0], relationships[1]);
         assert!(relationships
             .iter()
-            .all(|line| line.contains("[REDACTED:api_key]#r")));
+            .all(|line| line.contains("[REDACTED:api_key]#e")));
     }
 
     #[test]
