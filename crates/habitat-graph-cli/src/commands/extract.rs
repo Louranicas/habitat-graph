@@ -173,6 +173,21 @@ fn generated_vault_ownership(vault_dir: &Path) -> Result<HashSet<String>> {
     Ok(owned)
 }
 
+fn write_vault_manifest(vault_dir: &Path, names: &HashSet<String>) -> Result<()> {
+    let mut files: Vec<&str> = names.iter().map(String::as_str).collect();
+    files.sort_unstable();
+    let manifest = serde_json::to_string_pretty(&serde_json::json!({
+        "schema": VAULT_MANIFEST_SCHEMA,
+        "files": files,
+    }))
+    .map_err(|error| GraphError::Schema(format!("vault manifest serialize: {error}")))?;
+    let temporary = vault_dir.join(format!(".{VAULT_MANIFEST}.tmp.{}", std::process::id()));
+    std::fs::write(&temporary, manifest.as_bytes())
+        .map_err(|error| GraphError::Io(format!("vault manifest temp write: {error}")))?;
+    std::fs::rename(&temporary, vault_dir.join(VAULT_MANIFEST))
+        .map_err(|error| GraphError::Io(format!("vault manifest rename: {error}")))
+}
+
 /// Synchronizes generated notes exactly while preserving every unowned/user-authored file.
 fn sync_generated_vault(vault_dir: &Path, rendered: &[(String, String)]) -> Result<()> {
     std::fs::create_dir_all(vault_dir).map_err(|error| GraphError::Io(error.to_string()))?;
@@ -208,26 +223,68 @@ fn sync_generated_vault(vault_dir: &Path, rendered: &[(String, String)]) -> Resu
             }
         }
     }
+
+    let journal_names: HashSet<String> = prior_owned.union(&current_names).cloned().collect();
+    write_vault_manifest(vault_dir, &journal_names)?;
     for (filename, content) in rendered {
         std::fs::write(vault_dir.join(filename), content.as_bytes())
             .map_err(|error| GraphError::Io(format!("{filename}: {error}")))?;
     }
 
-    let mut files: Vec<&str> = rendered
-        .iter()
-        .map(|(filename, _)| filename.as_str())
-        .collect();
-    files.sort_unstable();
-    let manifest = serde_json::to_string_pretty(&serde_json::json!({
-        "schema": VAULT_MANIFEST_SCHEMA,
-        "files": files,
-    }))
-    .map_err(|error| GraphError::Schema(format!("vault manifest serialize: {error}")))?;
-    let temporary = vault_dir.join(format!(".{VAULT_MANIFEST}.tmp.{}", std::process::id()));
-    std::fs::write(&temporary, manifest.as_bytes())
-        .map_err(|error| GraphError::Io(format!("vault manifest temp write: {error}")))?;
-    std::fs::rename(&temporary, vault_dir.join(VAULT_MANIFEST))
-        .map_err(|error| GraphError::Io(format!("vault manifest rename: {error}")))?;
+    if journal_names == current_names {
+        Ok(())
+    } else {
+        write_vault_manifest(vault_dir, &current_names)
+    }
+}
+
+fn generated_wiki_filename(filename: &str) -> bool {
+    if filename == "index.md" {
+        return true;
+    }
+    let Some(id) = filename
+        .strip_prefix("node-")
+        .and_then(|rest| rest.strip_suffix(".md"))
+    else {
+        return false;
+    };
+    !id.is_empty()
+        && (id == "0" || !id.starts_with('0'))
+        && id.chars().all(|character| character.is_ascii_digit())
+        && id.parse::<u32>().is_ok()
+}
+
+fn sync_generated_wiki(wiki_dir: &Path, rendered: &[(String, String)]) -> Result<()> {
+    std::fs::create_dir_all(wiki_dir).map_err(|error| GraphError::Io(error.to_string()))?;
+    let mut current_names = HashSet::with_capacity(rendered.len());
+    for (filename, _) in rendered {
+        if !generated_wiki_filename(filename) || !current_names.insert(filename.as_str()) {
+            return Err(GraphError::Guard(format!(
+                "exporter produced invalid wiki filename: {filename:?}"
+            )));
+        }
+    }
+
+    for entry in std::fs::read_dir(wiki_dir)
+        .map_err(|error| GraphError::Io(format!("wiki inventory: {error}")))?
+    {
+        let entry = entry.map_err(|error| GraphError::Io(format!("wiki entry: {error}")))?;
+        let filename = entry.file_name().to_string_lossy().into_owned();
+        if generated_wiki_filename(&filename) && !current_names.contains(filename.as_str()) {
+            if let Err(error) = std::fs::remove_file(entry.path()) {
+                if error.kind() != std::io::ErrorKind::NotFound {
+                    return Err(GraphError::Io(format!(
+                        "remove stale wiki page {filename}: {error}"
+                    )));
+                }
+            }
+        }
+    }
+
+    for (filename, content) in rendered {
+        std::fs::write(wiki_dir.join(filename), content.as_bytes())
+            .map_err(|error| GraphError::Io(format!("{filename}: {error}")))?;
+    }
     Ok(())
 }
 
@@ -306,11 +363,8 @@ fn run_inner(
     }
     if opts.wiki {
         let wiki_dir = out.join("wiki");
-        std::fs::create_dir_all(&wiki_dir).map_err(|e| GraphError::Io(e.to_string()))?;
-        for (filename, content) in habitat_graph_export::render_wiki(&graph) {
-            std::fs::write(wiki_dir.join(&filename), content.as_bytes())
-                .map_err(|e| GraphError::Io(format!("{filename}: {e}")))?;
-        }
+        let rendered = habitat_graph_export::render_wiki(&graph);
+        sync_generated_wiki(&wiki_dir, &rendered)?;
     }
 
     Ok(graph.counts())
@@ -323,7 +377,7 @@ mod tests {
 
     use tempfile::TempDir;
 
-    use super::{run, run_artifacts, ExtractOpts};
+    use super::{run, run_artifacts, sync_generated_vault, write_vault_manifest, ExtractOpts};
 
     // ── Helpers ───────────────────────────────────────────────────────────────
 
@@ -491,6 +545,31 @@ mod tests {
         assert_eq!(run(src.path(), out.path(), Some(vault.path())), 0);
         assert!(vault.path().join("new_generated.md").exists());
         assert!(!vault.path().join("old_generated.md").exists());
+    }
+
+    #[test]
+    fn vault_sync_retries_after_partial_note_write() {
+        let vault = TempDir::new().unwrap();
+        let prior_owned = std::collections::HashSet::from(["blocked.md".to_owned()]);
+        write_vault_manifest(vault.path(), &prior_owned).unwrap();
+        fs::create_dir(vault.path().join("blocked.md")).unwrap();
+        let rendered = vec![
+            ("written.md".to_owned(), "written".to_owned()),
+            ("blocked.md".to_owned(), "unblocked".to_owned()),
+        ];
+
+        assert!(sync_generated_vault(vault.path(), &rendered).is_err());
+        assert_eq!(
+            fs::read_to_string(vault.path().join("written.md")).unwrap(),
+            "written"
+        );
+
+        fs::remove_dir(vault.path().join("blocked.md")).unwrap();
+        sync_generated_vault(vault.path(), &rendered).unwrap();
+        assert_eq!(
+            fs::read_to_string(vault.path().join("blocked.md")).unwrap(),
+            "unblocked"
+        );
     }
 
     #[test]
@@ -893,6 +972,43 @@ mod tests {
             out.path().join("wiki").join("index.md").exists(),
             "wiki/index.md must exist"
         );
+    }
+
+    #[test]
+    fn wiki_sync_removes_stale_generated_pages_and_preserves_other_files() {
+        let src = TempDir::new().unwrap();
+        let out = TempDir::new().unwrap();
+        let opts = ExtractOpts {
+            wiki: true,
+            ..ExtractOpts::default()
+        };
+        mk_file(src.path(), "lib.rs", "fn old_generated() {}");
+        assert_eq!(run_artifacts(src.path(), out.path(), None, opts), 0);
+
+        let wiki = out.path().join("wiki");
+        let old_pages: std::collections::HashSet<String> = fs::read_dir(&wiki)
+            .unwrap()
+            .filter_map(std::result::Result::ok)
+            .map(|entry| entry.file_name().to_string_lossy().into_owned())
+            .filter(|filename| filename.starts_with("node-"))
+            .collect();
+        assert!(!old_pages.is_empty());
+        fs::write(wiki.join("user.md"), "keep me").unwrap();
+
+        mk_file(src.path(), "lib.rs", "fn new_generated() {}");
+        assert_eq!(run_artifacts(src.path(), out.path(), None, opts), 0);
+        let new_pages: std::collections::HashSet<String> = fs::read_dir(&wiki)
+            .unwrap()
+            .filter_map(std::result::Result::ok)
+            .map(|entry| entry.file_name().to_string_lossy().into_owned())
+            .filter(|filename| filename.starts_with("node-"))
+            .collect();
+
+        assert!(old_pages.is_disjoint(&new_pages));
+        assert!(old_pages
+            .iter()
+            .all(|filename| !wiki.join(filename).exists()));
+        assert_eq!(fs::read_to_string(wiki.join("user.md")).unwrap(), "keep me");
     }
 
     #[test]

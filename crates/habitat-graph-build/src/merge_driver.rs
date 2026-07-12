@@ -19,20 +19,25 @@
 //! | yes | yes | no  | **drop** (deleted by `theirs`; unchanged in `ours`) |
 //! | yes | yes | yes | keep once (unchanged on both sides) |
 //!
-//! Edges follow the same policy keyed on `(source_identity, target_identity, relation)`. Edges whose
-//! endpoints were deleted by the node-level merge are also dropped even if the edge itself
-//! survived.  Communities follow the same policy keyed on community label; member [`NodeId`]s
-//! are remapped to the merged id space and members whose node was deleted are pruned.
+//! Edges follow the same policy keyed on
+//! `(source_identity, target_identity, public_relation_identity)`. Edges whose endpoints were
+//! deleted by the node-level merge are also dropped even if the edge itself survived. Communities
+//! follow the same policy keyed on community label; member [`NodeId`]s are remapped to the merged
+//! id space and members whose node was deleted are pruned.
 //!
 //! The output is passed through [`crate::dedup`] then [`Graph::sorted`] so two runs on identical
 //! inputs produce byte-identical output (R4).
 
 use std::collections::{HashMap, HashSet};
 
-use habitat_graph_core::{content_id, Community, CommunityId, Edge, Graph, Manifest, Node, NodeId};
+use habitat_graph_core::{
+    content_id, project_public_relation, Community, CommunityId, Edge, Graph, Manifest, Node,
+    NodeId,
+};
 
 use crate::merge_identity::{
-    node_id_to_identity_map, node_identity, node_identity_set, redacted_node_ids, NodeIdentity,
+    node_id_to_identity_map, node_identity, node_identity_set, redacted_node_markers, NodeIdentity,
+    RedactedNodeMarkers,
 };
 
 type EdgeKey = (NodeIdentity, NodeIdentity, String);
@@ -54,19 +59,19 @@ type EdgeKey = (NodeIdentity, NodeIdentity, String);
 /// - **Infallible**: this function never returns an error or panics.
 #[must_use]
 pub fn merge3(base: &Graph, ours: &Graph, theirs: &Graph) -> Graph {
-    let redacted_ids = redacted_node_ids(&[base, ours, theirs]);
-    let base_node_identities = node_identity_set(&base.nodes, &redacted_ids);
-    let ours_node_identities = node_identity_set(&ours.nodes, &redacted_ids);
-    let theirs_node_identities = node_identity_set(&theirs.nodes, &redacted_ids);
+    let redacted_markers = redacted_node_markers(&[base, ours, theirs]);
+    let base_node_identities = node_identity_set(&base.nodes, &redacted_markers);
+    let ours_node_identities = node_identity_set(&ours.nodes, &redacted_markers);
+    let theirs_node_identities = node_identity_set(&theirs.nodes, &redacted_markers);
 
-    let base_id_to_identity = node_id_to_identity_map(&base.nodes, &redacted_ids);
-    let ours_id_to_identity = node_id_to_identity_map(&ours.nodes, &redacted_ids);
-    let theirs_id_to_identity = node_id_to_identity_map(&theirs.nodes, &redacted_ids);
+    let base_id_to_identity = node_id_to_identity_map(&base.nodes, &redacted_markers);
+    let ours_id_to_identity = node_id_to_identity_map(&ours.nodes, &redacted_markers);
+    let theirs_id_to_identity = node_id_to_identity_map(&theirs.nodes, &redacted_markers);
 
     let ours_identity_to_node: HashMap<NodeIdentity, &Node> = ours
         .nodes
         .iter()
-        .map(|node| (node_identity(node, &redacted_ids), node))
+        .map(|node| (node_identity(node, &redacted_markers), node))
         .collect();
 
     // ── Phase 1: select winning nodes (base-aware deletion) ───────────────────
@@ -77,7 +82,7 @@ pub fn merge3(base: &Graph, ours: &Graph, theirs: &Graph) -> Graph {
         &ours_node_identities,
         &theirs_node_identities,
         &ours_identity_to_node,
-        &redacted_ids,
+        &redacted_markers,
     );
 
     // ── Phase 2: assign NodeIds; build identity → new_id map ──────────────────
@@ -135,7 +140,7 @@ fn edge_key_set(
         .filter_map(|e| {
             let src = id_to_identity.get(&e.source)?.clone();
             let tgt = id_to_identity.get(&e.target)?.clone();
-            Some((src, tgt, e.relation.clone()))
+            Some((src, tgt, project_public_relation(&e.relation)))
         })
         .collect()
 }
@@ -158,13 +163,13 @@ fn select_winning_nodes<'a>(
     ours_identities: &HashSet<NodeIdentity>,
     theirs_identities: &HashSet<NodeIdentity>,
     ours_identity_to_node: &HashMap<NodeIdentity, &'a Node>,
-    redacted_ids: &HashSet<NodeId>,
+    redacted_markers: &RedactedNodeMarkers,
 ) -> Vec<(NodeIdentity, Node)> {
     let mut seen: HashSet<NodeIdentity> = HashSet::new();
     let mut result = Vec::new();
 
     for node in ours_nodes.iter().chain(theirs_nodes.iter()) {
-        let identity = node_identity(node, redacted_ids);
+        let identity = node_identity(node, redacted_markers);
         if !seen.insert(identity.clone()) {
             continue;
         }
@@ -247,7 +252,7 @@ fn merge_graph_edges(
             let key = (
                 src_identity.clone(),
                 tgt_identity.clone(),
-                edge.relation.clone(),
+                project_public_relation(&edge.relation),
             );
 
             // Base-aware deletion: keep iff new OR kept on both sides.
@@ -369,8 +374,8 @@ fn merge_manifest(ours: &Manifest, theirs: &Manifest) -> Manifest {
 #[cfg(test)]
 mod tests {
     use habitat_graph_core::{
-        content_id, Community, CommunityId, Confidence, Edge, Graph, InputRecord, Node, NodeId,
-        Span,
+        content_id, project_public_relation, Community, CommunityId, Confidence, Edge, Graph,
+        InputRecord, Node, NodeId, Span,
     };
 
     use super::merge3;
@@ -1298,5 +1303,55 @@ mod tests {
             .edges
             .iter()
             .any(|edge| edge.source == shared && edge.target == beta));
+    }
+
+    #[test]
+    fn redacted_id_collision_keeps_clean_node_distinct() {
+        let collision_id = content_id("Safe");
+        let ours = nodes_graph(&[(collision_id, "[REDACTED:api_key]")]);
+        let theirs = nodes_graph(&[(collision_id, "Safe")]);
+
+        let merged = merge3(&Graph::new(), &ours, &theirs);
+        assert_eq!(merged.nodes.len(), 2);
+        let marker = merged
+            .nodes
+            .iter()
+            .find(|node| node.label == "[REDACTED:api_key]")
+            .unwrap()
+            .id;
+        let safe = merged
+            .nodes
+            .iter()
+            .find(|node| node.label == "Safe")
+            .unwrap()
+            .id;
+        assert_eq!(marker.get(), collision_id);
+        assert_ne!(marker, safe);
+    }
+
+    #[test]
+    fn collision_probed_secret_matches_public_node_in_three_way_merge() {
+        let probed_id = content_id("api_key_alpha").wrapping_add(1);
+        let ours = nodes_graph(&[(probed_id, "api_key_alpha")]);
+        let theirs = nodes_graph(&[(probed_id, "[REDACTED:api_key]")]);
+
+        let merged = merge3(&Graph::new(), &ours, &theirs);
+        assert_eq!(merged.nodes.len(), 1);
+        assert_eq!(merged.nodes[0].id.get(), probed_id);
+        assert_eq!(merged.nodes[0].label, "api_key_alpha");
+    }
+
+    #[test]
+    fn raw_and_projected_edges_share_three_way_identity() {
+        let mut ours = nodes_graph(&[(1, "A"), (2, "B")]);
+        ours.edges.push(edge(1, 2, "api_key=alpha"));
+        let mut theirs = nodes_graph(&[(10, "A"), (20, "B")]);
+        theirs
+            .edges
+            .push(edge(10, 20, &project_public_relation("api_key=alpha")));
+
+        let merged = merge3(&Graph::new(), &ours, &theirs);
+        assert_eq!(merged.edges.len(), 1);
+        assert_eq!(merged.edges[0].relation, "api_key=alpha");
     }
 }

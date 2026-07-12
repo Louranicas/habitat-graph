@@ -2,10 +2,14 @@
 
 use std::collections::{HashMap, HashSet};
 
-use habitat_graph_core::{content_id, Edge, Graph, Manifest, Node, NodeId};
+use habitat_graph_core::{
+    content_id, project_public_relation, Edge, Graph, Manifest, Node, NodeId,
+};
 use indexmap::IndexMap;
 
-use crate::merge_identity::{node_identity, redacted_node_ids, NodeIdentity};
+use crate::merge_identity::{
+    node_identity, redacted_node_markers, NodeIdentity, RedactedNodeMarkers,
+};
 
 /// Merges two [`Graph`]s whose [`NodeId`] spaces are **independent** into one coherent graph.
 ///
@@ -16,7 +20,8 @@ use crate::merge_identity::{node_identity, redacted_node_ids, NodeIdentity};
 ///    When the same identity appears in both graphs only one node is kept — the one from `a`.
 /// 2. Per-graph `old_id → new_id` maps let each graph's edges be remapped into the merged id
 ///    space.  An edge whose source **or** target lacks a mapping is silently dropped
-///    (dangling-edge policy).
+///    (dangling-edge policy). Raw and publicly projected forms of the same relation share one
+///    edge identity.
 /// 3. Communities from both graphs are concatenated (higher-level callers may further dedup
 ///    them later).
 /// 4. Manifests are combined: inputs are concatenated; `tool_version` and `schema` are taken
@@ -29,7 +34,7 @@ use crate::merge_identity::{node_identity, redacted_node_ids, NodeIdentity};
 /// This function is infallible.
 #[must_use]
 pub fn merge(a: Graph, b: Graph) -> Graph {
-    let redacted_ids = redacted_node_ids(&[&a, &b]);
+    let redacted_markers = redacted_node_markers(&[&a, &b]);
 
     // Destructure both graphs upfront so individual fields can be moved or borrowed
     // independently without triggering partial-move conflicts.
@@ -52,7 +57,7 @@ pub fn merge(a: Graph, b: Graph) -> Graph {
 
     let capacity = a_nodes.len().saturating_add(b_nodes.len());
     let mut identity_to_new_id: IndexMap<NodeIdentity, NodeId> = IndexMap::with_capacity(capacity);
-    let mut used_ids: HashSet<u32> = redacted_ids.iter().map(|id| id.get()).collect();
+    let mut used_ids: HashSet<u32> = redacted_markers.keys().map(|id| id.get()).collect();
     let mut merged_nodes: Vec<Node> = Vec::with_capacity(capacity);
 
     // Per-graph remaps: (original NodeId) → (new merged NodeId).
@@ -66,7 +71,7 @@ pub fn merge(a: Graph, b: Graph) -> Graph {
             &mut used_ids,
             &mut merged_nodes,
             node,
-            &redacted_ids,
+            &redacted_markers,
         );
         a_remap.insert(node.id, new_id);
     }
@@ -78,7 +83,7 @@ pub fn merge(a: Graph, b: Graph) -> Graph {
             &mut used_ids,
             &mut merged_nodes,
             node,
-            &redacted_ids,
+            &redacted_markers,
         );
         b_remap.insert(node.id, new_id);
     }
@@ -87,30 +92,10 @@ pub fn merge(a: Graph, b: Graph) -> Graph {
 
     let edge_cap = a_edges.len().saturating_add(b_edges.len());
     let mut merged_edges: Vec<Edge> = Vec::with_capacity(edge_cap);
+    let mut edge_identities: HashSet<(NodeId, NodeId, String)> = HashSet::with_capacity(edge_cap);
 
-    for edge in a_edges {
-        if let (Some(&src), Some(&tgt)) = (a_remap.get(&edge.source), a_remap.get(&edge.target)) {
-            merged_edges.push(Edge {
-                source: src,
-                target: tgt,
-                relation: edge.relation,
-                confidence: edge.confidence,
-            });
-        }
-        // else: dangling endpoint — silently drop the edge.
-    }
-
-    for edge in b_edges {
-        if let (Some(&src), Some(&tgt)) = (b_remap.get(&edge.source), b_remap.get(&edge.target)) {
-            merged_edges.push(Edge {
-                source: src,
-                target: tgt,
-                relation: edge.relation,
-                confidence: edge.confidence,
-            });
-        }
-        // else: dangling endpoint — silently drop the edge.
-    }
+    append_remapped_edges(a_edges, &a_remap, &mut merged_edges, &mut edge_identities);
+    append_remapped_edges(b_edges, &b_remap, &mut merged_edges, &mut edge_identities);
 
     // ── Phase 3: community concatenation ─────────────────────────────────────
 
@@ -144,10 +129,10 @@ fn intern_node(
     used_ids: &mut HashSet<u32>,
     merged_nodes: &mut Vec<Node>,
     node: &Node,
-    redacted_ids: &HashSet<NodeId>,
+    redacted_markers: &RedactedNodeMarkers,
 ) -> NodeId {
     use indexmap::map::Entry;
-    let identity = node_identity(node, redacted_ids);
+    let identity = node_identity(node, redacted_markers);
     match identity_to_new_id.entry(identity.clone()) {
         Entry::Occupied(e) => *e.get(),
         Entry::Vacant(e) => {
@@ -173,11 +158,34 @@ fn intern_node(
     }
 }
 
+fn append_remapped_edges(
+    edges: Vec<Edge>,
+    remap: &HashMap<NodeId, NodeId>,
+    merged_edges: &mut Vec<Edge>,
+    edge_identities: &mut HashSet<(NodeId, NodeId, String)>,
+) {
+    for edge in edges {
+        let (Some(&source), Some(&target)) = (remap.get(&edge.source), remap.get(&edge.target))
+        else {
+            continue;
+        };
+        let identity = (source, target, project_public_relation(&edge.relation));
+        if edge_identities.insert(identity) {
+            merged_edges.push(Edge {
+                source,
+                target,
+                relation: edge.relation,
+                confidence: edge.confidence,
+            });
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use habitat_graph_core::{
-        content_id, Community, CommunityId, Confidence, Edge, Graph, InputRecord, Node, NodeId,
-        Span, SCHEMA_VERSION,
+        content_id, project_public_relation, Community, CommunityId, Confidence, Edge, Graph,
+        InputRecord, Node, NodeId, Span, SCHEMA_VERSION,
     };
 
     use super::merge;
@@ -802,5 +810,81 @@ mod tests {
             .edges
             .iter()
             .any(|edge| edge.source == shared && edge.target == beta));
+    }
+
+    #[test]
+    fn redacted_id_collision_does_not_conflate_clean_node() {
+        let collision_id = content_id("Safe");
+        let mut public = Graph::new();
+        public
+            .nodes
+            .push(node(collision_id, "[REDACTED:api_key]", "public.rs"));
+        public.nodes.push(node(1, "PublicTarget", "public.rs"));
+        public.edges.push(edge(collision_id, 1, "public-edge"));
+
+        let mut clean = Graph::new();
+        clean.nodes.push(node(collision_id, "Safe", "clean.rs"));
+        clean.nodes.push(node(2, "CleanTarget", "clean.rs"));
+        clean.edges.push(edge(collision_id, 2, "clean-edge"));
+
+        let result = merge(public, clean);
+        let marker = result
+            .nodes
+            .iter()
+            .find(|node| node.label == "[REDACTED:api_key]")
+            .unwrap()
+            .id;
+        let safe = result
+            .nodes
+            .iter()
+            .find(|node| node.label == "Safe")
+            .unwrap()
+            .id;
+        assert_eq!(marker.get(), collision_id);
+        assert_ne!(marker, safe);
+        assert_eq!(result.nodes.len(), 4);
+        assert!(result
+            .edges
+            .iter()
+            .any(|edge| edge.source == marker && edge.relation == "public-edge"));
+        assert!(result
+            .edges
+            .iter()
+            .any(|edge| edge.source == safe && edge.relation == "clean-edge"));
+    }
+
+    #[test]
+    fn collision_probed_secret_node_matches_its_public_projection() {
+        let probed_id = content_id("api_key_alpha").wrapping_add(1);
+        let mut raw = Graph::new();
+        raw.nodes.push(node(probed_id, "api_key_alpha", "raw.rs"));
+        let mut public = Graph::new();
+        public
+            .nodes
+            .push(node(probed_id, "[REDACTED:api_key]", "public.rs"));
+
+        let result = merge(raw, public);
+        assert_eq!(result.nodes.len(), 1);
+        assert_eq!(result.nodes[0].id.get(), probed_id);
+        assert_eq!(result.nodes[0].label, "api_key_alpha");
+    }
+
+    #[test]
+    fn raw_and_projected_relations_share_merge_identity() {
+        let mut raw = Graph::new();
+        raw.nodes.push(node(1, "A", "raw.rs"));
+        raw.nodes.push(node(2, "B", "raw.rs"));
+        raw.edges.push(edge(1, 2, "api_key=alpha"));
+
+        let mut public = Graph::new();
+        public.nodes.push(node(10, "A", "public.rs"));
+        public.nodes.push(node(20, "B", "public.rs"));
+        public
+            .edges
+            .push(edge(10, 20, &project_public_relation("api_key=alpha")));
+
+        let result = merge(raw, public);
+        assert_eq!(result.edges.len(), 1);
+        assert_eq!(result.edges[0].relation, "api_key=alpha");
     }
 }

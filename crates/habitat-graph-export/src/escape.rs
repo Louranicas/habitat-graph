@@ -4,100 +4,12 @@
 //! arbitrary parsed source). Before a value is escaped for its destination format, obvious secret
 //! patterns are replaced with one deterministic marker by [`redact_public_text`]. Structured
 //! exporters then use [`xml_escape`] or [`cypher_escape`] to prevent injection/tampering (STRIDE-T).
-//! Keeping redaction and escaping in this single tested surface prevents format drift such as JSON
-//! being redacted while SVG or generated Markdown still exposes the original label.
+//! Keeping redaction in one shared policy and destination escaping in this tested surface prevents
+//! format drift such as JSON being redacted while SVG or generated Markdown still exposes the
+//! original label.
 
-use std::borrow::Cow;
-
-use habitat_graph_core::{
-    content_id, is_canonical_redaction_marker, screen_for_secrets, SECRET_TAG_ORDER,
-};
-
-/// Collects secret tags across the raw input and normalized forms used by downstream exporters.
-///
-/// Exporters remove control/noncharacter codepoints and some filename/link punctuation. Screening
-/// only the pre-transform bytes would allow two harmless-looking fragments to join into a secret
-/// pattern after that normalization (for example `api_<BEL>key`).
-fn normalized_secret_tags(input: &str) -> Vec<&'static str> {
-    let stripped: String = input
-        .chars()
-        .filter(|character| {
-            !character.is_control() && !matches!(*character, '\u{FFFE}' | '\u{FFFF}')
-        })
-        .collect();
-    let filename_like: String = stripped
-        .chars()
-        .map(|character| {
-            if character == '/' || character.is_whitespace() {
-                '_'
-            } else {
-                character
-            }
-        })
-        .collect();
-    let compact: String = stripped
-        .chars()
-        .filter(|character| character.is_alphanumeric())
-        .collect();
-
-    let mut encountered = std::collections::HashSet::new();
-    for candidate in [
-        input,
-        stripped.as_str(),
-        filename_like.as_str(),
-        compact.as_str(),
-    ] {
-        encountered.extend(screen_for_secrets(candidate));
-    }
-    SECRET_TAG_ORDER
-        .iter()
-        .copied()
-        .filter(|tag| encountered.contains(tag))
-        .collect()
-}
-
-/// Replaces obvious secret-bearing public text with a deterministic marker.
-///
-/// Clean values are borrowed unchanged. A matched value is replaced in full with
-/// `[REDACTED:<tags>]`, where tags retain the stable order from [`screen_for_secrets`]. Exact
-/// canonical markers pass through unchanged, including multi-tag markers, making the transform
-/// idempotent when HTML reuses the JSON exporter or a generated artifact is rendered twice.
-///
-/// This function is intentionally an **export boundary**, not an extraction transform: callers
-/// retain original labels and content-addressed node ids for graph assembly, edge resolution, and
-/// analysis while every public projection receives the same safe display value.
-#[must_use]
-pub fn redact_public_text(input: &str) -> Cow<'_, str> {
-    if is_canonical_redaction_marker(input) {
-        return Cow::Borrowed(input);
-    }
-    let hits = normalized_secret_tags(input);
-    if hits.is_empty() {
-        Cow::Borrowed(input)
-    } else {
-        Cow::Owned(format!("[REDACTED:{}]", hits.join(",")))
-    }
-}
-
-pub(crate) fn project_relation(relation: &str) -> String {
-    if let Some((marker, suffix)) = relation.rsplit_once("#r") {
-        if is_canonical_redaction_marker(marker)
-            && suffix.len() == 8
-            && suffix
-                .chars()
-                .all(|character| character.is_ascii_hexdigit())
-        {
-            return relation.to_owned();
-        }
-    }
-
-    let redacted = redact_public_text(relation);
-    if redacted.as_ref() == relation {
-        relation.to_owned()
-    } else {
-        format!("{redacted}#r{:08x}", content_id(relation))
-    }
-}
+pub(crate) use habitat_graph_core::project_public_relation as project_relation;
+pub use habitat_graph_core::redact_public_text;
 
 /// Escapes a string for safe embedding inside XML text or a double-quoted XML attribute.
 ///
@@ -183,6 +95,14 @@ mod tests {
         assert_eq!(
             redact_public_text("xoxb-123-secret"),
             "[REDACTED:slack_token]"
+        );
+    }
+
+    #[test]
+    fn redaction_handles_bearer_header_optional_whitespace() {
+        assert_eq!(
+            redact_public_text("Authorization:  \t Bearer\t token"),
+            "[REDACTED:bearer_token]"
         );
     }
 

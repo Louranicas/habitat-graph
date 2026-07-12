@@ -32,7 +32,7 @@ use std::fs::OpenOptions;
 #[cfg(unix)]
 use std::io::Write as _;
 #[cfg(unix)]
-use std::os::unix::fs::OpenOptionsExt as _;
+use std::os::unix::fs::{OpenOptionsExt as _, PermissionsExt as _};
 use std::path::{Path, PathBuf};
 #[cfg(unix)]
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -88,9 +88,6 @@ pub fn run(dir: &Path, out: &Path) -> u8 {
 /// failures, [`GraphError::Schema`] on serialization failures, or [`GraphError::Guard`] when
 /// private sidecar permissions cannot be enforced.
 fn run_inner(dir: &Path, out: &Path) -> Result<()> {
-    #[cfg(unix)]
-    ensure_private_sidecar_support(out);
-    #[cfg(not(unix))]
     ensure_private_sidecar_support(out)?;
 
     // ── Detect all source files (sorted for R4 determinism) ─────────────────────
@@ -219,7 +216,22 @@ fn run_inner(dir: &Path, out: &Path) -> Result<()> {
 }
 
 #[cfg(unix)]
-fn ensure_private_sidecar_support(_out: &Path) {}
+fn ensure_private_sidecar_support(out: &Path) -> Result<()> {
+    let sidecar = out.join(SIDECAR);
+    let metadata = match std::fs::symlink_metadata(&sidecar) {
+        Ok(metadata) => metadata,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(error) => return Err(GraphError::Io(format!("inspect private sidecar: {error}"))),
+    };
+    if !metadata.file_type().is_file() {
+        return Err(GraphError::Guard(format!(
+            "private sidecar is not a regular file: {}",
+            sidecar.display()
+        )));
+    }
+    std::fs::set_permissions(&sidecar, std::fs::Permissions::from_mode(0o600))
+        .map_err(|error| GraphError::Io(format!("harden private sidecar: {error}")))
+}
 
 #[cfg(not(unix))]
 fn ensure_private_sidecar_support(out: &Path) -> Result<()> {
@@ -656,6 +668,24 @@ mod tests {
             })
             .count();
         assert_eq!(temporary_count, 0, "sidecar temp file must not survive");
+    }
+
+    #[test]
+    fn existing_sidecar_is_hardened_before_source_detection_failure() {
+        use std::os::unix::fs::PermissionsExt as _;
+
+        let src = TempDir::new().unwrap();
+        let out = TempDir::new().unwrap();
+        mk_file(src.path(), "lib.rs", "fn private_cache() {}");
+        assert_eq!(run(src.path(), out.path()), 0);
+
+        let sidecar = out.path().join(SIDECAR);
+        fs::set_permissions(&sidecar, fs::Permissions::from_mode(0o644)).unwrap();
+        let missing = src.path().join("missing");
+        assert_eq!(run(&missing, out.path()), 4);
+
+        let mode = fs::metadata(sidecar).unwrap().permissions().mode() & 0o777;
+        assert_eq!(mode, 0o600);
     }
 
     // T9: no-op on an empty source directory exits 0.
