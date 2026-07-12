@@ -11,7 +11,7 @@
 //!   - 20 nodes: file, 4 standalone fns/arrows, 3 classes + their 12 methods.
 //!   - 20 structural edges: 7 `contains` + 12 `method` + 1 `inherits` (local Animal→Dog).
 //!   - 0 `imports_from`/`calls`/`uses` in the golden — external import targets (events,
-//!     fs/promises, path) and external bases (EventEmitter) are never nodes in a
+//!     fs/promises, path) and external bases (`EventEmitter`) are never nodes in a
 //!     single-file corpus, so `assemble` drops those dangling edges (documented policy).
 //!
 //! Per the parity strategy (`ai_docs/06_PARITY_INTEL`): structural relations

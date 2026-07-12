@@ -1032,8 +1032,7 @@ mod tests {
         let target = &import_edge.unwrap().target;
         assert!(
             !target.is_empty(),
-            "import target must not be empty; got {:?}",
-            target
+            "import target must not be empty; got {target:?}"
         );
         // Path separators must be dots, not slashes.
         assert!(
@@ -1290,8 +1289,7 @@ mod tests {
         let animal_inherits = inherits.iter().any(|e| e.source == "animals_animal");
         assert!(
             animal_inherits,
-            "Dog extends Animal (local) → inherits source must be 'animals_animal'; inherits: {:?}",
-            inherits
+            "Dog extends Animal (local) → inherits source must be 'animals_animal'; inherits: {inherits:?}"
         );
     }
 

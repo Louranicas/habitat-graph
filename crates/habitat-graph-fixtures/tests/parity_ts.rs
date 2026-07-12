@@ -638,7 +638,7 @@ fn inline_arrow_fn_const_emits_fn_node() {
 
 // ── Group J: Import edges ──────────────────────────────────────────────────────────────────────
 
-/// J-1: `import { EventEmitter } from 'events'` → imports_from `events`.
+/// J-1: `import { EventEmitter } from 'events'` → `imports_from` `events`.
 #[test]
 fn imports_from_events_module() {
     let ex = extract_sample();
@@ -648,7 +648,7 @@ fn imports_from_events_module() {
     );
 }
 
-/// J-2: `import { Logger } from './logger'` → imports_from `./logger`.
+/// J-2: `import { Logger } from './logger'` → `imports_from` `./logger`.
 #[test]
 fn imports_from_local_logger() {
     let ex = extract_sample();
@@ -658,7 +658,7 @@ fn imports_from_local_logger() {
     );
 }
 
-/// J-3: total imports_from count matches self-golden.
+/// J-3: total `imports_from` count matches self-golden.
 #[test]
 fn total_imports_from_matches_golden() {
     let ex = extract_sample();
@@ -672,7 +672,7 @@ fn total_imports_from_matches_golden() {
 /// J-4: import specifiers are lowercased.
 #[test]
 fn import_specifiers_are_lowercased() {
-    let src = r#"import { X } from 'MyLib';"#;
+    let src = r"import { X } from 'MyLib';";
     let ex = extract(src, "a.ts");
     assert!(
         has_edge(&ex, "a", "mylib", "imports_from"),
@@ -829,8 +829,7 @@ fn every_method_node_has_incoming_method_edge() {
     for target in &method_targets {
         assert!(
             ex.nodes.iter().any(|n| &n.label == *target),
-            "method edge target '{}' must be a node",
-            target
+            "method edge target '{target}' must be a node"
         );
     }
 }
@@ -997,7 +996,7 @@ fn pipeline_detects_ts_file() {
     );
 }
 
-/// O-2: extract_files succeeds for the ts corpus.
+/// O-2: `extract_files` succeeds for the ts corpus.
 #[test]
 fn pipeline_extract_files_succeeds() {
     let src_dir = std::path::PathBuf::from(format!(
@@ -1030,7 +1029,7 @@ fn pipeline_graph_node_count() {
     );
 }
 
-/// O-4: assembled graph has the expected edge count (dangling imports_from edges are dropped).
+/// O-4: assembled graph has the expected edge count (dangling `imports_from` edges are dropped).
 ///
 /// `assemble` drops edges where either endpoint is not a node in the extraction (dangling-edge
 /// policy). The 2 `imports_from` edges to `events` and `./logger` have no corresponding target

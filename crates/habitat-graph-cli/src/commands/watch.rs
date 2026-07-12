@@ -766,7 +766,7 @@ mod tests {
         let src = tdir();
         let out = tdir();
         mk(&src, "lib.rs", "fn g() {}");
-        super::run(&src, &out);
+        assert_eq!(super::run(&src, &out), 0);
         assert!(
             out.join("graph.json").exists(),
             "graph.json must be created"

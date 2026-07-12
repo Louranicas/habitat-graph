@@ -613,7 +613,7 @@ mod tests {
     fn run_dry_run_does_not_write_file() {
         let d = tdir();
         let cfg = d.join("mcp.json");
-        run(&graph_path(), Some(&cfg), true);
+        assert_eq!(run(&graph_path(), Some(&cfg), true), 0);
         assert!(!cfg.exists(), "dry-run must not create file");
     }
 
@@ -621,7 +621,7 @@ mod tests {
     fn run_dry_run_does_not_write_bak() {
         let d = tdir();
         let cfg = d.join("mcp.json");
-        run(&graph_path(), Some(&cfg), true);
+        assert_eq!(run(&graph_path(), Some(&cfg), true), 0);
         assert!(!d.join("mcp.bak").exists(), "dry-run must not create .bak");
     }
 
@@ -638,7 +638,7 @@ mod tests {
     fn run_write_creates_file() {
         let d = tdir();
         let cfg = d.join("mcp.json");
-        run(&graph_path(), Some(&cfg), false);
+        assert_eq!(run(&graph_path(), Some(&cfg), false), 0);
         assert!(cfg.exists());
     }
 
@@ -646,7 +646,7 @@ mod tests {
     fn run_write_registers_server() {
         let d = tdir();
         let cfg = d.join("mcp.json");
-        run(&graph_path(), Some(&cfg), false);
+        assert_eq!(run(&graph_path(), Some(&cfg), false), 0);
         let v = read_config(&cfg).expect("read");
         assert!(
             v["mcpServers"][MCP_SERVER_NAME].is_object(),
@@ -659,7 +659,7 @@ mod tests {
         let d = tdir();
         let cfg = d.join("mcp.json");
         fs::write(&cfg, "{\"mcpServers\":{\"other\":{\"command\":\"x\"}}}").expect("seed");
-        run(&graph_path(), Some(&cfg), false);
+        assert_eq!(run(&graph_path(), Some(&cfg), false), 0);
         let v = read_config(&cfg).expect("read");
         assert_eq!(v["mcpServers"]["other"]["command"], "x");
         assert!(v["mcpServers"][MCP_SERVER_NAME].is_object());
@@ -670,7 +670,7 @@ mod tests {
         let d = tdir();
         let cfg = d.join("mcp.json");
         fs::write(&cfg, "{\"theme\":\"light\"}").expect("seed");
-        run(&graph_path(), Some(&cfg), false);
+        assert_eq!(run(&graph_path(), Some(&cfg), false), 0);
         assert_eq!(read_config(&cfg).expect("read")["theme"], "light");
     }
 
@@ -678,9 +678,9 @@ mod tests {
     fn run_write_is_idempotent() {
         let d = tdir();
         let cfg = d.join("mcp.json");
-        run(&graph_path(), Some(&cfg), false);
+        assert_eq!(run(&graph_path(), Some(&cfg), false), 0);
         let t1 = fs::read_to_string(&cfg).expect("r1");
-        run(&graph_path(), Some(&cfg), false);
+        assert_eq!(run(&graph_path(), Some(&cfg), false), 0);
         let t2 = fs::read_to_string(&cfg).expect("r2");
         assert_eq!(t1, t2, "second install must not change file");
     }
@@ -705,7 +705,7 @@ mod tests {
     fn run_write_args_include_graph_path() {
         let d = tdir();
         let cfg = d.join("mcp.json");
-        run(Path::new("/x/g.json"), Some(&cfg), false);
+        assert_eq!(run(Path::new("/x/g.json"), Some(&cfg), false), 0);
         let v = read_config(&cfg).expect("read");
         assert_eq!(v["mcpServers"][MCP_SERVER_NAME]["args"][2], "/x/g.json");
     }
@@ -722,9 +722,9 @@ mod tests {
     fn run_write_two_installs_different_graphs_coexist() {
         let d = tdir();
         let cfg = d.join("mcp.json");
-        run(Path::new("/a.json"), Some(&cfg), false);
+        assert_eq!(run(Path::new("/a.json"), Some(&cfg), false), 0);
         // Second install updates the entry with the new graph path.
-        run(Path::new("/b.json"), Some(&cfg), false);
+        assert_eq!(run(Path::new("/b.json"), Some(&cfg), false), 0);
         let v = read_config(&cfg).expect("read");
         assert_eq!(v["mcpServers"][MCP_SERVER_NAME]["args"][2], "/b.json");
     }

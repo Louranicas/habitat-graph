@@ -678,7 +678,7 @@ mod tests {
     fn run_install_creates_post_commit_hook() {
         let d = tdir();
         make_fake_repo(&d);
-        run_install(&d);
+        assert_eq!(run_install(&d), 0);
         assert!(d.join(".git").join("hooks").join("post-commit").exists());
     }
 
@@ -712,7 +712,7 @@ mod tests {
     fn run_install_merge_driver_creates_gitattributes() {
         let d = tdir();
         make_fake_repo(&d);
-        run_install_merge_driver(&d);
+        assert_eq!(run_install_merge_driver(&d), 0);
         assert!(d.join(".gitattributes").exists());
     }
 
@@ -720,7 +720,7 @@ mod tests {
     fn run_install_merge_driver_updates_git_config() {
         let d = tdir();
         make_fake_repo(&d);
-        run_install_merge_driver(&d);
+        assert_eq!(run_install_merge_driver(&d), 0);
         let text = fs::read_to_string(d.join(".git").join("config")).expect("read");
         assert!(text.contains(MERGE_DRIVER_SECTION));
     }
@@ -737,8 +737,8 @@ mod tests {
     fn run_install_merge_driver_gitattributes_has_line_once() {
         let d = tdir();
         make_fake_repo(&d);
-        run_install_merge_driver(&d);
-        run_install_merge_driver(&d);
+        assert_eq!(run_install_merge_driver(&d), 0);
+        assert_eq!(run_install_merge_driver(&d), 0);
         let text = fs::read_to_string(d.join(".gitattributes")).expect("read");
         assert_eq!(text.matches(GITATTRIBUTES_LINE).count(), 1);
     }
@@ -816,8 +816,8 @@ mod tests {
     fn run_install_merge_driver_config_section_once_on_double_call() {
         let d = tdir();
         make_fake_repo(&d);
-        run_install_merge_driver(&d);
-        run_install_merge_driver(&d);
+        assert_eq!(run_install_merge_driver(&d), 0);
+        assert_eq!(run_install_merge_driver(&d), 0);
         let text = fs::read_to_string(d.join(".git").join("config")).expect("read");
         assert_eq!(
             text.matches(MERGE_DRIVER_SECTION).count(),
@@ -888,7 +888,7 @@ mod tests {
         let d = tdir();
         make_fake_repo(&d);
         fs::write(d.join(".gitattributes"), "*.png binary\n").expect("seed");
-        run_install_merge_driver(&d);
+        assert_eq!(run_install_merge_driver(&d), 0);
         let text = fs::read_to_string(d.join(".gitattributes")).expect("read");
         assert!(
             text.contains("*.png binary"),

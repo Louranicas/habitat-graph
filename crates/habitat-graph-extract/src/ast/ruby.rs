@@ -1020,7 +1020,7 @@ mod tests {
 
     #[test]
     fn source_file_field_contains_path_in_every_node() {
-        let src = concat!("class Repo\ndef save\nend\nend\n");
+        let src = "class Repo\ndef save\nend\nend\n";
         let ex = extract(src, "myrepo.rb");
         for n in &ex.nodes {
             assert!(
