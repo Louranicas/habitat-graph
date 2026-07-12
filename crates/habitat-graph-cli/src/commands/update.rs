@@ -536,6 +536,19 @@ fn validate_update_journal_origin(
             }
         }
     }
+    if !same_context {
+        let expected = journal.before_private_checksum.as_deref().map_or_else(
+            || vec![journal.after_private_checksum.as_str()],
+            |before| vec![before, journal.after_private_checksum.as_str()],
+        );
+        let target_status =
+            super::private_state::private_checksum_status_at_path(current_state_path, &expected)?;
+        if target_status.any && !target_status.matched {
+            return Err(GraphError::Guard(
+                "pending update private lineage changed".to_owned(),
+            ));
+        }
+    }
     if let Some(before) = journal.before_private_checksum.as_deref() {
         let status = super::private_state::private_checksum_status(
             journal_state_path,
@@ -838,6 +851,27 @@ mod tests {
     /// Parse the sidecar as a [`Graph`].
     fn parse_sidecar(out: &Path) -> Graph {
         Graph::from_json(&read_sidecar(out)).expect("sidecar must parse as Graph")
+    }
+
+    fn git(root: &Path, args: &[&str]) {
+        let output = std::process::Command::new("git")
+            .args(args)
+            .current_dir(root)
+            .output()
+            .unwrap();
+        assert!(output.status.success(), "git {args:?} failed");
+    }
+
+    fn init_git(root: &Path) {
+        git(root, &["init", "-q"]);
+        git(root, &["config", "user.name", "Habitat Graph Tests"]);
+        git(root, &["config", "user.email", "tests@example.invalid"]);
+    }
+
+    fn commit_git(root: &Path, content: &str) {
+        fs::write(root.join("lineage.txt"), content).unwrap();
+        git(root, &["add", "lineage.txt"]);
+        git(root, &["commit", "-q", "-m", content]);
     }
 
     // ─────────────────────────────────────────────────────────────────────────────
@@ -1916,6 +1950,65 @@ mod tests {
                 .unwrap()
                 .exists()
         );
+    }
+
+    #[test]
+    fn ancestor_update_journal_rejects_conflicting_target_lineage() {
+        for include_before_checksum in [true, false] {
+            let repo = TempDir::new().unwrap();
+            init_git(repo.path());
+            commit_git(repo.path(), "first");
+            let src = repo.path().join("src");
+            let out = repo.path().join("public");
+            mk_file(&src, "lib.rs", "fn api_key_original() {}");
+            assert_eq!(run(&src, &out), 0);
+
+            let (origin_state, _) = super::prepare_private_state(&out).unwrap();
+            let stored = super::super::private_state::read(&origin_state, "test state")
+                .unwrap()
+                .unwrap();
+            let before_checksum = super::private_graph_generation(&stored.graph).unwrap();
+            let mut pending_state = stored.graph.clone();
+            pending_state.manifest.tool_version = "pending lineage".to_owned();
+            if !include_before_checksum {
+                fs::remove_file(&origin_state).unwrap();
+            }
+            let journal = super::UpdateJournal::new(
+                &out,
+                &origin_state,
+                &stored.graph,
+                pending_state,
+                include_before_checksum.then_some(before_checksum.as_str()),
+            )
+            .unwrap();
+            super::write_update_journal(&origin_state, &journal).unwrap();
+
+            let public_before = read_graph_json(&out);
+            let public_graph = habitat_graph_serve::from_node_link(&public_before).unwrap();
+            commit_git(repo.path(), "second");
+            let (target_state, _) = super::prepare_private_state(&out).unwrap();
+            assert_ne!(origin_state, target_state);
+            let mut replacement = stored.graph.clone();
+            replacement.manifest.tool_version = "conflicting target lineage".to_owned();
+            let replacement_bytes = super::super::private_state::serialize(
+                &replacement,
+                &super::super::private_state::generation(public_before.as_bytes()),
+                &super::super::private_state::semantic_generation(&public_graph).unwrap(),
+            )
+            .unwrap();
+            super::super::private_state::write_state(&target_state, &replacement_bytes).unwrap();
+
+            assert_eq!(run(&src, &out), 4);
+            assert_eq!(read_graph_json(&out), public_before);
+            assert!(fs::read_to_string(&target_state)
+                .unwrap()
+                .contains("conflicting target lineage"));
+            assert!(
+                super::super::private_state::update_journal_path(&origin_state)
+                    .unwrap()
+                    .exists()
+            );
+        }
     }
 }
 

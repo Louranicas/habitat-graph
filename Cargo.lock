@@ -754,6 +754,7 @@ dependencies = [
  "habitat-graph-habitat",
  "habitat-graph-serve",
  "habitat-graph-source",
+ "libc",
  "notify",
  "serde_json",
  "tempfile",

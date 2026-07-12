@@ -301,20 +301,13 @@ fn generated_vault_moc_section_matches(
         .filter(|(_, note)| note.community == community)
         .collect();
     candidates.sort_unstable_by_key(|(_, note)| note.id);
-
-    let mut next_link = 0;
-    for (filename, note) in candidates {
-        let Some(link) = links.get(next_link) else {
-            return true;
-        };
-        if generated_vault_moc_link(filename, note, filename_targets) == *link {
-            next_link += 1;
-            if next_link == links.len() {
-                return true;
-            }
-        }
-    }
-    false
+    candidates.len() == links.len()
+        && candidates
+            .iter()
+            .zip(links)
+            .all(|((filename, note), link)| {
+                generated_vault_moc_link(filename, note, filename_targets) == *link
+            })
 }
 
 fn is_generated_vault_moc(content: &str, notes: &[(String, GeneratedVaultNode)]) -> bool {
@@ -326,13 +319,14 @@ fn is_generated_vault_moc(content: &str, notes: &[(String, GeneratedVaultNode)])
         return false;
     }
     if sections.is_empty() {
-        return !notes.is_empty();
+        return false;
     }
 
     [false, true].into_iter().any(|filename_targets| {
-        sections.iter().all(|(community, links)| {
-            generated_vault_moc_section_matches(links, *community, notes, filename_targets)
-        })
+        sections.iter().map(|(_, links)| links.len()).sum::<usize>() == notes.len()
+            && sections.iter().all(|(community, links)| {
+                generated_vault_moc_section_matches(links, *community, notes, filename_targets)
+            })
     })
 }
 
@@ -1499,7 +1493,7 @@ mod tests {
     }
 
     #[test]
-    fn legacy_vault_moc_accepts_a_generated_note_subset() {
+    fn legacy_vault_moc_rejects_a_generated_note_subset() {
         let src = TempDir::new().unwrap();
         let out = TempDir::new().unwrap();
         let vault = TempDir::new().unwrap();
@@ -1514,19 +1508,21 @@ mod tests {
             legacy_vault_note(2, Some(0), "current"),
         )
         .unwrap();
-        fs::write(
-            vault.path().join("_MOC.md"),
-            "# Map of Content\n\n## community c0\n\n- [[current]]\n",
-        )
-        .unwrap();
+        let moc = "# Map of Content\n\n## community c0\n\n- [[current]]\n";
+        fs::write(vault.path().join("_MOC.md"), moc).unwrap();
 
-        assert_eq!(run(src.path(), out.path(), Some(vault.path())), 0);
-        assert!(!vault.path().join("stale.md").exists());
-        assert!(vault.path().join(super::VAULT_MANIFEST).exists());
+        assert_eq!(run(src.path(), out.path(), Some(vault.path())), 4);
+        assert!(vault.path().join("stale.md").exists());
+        assert!(vault.path().join("current.md").exists());
+        assert_eq!(
+            fs::read_to_string(vault.path().join("_MOC.md")).unwrap(),
+            moc
+        );
+        assert!(!vault.path().join(super::VAULT_MANIFEST).exists());
     }
 
     #[test]
-    fn legacy_empty_vault_moc_migrates_with_stale_notes() {
+    fn legacy_empty_vault_moc_is_not_claimed_with_stale_notes() {
         let src = TempDir::new().unwrap();
         let out = TempDir::new().unwrap();
         let vault = TempDir::new().unwrap();
@@ -1535,15 +1531,16 @@ mod tests {
             legacy_vault_note(1, None, "stale"),
         )
         .unwrap();
-        fs::write(vault.path().join("_MOC.md"), "# Map of Content\n").unwrap();
+        let moc = "# Map of Content\n";
+        fs::write(vault.path().join("_MOC.md"), moc).unwrap();
 
-        assert_eq!(run(src.path(), out.path(), Some(vault.path())), 0);
-        assert!(!vault.path().join("stale.md").exists());
+        assert_eq!(run(src.path(), out.path(), Some(vault.path())), 4);
+        assert!(vault.path().join("stale.md").exists());
         assert_eq!(
             fs::read_to_string(vault.path().join("_MOC.md")).unwrap(),
-            "# Map of Content\n"
+            moc
         );
-        assert!(vault.path().join(super::VAULT_MANIFEST).exists());
+        assert!(!vault.path().join(super::VAULT_MANIFEST).exists());
     }
 
     #[test]

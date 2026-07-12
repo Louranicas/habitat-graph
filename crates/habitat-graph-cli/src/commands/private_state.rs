@@ -149,57 +149,95 @@ pub(super) fn acquire_output_lock(state_path: &Path) -> Result<OutputTransaction
         std::fs::create_dir_all(parent)
             .map_err(|error| GraphError::Io(format!("create output lock directory: {error}")))?;
     }
-    let prior_metadata = match std::fs::symlink_metadata(&lock_path) {
-        Ok(metadata) => {
-            if !metadata.file_type().is_file() {
-                return Err(GraphError::Guard(format!(
-                    "output transaction lock is not a regular file: {}",
-                    lock_path.display()
-                )));
+    for _ in 0..4 {
+        let prior_metadata = match std::fs::symlink_metadata(&lock_path) {
+            Ok(metadata) => {
+                if !metadata.file_type().is_file() {
+                    return Err(GraphError::Guard(format!(
+                        "output transaction lock is not a regular file: {}",
+                        lock_path.display()
+                    )));
+                }
+                Some(metadata)
             }
-            Some(metadata)
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
+            Err(error) => {
+                return Err(GraphError::Io(format!(
+                    "inspect output transaction lock: {error}"
+                )))
+            }
+        };
+        let mut options = std::fs::OpenOptions::new();
+        options.read(true).write(true);
+        if prior_metadata.is_some() {
+            options.create(false);
+        } else {
+            options.create_new(true);
         }
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
-        Err(error) => {
-            return Err(GraphError::Io(format!(
-                "inspect output transaction lock: {error}"
-            )))
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::OpenOptionsExt as _;
+            options.mode(0o600).custom_flags(libc::O_NOFOLLOW);
         }
-    };
-    let mut options = std::fs::OpenOptions::new();
-    options.create(true).read(true).write(true);
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::OpenOptionsExt as _;
-        options.mode(0o600);
-    }
-    let file = options
-        .open(&lock_path)
-        .map_err(|error| GraphError::Io(format!("open output transaction lock: {error}")))?;
-    let opened_metadata = file
-        .metadata()
-        .map_err(|error| GraphError::Io(format!("inspect output transaction lock: {error}")))?;
-    if !opened_metadata.file_type().is_file()
-        || prior_metadata
-            .as_ref()
-            .is_some_and(|metadata| !same_file(metadata, &opened_metadata))
-    {
-        return Err(GraphError::Guard(
-            "output transaction lock changed while being opened".to_owned(),
-        ));
-    }
-    #[cfg(unix)]
-    std::fs::set_permissions(&lock_path, std::fs::Permissions::from_mode(0o600))
-        .map_err(|error| GraphError::Io(format!("harden output transaction lock: {error}")))?;
-    match file.try_lock() {
-        Ok(()) => Ok(OutputTransactionLock { file }),
-        Err(std::fs::TryLockError::WouldBlock) => Err(GraphError::Guard(
-            "another habitat-graph writer is updating this output".to_owned(),
-        )),
-        Err(std::fs::TryLockError::Error(error)) => {
-            Err(GraphError::Io(format!("lock output transaction: {error}")))
+        let file = match options.open(&lock_path) {
+            Ok(file) => file,
+            Err(error)
+                if matches!(
+                    error.kind(),
+                    std::io::ErrorKind::AlreadyExists | std::io::ErrorKind::NotFound
+                ) =>
+            {
+                continue;
+            }
+            Err(error) => {
+                return Err(GraphError::Io(format!(
+                    "open output transaction lock: {error}"
+                )))
+            }
+        };
+        let opened_metadata = file
+            .metadata()
+            .map_err(|error| GraphError::Io(format!("inspect output transaction lock: {error}")))?;
+        if !opened_metadata.file_type().is_file()
+            || prior_metadata
+                .as_ref()
+                .is_some_and(|metadata| !same_file(metadata, &opened_metadata))
+        {
+            return Err(GraphError::Guard(
+                "output transaction lock changed while being opened".to_owned(),
+            ));
         }
+        #[cfg(unix)]
+        file.set_permissions(std::fs::Permissions::from_mode(0o600))
+            .map_err(|error| GraphError::Io(format!("harden output transaction lock: {error}")))?;
+        match file.try_lock() {
+            Ok(()) => {}
+            Err(std::fs::TryLockError::WouldBlock) => {
+                return Err(GraphError::Guard(
+                    "another habitat-graph writer is updating this output".to_owned(),
+                ))
+            }
+            Err(std::fs::TryLockError::Error(error)) => {
+                return Err(GraphError::Io(format!("lock output transaction: {error}")))
+            }
+        }
+        let current_metadata = std::fs::symlink_metadata(&lock_path).map_err(|error| {
+            GraphError::Guard(format!(
+                "output transaction lock changed while being opened: {error}"
+            ))
+        })?;
+        if !current_metadata.file_type().is_file()
+            || !same_file(&opened_metadata, &current_metadata)
+        {
+            return Err(GraphError::Guard(
+                "output transaction lock changed while being opened".to_owned(),
+            ));
+        }
+        return Ok(OutputTransactionLock { file });
     }
+    Err(GraphError::Guard(
+        "output transaction lock changed while being opened".to_owned(),
+    ))
 }
 
 fn output_lock_path(state_path: &Path) -> Result<PathBuf> {
@@ -2168,6 +2206,28 @@ mod tests {
         assert_eq!(error.kind(), "guard");
         drop(first);
         super::acquire_output_lock(&state).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn output_transaction_lock_rejects_symlinks_without_changing_the_target() {
+        use std::os::unix::fs::{symlink, PermissionsExt as _};
+
+        let root = TempDir::new().unwrap();
+        let state = root.path().join("state.json");
+        let lock = root.path().join("state.json.output-lock");
+        let target = root.path().join("target");
+        fs::write(&target, "unchanged").unwrap();
+        fs::set_permissions(&target, fs::Permissions::from_mode(0o644)).unwrap();
+        symlink(&target, &lock).unwrap();
+
+        let error = super::acquire_output_lock(&state).unwrap_err();
+        assert_eq!(error.kind(), "guard");
+        assert_eq!(fs::read_to_string(&target).unwrap(), "unchanged");
+        assert_eq!(
+            fs::metadata(&target).unwrap().permissions().mode() & 0o777,
+            0o644
+        );
     }
 
     #[test]
