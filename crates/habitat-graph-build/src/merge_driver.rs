@@ -28,7 +28,12 @@
 
 use std::collections::{HashMap, HashSet};
 
-use habitat_graph_core::{content_id, Community, CommunityId, Edge, Graph, Manifest, Node, NodeId};
+use habitat_graph_core::{
+    content_id, is_canonical_redaction_marker, Community, CommunityId, Edge, Graph, Manifest, Node,
+    NodeId,
+};
+
+type StableEdgeKey = (NodeId, NodeId, String);
 
 /// Deterministically 3-way-merges `ours` and `theirs` against their common ancestor `base`.
 ///
@@ -47,6 +52,18 @@ use habitat_graph_core::{content_id, Community, CommunityId, Edge, Graph, Manife
 /// - **Infallible**: this function never returns an error or panics.
 #[must_use]
 pub fn merge3(base: &Graph, ours: &Graph, theirs: &Graph) -> Graph {
+    // Public projections replace multiple distinct labels with one display marker while retaining
+    // their stable content ids. Switch the entire merge to serialized-id identity when any side
+    // contains such a marker; mixing label and id identity would duplicate the same node.
+    if [base, ours, theirs].iter().any(|graph| {
+        graph
+            .nodes
+            .iter()
+            .any(|node| is_canonical_redaction_marker(&node.label))
+    }) {
+        return merge3_by_stable_id(base, ours, theirs);
+    }
+
     // ── Label-set and id-to-label lookup tables ───────────────────────────────
     let base_node_labels = node_label_set(&base.nodes);
     let ours_node_labels = node_label_set(&ours.nodes);
@@ -105,6 +122,101 @@ pub fn merge3(base: &Graph, ours: &Graph, theirs: &Graph) -> Graph {
         nodes: merged_nodes,
         edges: merged_edges,
         communities: merged_communities,
+        manifest,
+    })
+    .sorted()
+}
+
+/// Three-way merge for redacted public projections, keyed by serialized stable ids.
+fn merge3_by_stable_id(base: &Graph, ours: &Graph, theirs: &Graph) -> Graph {
+    let base_ids: HashSet<NodeId> = base.nodes.iter().map(|node| node.id).collect();
+    let ours_ids: HashSet<NodeId> = ours.nodes.iter().map(|node| node.id).collect();
+    let theirs_ids: HashSet<NodeId> = theirs.nodes.iter().map(|node| node.id).collect();
+    let ours_nodes: HashMap<NodeId, &Node> =
+        ours.nodes.iter().map(|node| (node.id, node)).collect();
+
+    let mut seen_nodes = HashSet::new();
+    let mut nodes = Vec::new();
+    for node in ours.nodes.iter().chain(&theirs.nodes) {
+        if !seen_nodes.insert(node.id) {
+            continue;
+        }
+        let keep = !base_ids.contains(&node.id)
+            || (ours_ids.contains(&node.id) && theirs_ids.contains(&node.id));
+        if keep {
+            nodes.push(ours_nodes.get(&node.id).copied().unwrap_or(node).clone());
+        }
+    }
+    let surviving_ids: HashSet<NodeId> = nodes.iter().map(|node| node.id).collect();
+
+    let edge_key = |edge: &Edge| (edge.source, edge.target, edge.relation.clone());
+    let base_edges: HashSet<StableEdgeKey> = base.edges.iter().map(edge_key).collect();
+    let ours_edges: HashSet<StableEdgeKey> = ours.edges.iter().map(edge_key).collect();
+    let theirs_edges: HashSet<StableEdgeKey> = theirs.edges.iter().map(edge_key).collect();
+    let mut seen_edges = HashSet::new();
+    let mut edges = Vec::new();
+    for edge in ours.edges.iter().chain(&theirs.edges) {
+        let key = edge_key(edge);
+        let keep = !base_edges.contains(&key)
+            || (ours_edges.contains(&key) && theirs_edges.contains(&key));
+        if keep
+            && seen_edges.insert(key)
+            && surviving_ids.contains(&edge.source)
+            && surviving_ids.contains(&edge.target)
+        {
+            edges.push(edge.clone());
+        }
+    }
+
+    let base_communities: HashSet<CommunityId> = base
+        .communities
+        .iter()
+        .map(|community| community.id)
+        .collect();
+    let ours_communities: HashSet<CommunityId> = ours
+        .communities
+        .iter()
+        .map(|community| community.id)
+        .collect();
+    let theirs_communities: HashSet<CommunityId> = theirs
+        .communities
+        .iter()
+        .map(|community| community.id)
+        .collect();
+    let ours_community_map: HashMap<CommunityId, &Community> = ours
+        .communities
+        .iter()
+        .map(|community| (community.id, community))
+        .collect();
+    let mut seen_communities = HashSet::new();
+    let mut communities = Vec::new();
+    for community in ours.communities.iter().chain(&theirs.communities) {
+        if !seen_communities.insert(community.id) {
+            continue;
+        }
+        let keep = !base_communities.contains(&community.id)
+            || (ours_communities.contains(&community.id)
+                && theirs_communities.contains(&community.id));
+        if !keep {
+            continue;
+        }
+        let winner = ours_community_map
+            .get(&community.id)
+            .copied()
+            .unwrap_or(community);
+        let mut winner = winner.clone();
+        winner
+            .members
+            .retain(|member| surviving_ids.contains(member));
+        communities.push(winner);
+    }
+
+    let manifest = merge_manifest(&ours.manifest, &theirs.manifest);
+    crate::dedup(Graph {
+        schema: ours.schema.clone(),
+        nodes,
+        edges,
+        communities,
         manifest,
     })
     .sorted()
@@ -1215,5 +1327,31 @@ mod tests {
         let m = merge3(&base, &ours, &theirs);
         let labels = node_labels(&m);
         assert_eq!(labels, vec!["Y"]);
+    }
+
+    #[test]
+    fn redacted_public_merge_preserves_distinct_ids_and_topology() {
+        let mut base = Graph::new();
+        base.nodes.push(node(10, "[REDACTED:api_key]"));
+        base.nodes.push(node(20, "[REDACTED:api_key]"));
+        base.nodes.push(node(30, "Safe"));
+        base.edges.push(edge(10, 30, "calls"));
+        base.edges.push(edge(20, 30, "calls"));
+        let ours = base.clone();
+        let theirs = base.clone();
+
+        let merged = merge3(&base, &ours, &theirs);
+        assert_eq!(merged.nodes.len(), 3);
+        assert!(merged.nodes.iter().any(|node| node.id.get() == 10));
+        assert!(merged.nodes.iter().any(|node| node.id.get() == 20));
+        assert_eq!(merged.edges.len(), 2);
+        assert!(merged
+            .edges
+            .iter()
+            .any(|edge| edge.source.get() == 10 && edge.target.get() == 30));
+        assert!(merged
+            .edges
+            .iter()
+            .any(|edge| edge.source.get() == 20 && edge.target.get() == 30));
     }
 }

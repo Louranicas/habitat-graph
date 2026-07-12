@@ -697,6 +697,37 @@ mod tests {
     }
 
     #[test]
+    fn merge_of_redacted_public_json_preserves_ids_and_edges() {
+        let d = tdir();
+        let out = d.join("g.json");
+        let prior = extract_from_bytes(
+            b"fn api_key_alpha() { api_key_beta(); } fn api_key_beta() {}",
+            "rs",
+        )
+        .expect("extract prior");
+        let prior_ids: Vec<u32> = prior.nodes.iter().map(|node| node.id.get()).collect();
+        assert_eq!(prior.edges.len(), 1);
+        merge_into_output(prior, &out).expect("write redacted prior");
+
+        let added = extract_from_bytes(b"fn safe_node() {}", "rs").expect("extract added");
+        merge_into_output(added, &out).expect("merge into public projection");
+        let value: serde_json::Value =
+            serde_json::from_str(&fs::read_to_string(&out).expect("read")).expect("parse");
+        let nodes = value["nodes"].as_array().expect("nodes");
+        let redacted_ids: Vec<u32> = nodes
+            .iter()
+            .filter(|node| node["label"] == "[REDACTED:api_key]")
+            .filter_map(|node| node["id"].as_u64())
+            .filter_map(|id| u32::try_from(id).ok())
+            .collect();
+        assert_eq!(redacted_ids.len(), 2, "redacted nodes must remain distinct");
+        for id in prior_ids {
+            assert!(redacted_ids.contains(&id), "stable id {id} was lost");
+        }
+        assert_eq!(value["links"].as_array().expect("links").len(), 1);
+    }
+
+    #[test]
     fn merge_does_not_duplicate_identical_nodes() {
         let d = tdir();
         let out = d.join("g.json");

@@ -15,5 +15,5 @@ pub mod url;
 
 pub use path::confine_to;
 pub use sanitize::{display_safe, sanitize_label, MAX_LABEL_LEN};
-pub use secrets::screen_for_secrets;
+pub use secrets::{is_canonical_redaction_marker, screen_for_secrets, SECRET_TAG_ORDER};
 pub use url::validate_url;

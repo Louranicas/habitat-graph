@@ -21,7 +21,10 @@ pub mod span;
 pub use confidence::Confidence;
 pub use error::{GraphError, Result};
 pub use extraction::{Extraction, RawEdge, RawNode};
-pub use guard::{confine_to, display_safe, sanitize_label, screen_for_secrets, validate_url};
+pub use guard::{
+    confine_to, display_safe, is_canonical_redaction_marker, sanitize_label, screen_for_secrets,
+    validate_url, SECRET_TAG_ORDER,
+};
 pub use ids::{content_id, CommunityId, EdgeId, NodeId};
 pub use schema::{Community, Edge, Graph, InputRecord, Manifest, Node, SCHEMA_VERSION};
 pub use span::Span;

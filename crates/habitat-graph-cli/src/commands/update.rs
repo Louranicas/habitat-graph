@@ -30,8 +30,9 @@ use std::collections::{HashMap, HashSet};
 use std::fs::OpenOptions;
 use std::io::Write as _;
 #[cfg(unix)]
-use std::os::unix::fs::{OpenOptionsExt as _, PermissionsExt as _};
+use std::os::unix::fs::OpenOptionsExt as _;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
 
 use habitat_graph_core::{Graph, GraphError, Manifest, NodeId, Result, SCHEMA_VERSION};
 
@@ -39,6 +40,8 @@ use habitat_graph_core::{Graph, GraphError, Manifest, NodeId, Result, SCHEMA_VER
 const SIDECAR: &str = ".habitat-graph-state.json";
 /// Primary artifact filename (node-link format, graphify-compatible).
 const GRAPH_JSON: &str = "graph.json";
+/// Monotonic suffix for collision-free private sidecar temporary files.
+static SIDECAR_TEMP_SEQUENCE: AtomicU64 = AtomicU64::new(0);
 
 /// Runs an incremental update over `dir`, writing refreshed artifacts into `out`.
 ///
@@ -51,7 +54,9 @@ const GRAPH_JSON: &str = "graph.json";
 ///
 /// Emits exactly one summary line on success:
 /// - `"update: {changed} changed, {n} nodes (analyze re-run globally)"` after any build.
-/// - `"update: 0 changed, {n} nodes (no-op; analyze not re-run)"` when nothing has changed.
+/// - `"update: 0 changed, {n} nodes (artifacts refreshed; analyze not re-run)"` when source
+///   inputs are unchanged. Public artifacts and private sidecar permissions are still refreshed so
+///   an exporter-policy upgrade cannot leave legacy output behind.
 ///
 /// Returns a process exit code: `0` on success, `4` on any error (diagnostics to stderr).
 ///
@@ -146,10 +151,14 @@ fn run_inner(dir: &Path, out: &Path) -> Result<()> {
 
     let need_reextract = added.len() + changed.len();
 
-    // ── No-op fast exit ──────────────────────────────────────────────────────────
+    // ── Unchanged-input artifact refresh ─────────────────────────────────────────
     if need_reextract == 0 && removed.is_empty() {
         let n = prior_graph.nodes.len();
-        println!("update: 0 changed, {n} nodes (no-op; analyze not re-run)");
+        // Export policy evolves independently of source hashes. Always rerender public artifacts
+        // and atomically reharden the private sidecar so an upgrade cannot report success while
+        // leaving legacy unredacted output or permissive cache permissions in place.
+        write_artifacts(out, &prior_graph, current_manifest)?;
+        println!("update: 0 changed, {n} nodes (artifacts refreshed; analyze not re-run)");
         return Ok(());
     }
 
@@ -314,30 +323,59 @@ fn write_artifacts(out: &Path, graph: &Graph, current_manifest: Manifest) -> Res
     Ok(())
 }
 
-/// Writes the internal incremental cache with owner-only permissions.
+/// Atomically writes the internal incremental cache with owner-only permissions.
 ///
 /// The sidecar intentionally retains pre-projection labels needed for stable content ids and
-/// incremental merge behavior. It is not a public artifact, so it is written as a private local
-/// cache and excluded from generated receipt manifests. Existing files are explicitly re-chmodded
-/// because `OpenOptionsExt::mode` only controls permissions at creation time.
+/// incremental merge behavior. It is not a public artifact, so bytes are first written and synced
+/// to a same-directory `0600` temporary file, then atomically renamed over the destination. This
+/// prevents both a truncate-before-chmod exposure window and a partially written live sidecar.
 fn write_private_sidecar(path: &Path, bytes: &[u8]) -> Result<()> {
+    let parent = path
+        .parent()
+        .ok_or_else(|| GraphError::Io("sidecar path has no parent".to_owned()))?;
+    let filename = path
+        .file_name()
+        .and_then(|name| name.to_str())
+        .ok_or_else(|| GraphError::Io("sidecar filename is not valid UTF-8".to_owned()))?;
+    let sequence = SIDECAR_TEMP_SEQUENCE.fetch_add(1, Ordering::Relaxed);
+    let temporary = parent.join(format!(
+        ".{filename}.tmp.{}.{}",
+        std::process::id(),
+        sequence
+    ));
+
     let mut options = OpenOptions::new();
-    options.create(true).truncate(true).write(true);
+    options.create_new(true).write(true);
     #[cfg(unix)]
     options.mode(0o600);
 
-    let mut file = options
-        .open(path)
-        .map_err(|error| GraphError::Io(format!("sidecar open: {error}")))?;
-    file.write_all(bytes)
-        .map_err(|error| GraphError::Io(format!("sidecar write: {error}")))?;
-    file.sync_all()
-        .map_err(|error| GraphError::Io(format!("sidecar sync: {error}")))?;
+    let write_result = (|| -> Result<()> {
+        let mut file = options
+            .open(&temporary)
+            .map_err(|error| GraphError::Io(format!("sidecar temp open: {error}")))?;
+        file.write_all(bytes)
+            .map_err(|error| GraphError::Io(format!("sidecar temp write: {error}")))?;
+        file.sync_all()
+            .map_err(|error| GraphError::Io(format!("sidecar temp sync: {error}")))?;
+        drop(file);
+        std::fs::rename(&temporary, path)
+            .map_err(|error| GraphError::Io(format!("sidecar atomic rename: {error}")))?;
+        #[cfg(unix)]
+        std::fs::File::open(parent)
+            .and_then(|directory| directory.sync_all())
+            .map_err(|error| GraphError::Io(format!("sidecar directory sync: {error}")))?;
+        Ok(())
+    })();
 
-    #[cfg(unix)]
-    std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600))
-        .map_err(|error| GraphError::Io(format!("sidecar permissions: {error}")))?;
-    Ok(())
+    if write_result.is_err() && temporary.exists() {
+        if let Err(cleanup_error) = std::fs::remove_file(&temporary) {
+            eprintln!(
+                "warning: failed to remove sidecar temporary file {}: {cleanup_error}",
+                temporary.display()
+            );
+        }
+    }
+    write_result
 }
 
 /// Returns `graph` with all nodes whose [`habitat_graph_core::Node::source_file`] appears in
@@ -523,7 +561,7 @@ mod tests {
         assert_eq!(before, after, "no-op must leave graph.json byte-identical");
     }
 
-    // T8: no-op leaves the sidecar parseable as a valid Graph.
+    // T8: an unchanged-input refresh leaves the sidecar parseable as a valid Graph.
     #[test]
     fn noop_sidecar_still_parseable() {
         let src = TempDir::new().unwrap();
@@ -531,9 +569,57 @@ mod tests {
         mk_file(src.path(), "lib.rs", "fn x() {}");
         let _ = run(src.path(), out.path());
         let _ = run(src.path(), out.path());
-        // If the sidecar was not touched, it still deserializes.
         let g = parse_sidecar(out.path());
         assert_eq!(g.nodes.len(), 1);
+    }
+
+    #[test]
+    fn unchanged_input_refreshes_legacy_outputs_and_hardens_sidecar() {
+        let src = TempDir::new().unwrap();
+        let out = TempDir::new().unwrap();
+        let raw_label = "api_key_assignment_refused";
+        mk_file(src.path(), "lib.rs", &format!("fn {raw_label}() {{}}"));
+        assert_eq!(run(src.path(), out.path()), 0);
+
+        for artifact in ["graph.json", "GRAPH_REPORT.md", "graph.html"] {
+            fs::write(out.path().join(artifact), raw_label).unwrap();
+        }
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt as _;
+            fs::set_permissions(out.path().join(SIDECAR), fs::Permissions::from_mode(0o644))
+                .unwrap();
+        }
+
+        assert_eq!(run(src.path(), out.path()), 0);
+        for artifact in ["graph.json", "GRAPH_REPORT.md", "graph.html"] {
+            let refreshed = fs::read_to_string(out.path().join(artifact)).unwrap();
+            assert!(
+                !refreshed.contains(raw_label),
+                "legacy raw label survived refresh in {artifact}"
+            );
+        }
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt as _;
+            let mode = fs::metadata(out.path().join(SIDECAR))
+                .unwrap()
+                .permissions()
+                .mode()
+                & 0o777;
+            assert_eq!(mode, 0o600);
+        }
+        let temporary_count = fs::read_dir(out.path())
+            .unwrap()
+            .filter_map(std::result::Result::ok)
+            .filter(|entry| {
+                entry
+                    .file_name()
+                    .to_string_lossy()
+                    .contains(".habitat-graph-state.json.tmp")
+            })
+            .count();
+        assert_eq!(temporary_count, 0, "sidecar temp file must not survive");
     }
 
     // T9: no-op on an empty source directory exits 0.

@@ -9,44 +9,49 @@
 
 use std::borrow::Cow;
 
-use habitat_graph_core::screen_for_secrets;
+use habitat_graph_core::{is_canonical_redaction_marker, screen_for_secrets, SECRET_TAG_ORDER};
 
-/// Secret tags in the canonical order returned by [`screen_for_secrets`].
-const SECRET_TAG_ORDER: &[&str] = &[
-    "private_key",
-    "aws_access_key_id",
-    "cargo_registry_token",
-    "bearer_token",
-    "api_key",
-    "slack_token",
-];
+/// Collects secret tags across the raw input and normalized forms used by downstream exporters.
+///
+/// Exporters remove control/noncharacter codepoints and some filename/link punctuation. Screening
+/// only the pre-transform bytes would allow two harmless-looking fragments to join into a secret
+/// pattern after that normalization (for example `api_<BEL>key`).
+fn normalized_secret_tags(input: &str) -> Vec<&'static str> {
+    let stripped: String = input
+        .chars()
+        .filter(|character| {
+            !character.is_control() && !matches!(*character, '\u{FFFE}' | '\u{FFFF}')
+        })
+        .collect();
+    let filename_like: String = stripped
+        .chars()
+        .map(|character| {
+            if character == '/' || character.is_whitespace() {
+                '_'
+            } else {
+                character
+            }
+        })
+        .collect();
+    let compact: String = stripped
+        .chars()
+        .filter(|character| character.is_alphanumeric())
+        .collect();
 
-/// Returns whether `input` is already an exact canonical redaction marker.
-fn is_canonical_redaction_marker(input: &str) -> bool {
-    let Some(tags) = input
-        .strip_prefix("[REDACTED:")
-        .and_then(|rest| rest.strip_suffix(']'))
-    else {
-        return false;
-    };
-    if tags.is_empty() {
-        return false;
+    let mut encountered = std::collections::HashSet::new();
+    for candidate in [
+        input,
+        stripped.as_str(),
+        filename_like.as_str(),
+        compact.as_str(),
+    ] {
+        encountered.extend(screen_for_secrets(candidate));
     }
-
-    let mut previous_index: Option<usize> = None;
-    for tag in tags.split(',') {
-        let Some(index) = SECRET_TAG_ORDER
-            .iter()
-            .position(|candidate| *candidate == tag)
-        else {
-            return false;
-        };
-        if previous_index.is_some_and(|previous| index <= previous) {
-            return false;
-        }
-        previous_index = Some(index);
-    }
-    true
+    SECRET_TAG_ORDER
+        .iter()
+        .copied()
+        .filter(|tag| encountered.contains(tag))
+        .collect()
 }
 
 /// Replaces obvious secret-bearing public text with a deterministic marker.
@@ -64,7 +69,7 @@ pub fn redact_public_text(input: &str) -> Cow<'_, str> {
     if is_canonical_redaction_marker(input) {
         return Cow::Borrowed(input);
     }
-    let hits = screen_for_secrets(input);
+    let hits = normalized_secret_tags(input);
     if hits.is_empty() {
         Cow::Borrowed(input)
     } else {
@@ -165,6 +170,24 @@ mod tests {
             redact_public_text("AKIAIOSFODNN7EXAMPLE api_key=x xoxb-123"),
             "[REDACTED:aws_access_key_id,api_key,slack_token]"
         );
+    }
+
+    #[test]
+    fn redaction_screens_after_control_character_normalization() {
+        assert_eq!(
+            redact_public_text("api_\u{0007}key=SECRET"),
+            "[REDACTED:api_key]"
+        );
+        assert_eq!(
+            redact_public_text("Authorization:\u{0007} Bearer token"),
+            "[REDACTED:bearer_token]"
+        );
+    }
+
+    #[test]
+    fn redaction_screens_filename_and_link_normalizations() {
+        assert_eq!(redact_public_text("api/key=SECRET"), "[REDACTED:api_key]");
+        assert_eq!(redact_public_text("api:key=SECRET"), "[REDACTED:api_key]");
     }
 
     #[test]

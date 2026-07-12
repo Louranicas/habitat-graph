@@ -3,11 +3,37 @@
 use std::collections::HashMap;
 
 use habitat_graph_core::{
-    display_safe, sanitize_label, Graph, GraphError, NodeId, Result, SCHEMA_VERSION,
+    content_id, display_safe, is_canonical_redaction_marker, sanitize_label, Graph, GraphError,
+    NodeId, Result, SCHEMA_VERSION,
 };
 use serde_json::Value;
 
 use crate::escape::redact_public_text;
+
+/// Returns a safe relation display value with a stable non-secret identity suffix when redacted.
+///
+/// Edge relations have no standalone id field in node-link JSON. Without this suffix, two distinct
+/// secret-bearing relations between the same endpoints both become one marker and collapse on a
+/// later add/git merge. Existing canonical suffixed markers pass through unchanged.
+fn project_relation(relation: &str) -> String {
+    if let Some((marker, suffix)) = relation.rsplit_once("#r") {
+        if is_canonical_redaction_marker(marker)
+            && suffix.len() == 8
+            && suffix
+                .chars()
+                .all(|character| character.is_ascii_hexdigit())
+        {
+            return relation.to_owned();
+        }
+    }
+
+    let redacted = redact_public_text(relation);
+    if redacted.as_ref() == relation {
+        relation.to_owned()
+    } else {
+        format!("{redacted}#r{:08x}", content_id(relation))
+    }
+}
 
 /// Renders `graph` as `NetworkX` node-link JSON.
 ///
@@ -89,11 +115,11 @@ pub fn to_node_link(graph: &Graph) -> Result<String> {
             } else {
                 0.8
             };
-            let redacted_relation = redact_public_text(&edge.relation);
+            let projected_relation = project_relation(&edge.relation);
             serde_json::json!({
                 "source": edge.source.get(),
                 "target": edge.target.get(),
-                "relation": display_safe(&sanitize_label(&redacted_relation)),
+                "relation": display_safe(&sanitize_label(&projected_relation)),
                 "confidence": edge.confidence.as_str(),
                 "weight": weight,
             })
@@ -115,7 +141,7 @@ pub fn to_node_link(graph: &Graph) -> Result<String> {
 
 #[cfg(test)]
 mod tests {
-    use super::to_node_link;
+    use super::{project_relation, to_node_link};
     use habitat_graph_core::{
         Community, CommunityId, Confidence, Edge, Graph, Node, NodeId, Span, SCHEMA_VERSION,
     };
@@ -556,7 +582,36 @@ mod tests {
         ));
         let v = parse(&to_node_link(&g).unwrap());
         assert_eq!(v["nodes"][0]["source_file"], "[REDACTED:api_key]");
-        assert_eq!(v["links"][0]["relation"], "[REDACTED:bearer_token]");
+        let relation = v["links"][0]["relation"].as_str().expect("relation");
+        assert!(relation.starts_with("[REDACTED:bearer_token]#r"));
+    }
+
+    #[test]
+    fn distinct_redacted_relations_keep_stable_non_secret_identity() {
+        let mut g = Graph::new();
+        g.edges
+            .push(edge(1, 2, "api_key=alpha", Confidence::Extracted));
+        g.edges
+            .push(edge(1, 2, "api_key=beta", Confidence::Extracted));
+        let first = parse(&to_node_link(&g).unwrap());
+        let relations: Vec<&str> = first["links"]
+            .as_array()
+            .expect("links")
+            .iter()
+            .filter_map(|link| link["relation"].as_str())
+            .collect();
+        assert_eq!(relations.len(), 2);
+        assert_ne!(relations[0], relations[1]);
+        assert!(relations
+            .iter()
+            .all(|relation| relation.starts_with("[REDACTED:api_key]#r")));
+        assert!(!to_node_link(&g).unwrap().contains("api_key=alpha"));
+    }
+
+    #[test]
+    fn projected_relation_identity_is_idempotent() {
+        let projected = project_relation("api_key=alpha");
+        assert_eq!(project_relation(&projected), projected);
     }
 
     #[test]

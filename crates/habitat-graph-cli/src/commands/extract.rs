@@ -1,8 +1,14 @@
 //! The `extract` command — the full pipeline (detect → extract → build → analyze → export → write).
 
-use std::path::Path;
+use std::collections::HashSet;
+use std::path::{Component, Path};
 
 use habitat_graph_core::{GraphError, Result};
+
+/// Ownership manifest for generated Obsidian notes. Only files recorded here (or recognized by
+/// the conservative legacy signature during first migration) may be removed on a later sync.
+const VAULT_MANIFEST: &str = ".habitat-graph-generated.json";
+const VAULT_MANIFEST_SCHEMA: &str = "habitat-graph.vault-manifest.v1";
 
 /// Optional PB exporter artifacts to emit alongside the always-written core artifacts.
 ///
@@ -70,6 +76,157 @@ pub fn run_artifacts(dir: &Path, out: &Path, vault: Option<&Path>, opts: Extract
     }
 }
 
+/// Returns whether `filename` is a safe single-component generated Markdown filename.
+fn safe_vault_filename(filename: &str) -> bool {
+    let path = Path::new(filename);
+    path.extension().is_some_and(|extension| extension == "md")
+        && path.components().count() == 1
+        && matches!(path.components().next(), Some(Component::Normal(_)))
+        && !filename.contains('/')
+        && !filename.contains('\\')
+}
+
+/// Recognizes the exact frontmatter signature emitted by legacy habitat-graph node notes.
+///
+/// This migration path is deliberately conservative: it requires the ordered generated keys,
+/// numeric id/line/degree fields, the `hg/node` ownership tag, and a generated heading. Arbitrary
+/// user Markdown is never treated as generated merely because its filename resembles a label.
+fn is_legacy_generated_node_note(content: &str) -> bool {
+    let mut lines = content.lines();
+    if lines.next() != Some("---") {
+        return false;
+    }
+    let Some(id) = lines.next().and_then(|line| line.strip_prefix("id: ")) else {
+        return false;
+    };
+    if id.parse::<u32>().is_err() {
+        return false;
+    }
+
+    let frontmatter: Vec<&str> = lines.by_ref().take_while(|line| *line != "---").collect();
+    let has_ordered_fields = ["crate: ", "lang: ", "file: \"", "line: ", "degree: "]
+        .iter()
+        .all(|prefix| frontmatter.iter().any(|line| line.starts_with(prefix)));
+    let has_owner_tag = frontmatter
+        .iter()
+        .any(|line| line.starts_with("tags: [hg/node"));
+    let has_heading = lines.any(|line| line.starts_with("# "));
+    has_ordered_fields && has_owner_tag && has_heading
+}
+
+/// Loads the generated-file ownership set, migrating conservative legacy note signatures when no
+/// manifest exists. An invalid existing manifest fails closed rather than guessing ownership.
+fn generated_vault_ownership(vault_dir: &Path) -> Result<HashSet<String>> {
+    let manifest_path = vault_dir.join(VAULT_MANIFEST);
+    if manifest_path.exists() {
+        let text = std::fs::read_to_string(&manifest_path)
+            .map_err(|error| GraphError::Io(format!("vault manifest read: {error}")))?;
+        let value: serde_json::Value = serde_json::from_str(&text)
+            .map_err(|error| GraphError::Schema(format!("vault manifest parse: {error}")))?;
+        if value["schema"] != VAULT_MANIFEST_SCHEMA {
+            return Err(GraphError::Schema(format!(
+                "unsupported vault manifest schema: {:?}",
+                value["schema"]
+            )));
+        }
+        let files = value["files"].as_array().ok_or_else(|| {
+            GraphError::Schema("vault manifest `files` must be an array".to_owned())
+        })?;
+        return files
+            .iter()
+            .map(|entry| {
+                let filename = entry.as_str().ok_or_else(|| {
+                    GraphError::Schema("vault manifest filename must be a string".to_owned())
+                })?;
+                if !safe_vault_filename(filename) {
+                    return Err(GraphError::Guard(format!(
+                        "unsafe generated vault filename in manifest: {filename:?}"
+                    )));
+                }
+                Ok(filename.to_owned())
+            })
+            .collect();
+    }
+
+    let mut owned = HashSet::new();
+    for entry in std::fs::read_dir(vault_dir)
+        .map_err(|error| GraphError::Io(format!("vault inventory: {error}")))?
+    {
+        let entry = entry.map_err(|error| GraphError::Io(format!("vault entry: {error}")))?;
+        if !entry
+            .file_type()
+            .map_err(|error| GraphError::Io(format!("vault file type: {error}")))?
+            .is_file()
+        {
+            continue;
+        }
+        let filename = entry.file_name().to_string_lossy().into_owned();
+        if !safe_vault_filename(&filename) {
+            continue;
+        }
+        let content = std::fs::read_to_string(entry.path())
+            .map_err(|error| GraphError::Io(format!("legacy vault note {filename}: {error}")))?;
+        let generated_moc = filename == "_MOC.md" && content.starts_with("# Map of Content\n");
+        if generated_moc || is_legacy_generated_node_note(&content) {
+            owned.insert(filename);
+        }
+    }
+    Ok(owned)
+}
+
+/// Synchronizes generated notes exactly while preserving every unowned/user-authored file.
+fn sync_generated_vault(vault_dir: &Path, rendered: &[(String, String)]) -> Result<()> {
+    std::fs::create_dir_all(vault_dir).map_err(|error| GraphError::Io(error.to_string()))?;
+    let prior_owned = generated_vault_ownership(vault_dir)?;
+    let current_names: HashSet<String> = rendered
+        .iter()
+        .map(|(filename, _)| filename.clone())
+        .collect();
+
+    for filename in &current_names {
+        if !safe_vault_filename(filename) {
+            return Err(GraphError::Guard(format!(
+                "exporter produced unsafe vault filename: {filename:?}"
+            )));
+        }
+        let destination = vault_dir.join(filename);
+        if destination.exists() && !prior_owned.contains(filename) {
+            return Err(GraphError::Guard(format!(
+                "refusing to overwrite unowned vault file: {}",
+                destination.display()
+            )));
+        }
+    }
+
+    // Remove only files proven to be generated by the prior manifest/signature. This happens
+    // before new writes so a legacy raw-label note cannot remain beside its redacted successor.
+    for stale in prior_owned.difference(&current_names) {
+        std::fs::remove_file(vault_dir.join(stale))
+            .map_err(|error| GraphError::Io(format!("remove stale vault note {stale}: {error}")))?;
+    }
+    for (filename, content) in rendered {
+        std::fs::write(vault_dir.join(filename), content.as_bytes())
+            .map_err(|error| GraphError::Io(format!("{filename}: {error}")))?;
+    }
+
+    let mut files: Vec<&str> = rendered
+        .iter()
+        .map(|(filename, _)| filename.as_str())
+        .collect();
+    files.sort_unstable();
+    let manifest = serde_json::to_string_pretty(&serde_json::json!({
+        "schema": VAULT_MANIFEST_SCHEMA,
+        "files": files,
+    }))
+    .map_err(|error| GraphError::Schema(format!("vault manifest serialize: {error}")))?;
+    let temporary = vault_dir.join(format!(".{VAULT_MANIFEST}.tmp.{}", std::process::id()));
+    std::fs::write(&temporary, manifest.as_bytes())
+        .map_err(|error| GraphError::Io(format!("vault manifest temp write: {error}")))?;
+    std::fs::rename(&temporary, vault_dir.join(VAULT_MANIFEST))
+        .map_err(|error| GraphError::Io(format!("vault manifest rename: {error}")))?;
+    Ok(())
+}
+
 /// Inner pipeline: detect → extract → build → analyze → export → write.
 ///
 /// Returns `(node_count, edge_count, community_count)` on success.
@@ -123,11 +280,8 @@ fn run_inner(
     // Optionally emit an Obsidian vault — one note per node (`[[wikilinks]]` + frontmatter/tags)
     // for Obsidian's graph view + Dataview / Juggl / Breadcrumbs.
     if let Some(vault_dir) = vault {
-        std::fs::create_dir_all(vault_dir).map_err(|e| GraphError::Io(e.to_string()))?;
-        for (filename, content) in habitat_graph_export::render_vault(&graph) {
-            std::fs::write(vault_dir.join(&filename), content.as_bytes())
-                .map_err(|e| GraphError::Io(format!("{filename}: {e}")))?;
-        }
+        let rendered = habitat_graph_export::render_vault(&graph);
+        sync_generated_vault(vault_dir, &rendered)?;
     }
 
     // PB opt-in exporters (F13: never on the agent-critical path; written only when requested).
@@ -252,6 +406,68 @@ mod tests {
         assert!(
             any.contains(":: [["),
             "note must carry a Dataview typed edge: {any}"
+        );
+    }
+
+    #[test]
+    fn vault_migrates_legacy_generated_note_without_deleting_user_note() {
+        let src = TempDir::new().unwrap();
+        let out = TempDir::new().unwrap();
+        let vault = TempDir::new().unwrap();
+        let raw_label = "api_key_assignment_refused";
+        mk_file(src.path(), "lib.rs", &format!("fn {raw_label}() {{}}"));
+        let legacy = format!(
+            "---\nid: 193856898\ncrate: test\nlang: rust\nfile: \"lib.rs\"\nline: 1\ndegree: 0\ntags: [hg/node, crate/test]\n---\n\n# {raw_label}\n"
+        );
+        fs::write(vault.path().join(format!("{raw_label}.md")), legacy).unwrap();
+        fs::write(vault.path().join("user.md"), "# User-authored note\n").unwrap();
+
+        assert_eq!(run(src.path(), out.path(), Some(vault.path())), 0);
+        assert!(
+            !vault.path().join(format!("{raw_label}.md")).exists(),
+            "legacy raw generated note must be removed"
+        );
+        assert_eq!(
+            fs::read_to_string(vault.path().join("user.md")).unwrap(),
+            "# User-authored note\n",
+            "unowned user note must remain byte-identical"
+        );
+        assert!(vault.path().join("REDACTED_api_key.md").exists());
+        assert!(vault.path().join(super::VAULT_MANIFEST).exists());
+    }
+
+    #[test]
+    fn vault_manifest_removes_only_stale_generated_notes() {
+        let src = TempDir::new().unwrap();
+        let out = TempDir::new().unwrap();
+        let vault = TempDir::new().unwrap();
+        mk_file(src.path(), "lib.rs", "fn old_generated() {}");
+        assert_eq!(run(src.path(), out.path(), Some(vault.path())), 0);
+        assert!(vault.path().join("old_generated.md").exists());
+        fs::write(vault.path().join("user.md"), "keep me").unwrap();
+
+        mk_file(src.path(), "lib.rs", "fn new_generated() {}");
+        assert_eq!(run(src.path(), out.path(), Some(vault.path())), 0);
+        assert!(!vault.path().join("old_generated.md").exists());
+        assert!(vault.path().join("new_generated.md").exists());
+        assert_eq!(
+            fs::read_to_string(vault.path().join("user.md")).unwrap(),
+            "keep me"
+        );
+    }
+
+    #[test]
+    fn vault_refuses_to_overwrite_unowned_filename_collision() {
+        let src = TempDir::new().unwrap();
+        let out = TempDir::new().unwrap();
+        let vault = TempDir::new().unwrap();
+        mk_file(src.path(), "lib.rs", "fn user() {}");
+        fs::write(vault.path().join("user.md"), "# Human note\n").unwrap();
+
+        assert_eq!(run(src.path(), out.path(), Some(vault.path())), 4);
+        assert_eq!(
+            fs::read_to_string(vault.path().join("user.md")).unwrap(),
+            "# Human note\n"
         );
     }
 

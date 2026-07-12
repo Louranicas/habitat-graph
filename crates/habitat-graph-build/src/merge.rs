@@ -2,7 +2,9 @@
 
 use std::collections::{HashMap, HashSet};
 
-use habitat_graph_core::{content_id, Edge, Graph, Manifest, Node, NodeId};
+use habitat_graph_core::{
+    content_id, is_canonical_redaction_marker, Edge, Graph, Manifest, Node, NodeId,
+};
 use indexmap::IndexMap;
 
 /// Merges two [`Graph`]s whose [`NodeId`] spaces are **independent** into one coherent graph.
@@ -27,6 +29,14 @@ use indexmap::IndexMap;
 /// This function is infallible.
 #[must_use]
 pub fn merge(a: Graph, b: Graph) -> Graph {
+    // Public node-link graphs retain stable content ids but replace secret-bearing labels with a
+    // shared display marker. Label interning would collapse those distinct nodes and recompute
+    // their ids from the marker. When either input carries a canonical marker, merge by the
+    // serialized stable ids instead; `a` still wins shared-node metadata.
+    if graph_contains_public_redaction(&a) || graph_contains_public_redaction(&b) {
+        return merge_by_stable_id(a, b);
+    }
+
     // Destructure both graphs upfront so individual fields can be moved or borrowed
     // independently without triggering partial-move conflicts.
     let Graph {
@@ -120,6 +130,64 @@ pub fn merge(a: Graph, b: Graph) -> Graph {
         nodes: merged_nodes,
         edges: merged_edges,
         communities: merged_communities,
+        manifest,
+    })
+    .sorted()
+}
+
+/// Returns whether a graph contains a canonical public redaction marker.
+fn graph_contains_public_redaction(graph: &Graph) -> bool {
+    graph
+        .nodes
+        .iter()
+        .any(|node| is_canonical_redaction_marker(&node.label))
+}
+
+/// Merges public-projection graphs by their serialized stable [`NodeId`]s.
+///
+/// Content-addressed ids remain the only non-secret identity available after label redaction. The
+/// first graph wins metadata for a shared id, edges require surviving endpoints, and all output is
+/// deduplicated/sorted exactly like the ordinary label merge.
+fn merge_by_stable_id(a: Graph, b: Graph) -> Graph {
+    let Graph {
+        schema,
+        nodes: a_nodes,
+        mut edges,
+        mut communities,
+        manifest: a_manifest,
+    } = a;
+    let Graph {
+        schema: _,
+        nodes: b_nodes,
+        edges: b_edges,
+        communities: b_communities,
+        manifest: b_manifest,
+    } = b;
+
+    let mut nodes_by_id: IndexMap<NodeId, Node> =
+        IndexMap::with_capacity(a_nodes.len().saturating_add(b_nodes.len()));
+    for node in a_nodes.into_iter().chain(b_nodes) {
+        nodes_by_id.entry(node.id).or_insert(node);
+    }
+    let nodes: Vec<Node> = nodes_by_id.into_values().collect();
+    let surviving: HashSet<NodeId> = nodes.iter().map(|node| node.id).collect();
+    edges.extend(b_edges);
+    edges.retain(|edge| surviving.contains(&edge.source) && surviving.contains(&edge.target));
+    communities.extend(b_communities);
+
+    let mut inputs = a_manifest.inputs;
+    inputs.extend(b_manifest.inputs);
+    let manifest = Manifest {
+        inputs,
+        tool_version: a_manifest.tool_version,
+        generated_at: a_manifest.generated_at.or(b_manifest.generated_at),
+    };
+
+    crate::dedup(Graph {
+        schema,
+        nodes,
+        edges,
+        communities,
         manifest,
     })
     .sorted()
@@ -692,5 +760,45 @@ mod tests {
             2,
             "inputs from both manifests concatenated"
         );
+    }
+
+    #[test]
+    fn public_redaction_markers_merge_by_stable_id_without_collapsing() {
+        let mut new_graph = Graph::new();
+        new_graph.nodes.push(node(10, "api_key_alpha", "new.rs"));
+        new_graph.nodes.push(node(20, "Safe", "new.rs"));
+        new_graph.edges.push(edge(10, 20, "calls"));
+
+        let mut prior_public = Graph::new();
+        prior_public
+            .nodes
+            .push(node(10, "[REDACTED:api_key]", "old.rs"));
+        prior_public
+            .nodes
+            .push(node(30, "[REDACTED:api_key]", "other.rs"));
+        prior_public.nodes.push(node(40, "Other", "old.rs"));
+        prior_public.edges.push(edge(30, 40, "calls"));
+
+        let result = merge(new_graph, prior_public);
+        assert_eq!(result.nodes.len(), 4);
+        assert_eq!(
+            result
+                .nodes
+                .iter()
+                .filter(|node| node.id.get() == 10)
+                .count(),
+            1
+        );
+        assert_eq!(
+            result
+                .nodes
+                .iter()
+                .find(|node| node.id.get() == 10)
+                .map(|node| node.label.as_str()),
+            Some("api_key_alpha"),
+            "new raw graph metadata must win for the same stable id"
+        );
+        assert!(result.nodes.iter().any(|node| node.id.get() == 30));
+        assert_eq!(result.edges.len(), 2, "both stable-id edges survive");
     }
 }

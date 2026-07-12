@@ -15,8 +15,9 @@ use crate::escape::redact_public_text;
 /// # Filename rules
 ///
 /// Each node filename is derived from its label via [`sanitize_label`] (strips control chars,
-/// caps at 256), then replacing any remaining `/` or whitespace characters with `_`, then
-/// appending `.md`. When two or more nodes produce the same stem both are disambiguated by
+/// caps at 256), then replacing path/Obsidian-link metacharacters and whitespace with `_`, then
+/// appending `.md`. Canonical redaction markers use a filesystem-safe `REDACTED_<tags>` stem.
+/// When two or more nodes produce the same stem both are disambiguated by
 /// appending the [`NodeId`] before the extension (e.g. `foo_n1.md`, `foo_n2.md`).
 ///
 /// # Note content
@@ -27,7 +28,7 @@ use crate::escape::redact_public_text;
 /// Source: `{source_file}`
 ///
 /// ## Links
-/// - {relation} [[{display_safe(neighbour_label)}]]
+/// - {relation} [[{assigned_filename_stem}|{display_safe(neighbour_label)}]]
 /// …
 /// ```
 ///
@@ -43,6 +44,12 @@ use crate::escape::redact_public_text;
 pub fn render_vault(graph: &Graph) -> Vec<(String, String)> {
     let label_map = collect_labels(graph);
     let filenames = assign_filenames(graph);
+    let filename_map: HashMap<NodeId, String> = graph
+        .nodes
+        .iter()
+        .zip(filenames.iter())
+        .map(|(node, filename)| (node.id, filename.clone()))
+        .collect();
     let adj = build_adjacency(graph);
     let node_to_comm = node_community_map(graph);
 
@@ -53,12 +60,15 @@ pub fn render_vault(graph: &Graph) -> Vec<(String, String)> {
         .map(|(node, fname)| {
             (
                 fname.clone(),
-                render_node_note(node, &adj, &label_map, &node_to_comm),
+                render_node_note(node, &adj, &label_map, &filename_map, &node_to_comm),
             )
         })
         .collect();
 
-    result.push(("_MOC.md".to_owned(), render_moc(graph, &label_map)));
+    result.push((
+        "_MOC.md".to_owned(),
+        render_moc(graph, &label_map, &filename_map),
+    ));
     result.sort_unstable_by(|a, b| a.0.cmp(&b.0));
     result
 }
@@ -199,6 +209,7 @@ fn render_node_note(
     node: &Node,
     adj: &HashMap<NodeId, Vec<(String, NodeId)>>,
     label_map: &HashMap<NodeId, String>,
+    filename_map: &HashMap<NodeId, String>,
     node_to_comm: &HashMap<NodeId, CommunityId>,
 ) -> String {
     let redacted_label = redact_public_text(&node.label);
@@ -241,14 +252,13 @@ fn render_node_note(
     content.push_str("## Links\n");
     if let Some(neighbours) = adj.get(&node.id) {
         for (relation, neighbour_id) in neighbours {
-            let neighbour_label = label_map.get(neighbour_id).map_or("", String::as_str);
-            let safe_neighbour = display_safe(neighbour_label);
+            let neighbour_link = render_wikilink(*neighbour_id, label_map, filename_map);
             // `relation:: [[x]]` = a Dataview inline field (queryable typed edge) + Breadcrumbs relation.
             // `relation` is attacker-influenced → field_key strips bidi/controls + `[`/`]`/`:` so it
             // cannot inject a spurious wikilink or break the field (STRIDE-T, parity with node.label).
             // write! on String is infallible (OOM is the only failure, which aborts).
             let safe_relation = field_key(relation);
-            let _ = writeln!(content, "- {safe_relation}:: [[{safe_neighbour}]]");
+            let _ = writeln!(content, "- {safe_relation}:: {neighbour_link}");
         }
     }
     content
@@ -256,7 +266,11 @@ fn render_node_note(
 
 /// Renders the `_MOC.md` Map-of-Content note grouping every node by community.
 #[must_use]
-fn render_moc(graph: &Graph, label_map: &HashMap<NodeId, String>) -> String {
+fn render_moc(
+    graph: &Graph,
+    label_map: &HashMap<NodeId, String>,
+    filename_map: &HashMap<NodeId, String>,
+) -> String {
     // Map NodeId → CommunityId for grouping.
     let mut node_to_comm: HashMap<NodeId, CommunityId> = HashMap::new();
     for community in &graph.communities {
@@ -284,34 +298,64 @@ fn render_moc(graph: &Graph, label_map: &HashMap<NodeId, String>) -> String {
     for (comm_id, members) in &comm_members {
         let _ = write!(moc, "\n## community {comm_id}\n\n");
         for &nid in members {
-            let label = label_map.get(&nid).map_or("", String::as_str);
-            let _ = writeln!(moc, "- [[{}]]", display_safe(label));
+            let _ = writeln!(moc, "- {}", render_wikilink(nid, label_map, filename_map));
         }
     }
 
     if !unclustered.is_empty() {
         moc.push_str("\n## Unclustered\n\n");
         for nid in &unclustered {
-            let label = label_map.get(nid).map_or("", String::as_str);
-            let _ = writeln!(moc, "- [[{}]]", display_safe(label));
+            let _ = writeln!(moc, "- {}", render_wikilink(*nid, label_map, filename_map));
         }
     }
 
     moc
 }
 
-/// Converts a node label to a filesystem-safe filename stem (no `/`, no whitespace, no controls).
+/// Renders an Obsidian wikilink using the assigned filename as the target and the redacted label
+/// as an optional display alias. Filename identity keeps colliding redaction markers distinct.
+fn render_wikilink(
+    node_id: NodeId,
+    label_map: &HashMap<NodeId, String>,
+    filename_map: &HashMap<NodeId, String>,
+) -> String {
+    let label = label_map.get(&node_id).map_or("", String::as_str);
+    let display = display_safe(label).replace('|', "\\|");
+    let target = filename_map
+        .get(&node_id)
+        .and_then(|filename| filename.strip_suffix(".md"))
+        .unwrap_or("");
+    if target == display {
+        format!("[[{target}]]")
+    } else {
+        format!("[[{target}|{display}]]")
+    }
+}
+
+/// Converts a node label to a filesystem-safe filename stem (no path/link metacharacters,
+/// whitespace, or controls).
 ///
 /// [`sanitize_label`] strips control characters first; this function then replaces `/` and
 /// whitespace with `_`. Returns `"_"` if the resulting stem would be empty (all-control label).
 #[must_use]
 fn make_stem(label: &str) -> String {
     let redacted = redact_public_text(label);
-    let sanitized = sanitize_label(&redacted);
+    if let Some(tags) = redacted
+        .strip_prefix("[REDACTED:")
+        .and_then(|rest| rest.strip_suffix(']'))
+    {
+        return format!("REDACTED_{}", tags.replace(',', "_"));
+    }
+    let sanitized = display_safe(&sanitize_label(&redacted));
     let stem: String = sanitized
         .chars()
         .map(|c| {
-            if c == '/' || c.is_whitespace() {
+            if c.is_whitespace()
+                || matches!(
+                    c,
+                    '/' | '\\' | ':' | '*' | '?' | '"' | '<' | '>' | '|' | '[' | ']' | '#' | '^'
+                )
+            {
                 '_'
             } else {
                 c
@@ -896,7 +940,7 @@ mod tests {
             .collect::<String>();
         assert!(filenames
             .iter()
-            .any(|name| name.contains("[REDACTED:api_key]")));
+            .any(|name| name.contains("REDACTED_api_key")));
         assert!(!joined.contains("api_key_assignment_refused"));
         assert!(!joined.contains("src/api_key.rs"));
         assert!(!joined.contains("Authorization: Bearer token"));
@@ -904,6 +948,33 @@ mod tests {
         // Dataview field keys cannot contain `[`/`]`/`:`, so the shared marker is reduced to a
         // safe key while retaining its redaction tag.
         assert!(joined.contains("REDACTEDbearer_token"));
+    }
+
+    #[test]
+    fn redacted_collision_links_target_distinct_node_id_filenames() {
+        let mut g = Graph::new();
+        g.nodes.push(make_node(1, "api_key_alpha", "a.rs"));
+        g.nodes.push(make_node(2, "api_key_beta", "b.rs"));
+        g.edges.push(make_edge(1, 2, "calls"));
+
+        let rendered = render_vault(&g.sorted());
+        let first_name = "REDACTED_api_key_n1.md";
+        let second_name = "REDACTED_api_key_n2.md";
+        let first = rendered
+            .iter()
+            .find(|(filename, _)| filename == first_name)
+            .map(|(_, content)| content)
+            .expect("first redacted note");
+        let moc = rendered
+            .iter()
+            .find(|(filename, _)| filename == "_MOC.md")
+            .map(|(_, content)| content)
+            .expect("MOC");
+
+        assert!(rendered.iter().any(|(filename, _)| filename == second_name));
+        assert!(first.contains("[[REDACTED_api_key_n2|[REDACTED:api_key]]]"));
+        assert!(moc.contains("[[REDACTED_api_key_n1|[REDACTED:api_key]]]"));
+        assert!(moc.contains("[[REDACTED_api_key_n2|[REDACTED:api_key]]]"));
     }
 
     #[test]

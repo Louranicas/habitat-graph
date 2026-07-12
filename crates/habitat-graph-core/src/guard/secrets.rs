@@ -3,6 +3,45 @@
 //! This is a *screen*, not a vault scanner: it catches the obvious, high-signal leaks (private keys,
 //! cloud tokens, bearer headers) so they never land in a `graph.json`, receipt, or vault note.
 
+/// Secret tags in the canonical order used by public redaction markers.
+pub const SECRET_TAG_ORDER: &[&str] = &[
+    "private_key",
+    "aws_access_key_id",
+    "cargo_registry_token",
+    "bearer_token",
+    "api_key",
+    "slack_token",
+];
+
+/// Returns whether `input` is an exact canonical `[REDACTED:<ordered-tags>]` marker.
+#[must_use]
+pub fn is_canonical_redaction_marker(input: &str) -> bool {
+    let Some(tags) = input
+        .strip_prefix("[REDACTED:")
+        .and_then(|rest| rest.strip_suffix(']'))
+    else {
+        return false;
+    };
+    if tags.is_empty() {
+        return false;
+    }
+
+    let mut previous_index: Option<usize> = None;
+    for tag in tags.split(',') {
+        let Some(index) = SECRET_TAG_ORDER
+            .iter()
+            .position(|candidate| *candidate == tag)
+        else {
+            return false;
+        };
+        if previous_index.is_some_and(|previous| index <= previous) {
+            return false;
+        }
+        previous_index = Some(index);
+    }
+    true
+}
+
 /// Screens `text` for obvious secret patterns, returning the kind tags matched (empty = clean).
 #[must_use]
 pub fn screen_for_secrets(text: &str) -> Vec<&'static str> {
@@ -91,5 +130,18 @@ mod tests {
         let hits = screen_for_secrets("api_key=x and xoxb-1 token");
         assert!(hits.contains(&"api_key"));
         assert!(hits.contains(&"slack_token"));
+    }
+
+    #[test]
+    fn canonical_redaction_marker_requires_known_strictly_ordered_tags() {
+        assert!(is_canonical_redaction_marker("[REDACTED:api_key]"));
+        assert!(is_canonical_redaction_marker(
+            "[REDACTED:aws_access_key_id,api_key,slack_token]"
+        ));
+        assert!(!is_canonical_redaction_marker("[REDACTED:unknown]"));
+        assert!(!is_canonical_redaction_marker(
+            "[REDACTED:slack_token,api_key]"
+        ));
+        assert!(!is_canonical_redaction_marker("[REDACTED:api_key,api_key]"));
     }
 }
