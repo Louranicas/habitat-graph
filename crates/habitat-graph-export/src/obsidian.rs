@@ -8,7 +8,7 @@ use habitat_graph_core::{
 };
 use unicode_normalization::UnicodeNormalization as _;
 
-use crate::escape::{project_public_edges, project_relation, redact_public_text};
+use crate::escape::{project_public_edges, redact_public_text};
 
 /// Renders `graph` as an Obsidian vault: a deterministic list of `(filename, markdown)` pairs —
 /// one note per node (its `source_file` + `[[wikilinks]]` to connected nodes) plus a
@@ -295,7 +295,7 @@ fn yaml_dq(s: &str) -> String {
 /// (`[`, `]`, `:`) (STRIDE-T hardening — closes the raw-`relation` boundary that `node.label`
 /// already guards).
 fn field_key(relation: &str) -> String {
-    display_safe(&project_relation(relation))
+    display_safe(relation)
         .chars()
         .filter(|c| !matches!(c, '[' | ']' | ':'))
         .collect()
@@ -1105,6 +1105,45 @@ mod tests {
     fn field_key_preserves_ordinary_relations() {
         assert_eq!(super::field_key("imports_from"), "imports_from");
         assert_eq!(super::field_key("calls"), "calls");
+    }
+
+    #[test]
+    fn redacted_parallel_relations_keep_distinct_field_keys() {
+        let mut g = graph_with_nodes(vec![
+            make_node(1, "alpha", "a.rs"),
+            make_node(2, "beta", "b.rs"),
+        ]);
+        g.edges.push(make_edge(1, 2, "api_key=alpha"));
+        g.edges.push(make_edge(1, 2, "api_key=beta"));
+
+        let rendered = render_vault(&g.sorted());
+        let (_, content) = rendered
+            .iter()
+            .find(|(filename, _)| filename == "alpha.md")
+            .unwrap();
+        assert!(content.contains("REDACTEDapi_key#e00000000000000000000"));
+        assert!(content.contains("REDACTEDapi_key#e00000000000000000001"));
+    }
+
+    #[test]
+    fn field_key_normalization_cannot_reconstruct_secrets() {
+        let mut g = graph_with_nodes(vec![
+            make_node(1, "alpha", "a.rs"),
+            make_node(2, "beta", "b.rs"),
+        ]);
+        g.edges.push(make_edge(1, 2, "xox[b]-123-secret"));
+        g.edges
+            .push(make_edge(1, 2, "-----BEG[IN] OPENSSH PRIVATE KEY-----"));
+
+        let rendered = render_vault(&g.sorted());
+        let joined = rendered
+            .iter()
+            .map(|(_, content)| content.as_str())
+            .collect::<String>();
+        assert!(!joined.contains("xoxb-123-secret"));
+        assert!(!joined.contains("-----BEGIN OPENSSH PRIVATE KEY-----"));
+        assert!(joined.contains("REDACTEDslack_token#e"));
+        assert!(joined.contains("REDACTEDprivate_key#e"));
     }
 
     #[test]

@@ -1,6 +1,6 @@
 //! The `extract` command — the full pipeline (detect → extract → build → analyze → export → write).
 
-use std::collections::{BTreeMap, HashSet};
+use std::collections::HashSet;
 use std::fmt::Write as _;
 use std::path::{Component, Path};
 
@@ -193,66 +193,135 @@ fn parse_generated_vault_node_note(content: &str) -> Option<GeneratedVaultNode> 
     })
 }
 
-fn render_generated_vault_moc(
-    notes: &[(String, GeneratedVaultNode)],
-    filename_targets: bool,
-) -> Option<String> {
-    if notes.is_empty() {
+fn parse_generated_vault_moc(content: &str) -> Option<Vec<(Option<u32>, Vec<&str>)>> {
+    if !content.ends_with('\n') {
         return None;
     }
 
-    let mut seen = HashSet::with_capacity(notes.len());
-    let mut communities: BTreeMap<u32, Vec<(&str, &GeneratedVaultNode)>> = BTreeMap::new();
-    let mut unclustered = Vec::new();
-    for (filename, note) in notes {
-        if !seen.insert(note.id) {
+    let mut source_lines = content.lines();
+    if source_lines.next() != Some("# Map of Content") {
+        return None;
+    }
+    let Some(first_separator) = source_lines.next() else {
+        return Some(Vec::new());
+    };
+    if !first_separator.is_empty() {
+        return None;
+    }
+
+    let mut heading = source_lines.next()?;
+    let mut sections = Vec::new();
+    let mut last_community = None;
+    let mut saw_unclustered = false;
+    loop {
+        let community = if heading == "## Unclustered" {
+            if saw_unclustered {
+                return None;
+            }
+            saw_unclustered = true;
+            None
+        } else {
+            if saw_unclustered {
+                return None;
+            }
+            let value = heading.strip_prefix("## community c")?;
+            let community = canonical_legacy_number::<u32>(value)?;
+            if last_community.is_some_and(|previous| community <= previous) {
+                return None;
+            }
+            last_community = Some(community);
+            Some(community)
+        };
+        if source_lines.next() != Some("") {
             return None;
         }
-        if let Some(community) = note.community {
-            communities
-                .entry(community)
-                .or_default()
-                .push((filename, note));
-        } else {
-            unclustered.push((filename.as_str(), note));
-        }
-    }
-    for members in communities.values_mut() {
-        members.sort_unstable_by_key(|(_, note)| note.id);
-    }
-    unclustered.sort_unstable_by_key(|(_, note)| note.id);
 
-    let render_link = |filename: &str, note: &GeneratedVaultNode| {
-        if !filename_targets {
-            return format!("[[{}]]", note.label);
+        let mut section_links = Vec::new();
+        let next_heading = loop {
+            match source_lines.next() {
+                Some(line) if line.starts_with("- [[") && line.ends_with("]]") => {
+                    section_links.push(line);
+                }
+                Some("") => break Some(source_lines.next()?),
+                Some(_) => return None,
+                None => break None,
+            }
+        };
+        if section_links.is_empty() {
+            return None;
         }
-        let target = filename.strip_suffix(".md").unwrap_or(filename);
-        if target == note.label {
-            format!("[[{target}]]")
-        } else {
-            format!("[[{target}|{}]]", note.label)
-        }
-    };
+        sections.push((community, section_links));
 
-    let mut moc = String::from("# Map of Content\n");
-    for (community, members) in communities {
-        let _ = write!(moc, "\n## community {community}\n\n");
-        for (filename, note) in members {
-            let _ = writeln!(moc, "- {}", render_link(filename, note));
+        let Some(next_heading) = next_heading else {
+            break;
+        };
+        heading = next_heading;
+    }
+    Some(sections)
+}
+
+fn generated_vault_moc_link(
+    filename: &str,
+    note: &GeneratedVaultNode,
+    filename_targets: bool,
+) -> String {
+    if !filename_targets {
+        return format!("- [[{}]]", note.label);
+    }
+    let target = filename.strip_suffix(".md").unwrap_or(filename);
+    if target == note.label {
+        format!("- [[{target}]]")
+    } else {
+        format!("- [[{target}|{}]]", note.label)
+    }
+}
+
+fn generated_vault_moc_section_matches(
+    links: &[&str],
+    community: Option<u32>,
+    notes: &[(String, GeneratedVaultNode)],
+    filename_targets: bool,
+) -> bool {
+    if links.is_empty() {
+        return false;
+    }
+    let mut candidates: Vec<_> = notes
+        .iter()
+        .filter(|(_, note)| note.community == community)
+        .collect();
+    candidates.sort_unstable_by_key(|(_, note)| note.id);
+
+    let mut next_link = 0;
+    for (filename, note) in candidates {
+        let Some(link) = links.get(next_link) else {
+            return true;
+        };
+        if generated_vault_moc_link(filename, note, filename_targets) == *link {
+            next_link += 1;
+            if next_link == links.len() {
+                return true;
+            }
         }
     }
-    if !unclustered.is_empty() {
-        moc.push_str("\n## Unclustered\n\n");
-        for (filename, note) in unclustered {
-            let _ = writeln!(moc, "- {}", render_link(filename, note));
-        }
-    }
-    Some(moc)
+    false
 }
 
 fn is_generated_vault_moc(content: &str, notes: &[(String, GeneratedVaultNode)]) -> bool {
+    let Some(sections) = parse_generated_vault_moc(content) else {
+        return false;
+    };
+    let mut seen_ids = HashSet::with_capacity(notes.len());
+    if notes.iter().any(|(_, note)| !seen_ids.insert(note.id)) {
+        return false;
+    }
+    if sections.is_empty() {
+        return true;
+    }
+
     [false, true].into_iter().any(|filename_targets| {
-        render_generated_vault_moc(notes, filename_targets).as_deref() == Some(content)
+        sections.iter().all(|(community, links)| {
+            generated_vault_moc_section_matches(links, *community, notes, filename_targets)
+        })
     })
 }
 
@@ -260,34 +329,44 @@ fn is_generated_vault_moc(content: &str, notes: &[(String, GeneratedVaultNode)])
 /// manifest exists. An invalid existing manifest fails closed rather than guessing ownership.
 fn generated_vault_ownership(vault_dir: &Path) -> Result<HashSet<String>> {
     let manifest_path = vault_dir.join(VAULT_MANIFEST);
-    if manifest_path.exists() {
-        let text = std::fs::read_to_string(&manifest_path)
-            .map_err(|error| GraphError::Io(format!("vault manifest read: {error}")))?;
-        let value: serde_json::Value = serde_json::from_str(&text)
-            .map_err(|error| GraphError::Schema(format!("vault manifest parse: {error}")))?;
-        if value["schema"] != VAULT_MANIFEST_SCHEMA {
-            return Err(GraphError::Schema(format!(
-                "unsupported vault manifest schema: {:?}",
-                value["schema"]
-            )));
+    match std::fs::symlink_metadata(&manifest_path) {
+        Ok(metadata) if metadata.file_type().is_file() => {
+            let text = std::fs::read_to_string(&manifest_path)
+                .map_err(|error| GraphError::Io(format!("vault manifest read: {error}")))?;
+            let value: serde_json::Value = serde_json::from_str(&text)
+                .map_err(|error| GraphError::Schema(format!("vault manifest parse: {error}")))?;
+            if value["schema"] != VAULT_MANIFEST_SCHEMA {
+                return Err(GraphError::Schema(format!(
+                    "unsupported vault manifest schema: {:?}",
+                    value["schema"]
+                )));
+            }
+            let files = value["files"].as_array().ok_or_else(|| {
+                GraphError::Schema("vault manifest `files` must be an array".to_owned())
+            })?;
+            return files
+                .iter()
+                .map(|entry| {
+                    let filename = entry.as_str().ok_or_else(|| {
+                        GraphError::Schema("vault manifest filename must be a string".to_owned())
+                    })?;
+                    if !safe_vault_filename(filename) {
+                        return Err(GraphError::Guard(format!(
+                            "unsafe generated vault filename in manifest: {filename:?}"
+                        )));
+                    }
+                    Ok(filename.to_owned())
+                })
+                .collect();
         }
-        let files = value["files"].as_array().ok_or_else(|| {
-            GraphError::Schema("vault manifest `files` must be an array".to_owned())
-        })?;
-        return files
-            .iter()
-            .map(|entry| {
-                let filename = entry.as_str().ok_or_else(|| {
-                    GraphError::Schema("vault manifest filename must be a string".to_owned())
-                })?;
-                if !safe_vault_filename(filename) {
-                    return Err(GraphError::Guard(format!(
-                        "unsafe generated vault filename in manifest: {filename:?}"
-                    )));
-                }
-                Ok(filename.to_owned())
-            })
-            .collect();
+        Ok(_) => {
+            return Err(GraphError::Guard(format!(
+                "vault manifest is not a regular file: {}",
+                manifest_path.display()
+            )))
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+        Err(error) => return Err(GraphError::Io(format!("inspect vault manifest: {error}"))),
     }
 
     let mut owned = HashSet::new();
@@ -357,11 +436,21 @@ fn sync_generated_vault(vault_dir: &Path, rendered: &[(String, String)]) -> Resu
             )));
         }
         let destination = vault_dir.join(filename);
-        if destination.exists() && !prior_owned.contains(filename) {
-            return Err(GraphError::Guard(format!(
-                "refusing to overwrite unowned vault file: {}",
-                destination.display()
-            )));
+        match std::fs::symlink_metadata(&destination) {
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => {
+                return Err(GraphError::Io(format!(
+                    "inspect vault note {}: {error}",
+                    destination.display()
+                )))
+            }
+            Ok(metadata) if prior_owned.contains(filename) && metadata.file_type().is_file() => {}
+            Ok(_) => {
+                return Err(GraphError::Guard(format!(
+                    "refusing to overwrite unsafe or unowned vault file: {}",
+                    destination.display()
+                )))
+            }
         }
     }
 
@@ -379,8 +468,12 @@ fn sync_generated_vault(vault_dir: &Path, rendered: &[(String, String)]) -> Resu
 
     write_vault_manifest(vault_dir, &current_names)?;
     for (filename, content) in rendered {
-        std::fs::write(vault_dir.join(filename), content.as_bytes())
-            .map_err(|error| GraphError::Io(format!("{filename}: {error}")))?;
+        super::atomic_file::write(
+            &vault_dir.join(filename),
+            content.as_bytes(),
+            false,
+            filename,
+        )?;
     }
     Ok(())
 }
@@ -403,34 +496,44 @@ fn generated_wiki_filename(filename: &str) -> bool {
 
 fn generated_wiki_ownership(wiki_dir: &Path, claim_unowned: bool) -> Result<HashSet<String>> {
     let manifest_path = wiki_dir.join(WIKI_MANIFEST);
-    if manifest_path.exists() {
-        let text = std::fs::read_to_string(&manifest_path)
-            .map_err(|error| GraphError::Io(format!("wiki manifest read: {error}")))?;
-        let value: serde_json::Value = serde_json::from_str(&text)
-            .map_err(|error| GraphError::Schema(format!("wiki manifest parse: {error}")))?;
-        if value["schema"] != WIKI_MANIFEST_SCHEMA {
-            return Err(GraphError::Schema(format!(
-                "unsupported wiki manifest schema: {:?}",
-                value["schema"]
-            )));
+    match std::fs::symlink_metadata(&manifest_path) {
+        Ok(metadata) if metadata.file_type().is_file() => {
+            let text = std::fs::read_to_string(&manifest_path)
+                .map_err(|error| GraphError::Io(format!("wiki manifest read: {error}")))?;
+            let value: serde_json::Value = serde_json::from_str(&text)
+                .map_err(|error| GraphError::Schema(format!("wiki manifest parse: {error}")))?;
+            if value["schema"] != WIKI_MANIFEST_SCHEMA {
+                return Err(GraphError::Schema(format!(
+                    "unsupported wiki manifest schema: {:?}",
+                    value["schema"]
+                )));
+            }
+            let files = value["files"].as_array().ok_or_else(|| {
+                GraphError::Schema("wiki manifest `files` must be an array".to_owned())
+            })?;
+            return files
+                .iter()
+                .map(|entry| {
+                    let filename = entry.as_str().ok_or_else(|| {
+                        GraphError::Schema("wiki manifest filename must be a string".to_owned())
+                    })?;
+                    if !generated_wiki_filename(filename) {
+                        return Err(GraphError::Guard(format!(
+                            "invalid generated wiki filename in manifest: {filename:?}"
+                        )));
+                    }
+                    Ok(filename.to_owned())
+                })
+                .collect();
         }
-        let files = value["files"].as_array().ok_or_else(|| {
-            GraphError::Schema("wiki manifest `files` must be an array".to_owned())
-        })?;
-        return files
-            .iter()
-            .map(|entry| {
-                let filename = entry.as_str().ok_or_else(|| {
-                    GraphError::Schema("wiki manifest filename must be a string".to_owned())
-                })?;
-                if !generated_wiki_filename(filename) {
-                    return Err(GraphError::Guard(format!(
-                        "invalid generated wiki filename in manifest: {filename:?}"
-                    )));
-                }
-                Ok(filename.to_owned())
-            })
-            .collect();
+        Ok(_) => {
+            return Err(GraphError::Guard(format!(
+                "wiki manifest is not a regular file: {}",
+                manifest_path.display()
+            )))
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+        Err(error) => return Err(GraphError::Io(format!("inspect wiki manifest: {error}"))),
     }
 
     if !claim_unowned {
@@ -550,8 +653,12 @@ pub(super) fn sync_generated_wiki(
 
     write_wiki_manifest(wiki_dir, &current_names)?;
     for (filename, content) in rendered {
-        std::fs::write(wiki_dir.join(filename), content.as_bytes())
-            .map_err(|error| GraphError::Io(format!("{filename}: {error}")))?;
+        super::atomic_file::write(
+            &wiki_dir.join(filename),
+            content.as_bytes(),
+            false,
+            filename,
+        )?;
     }
     Ok(())
 }
@@ -653,6 +760,7 @@ fn write_optional_artifact_manifest(out: &Path, names: &HashSet<String>) -> Resu
 fn select_optional_artifact(
     path: &Path,
     filename: &str,
+    flag: &str,
     requested: bool,
     owned: &mut HashSet<String>,
 ) -> Result<bool> {
@@ -662,6 +770,12 @@ fn select_optional_artifact(
         return Ok(true);
     }
     if !owned.contains(filename) {
+        if existing_public_artifact(path, false)? {
+            eprintln!(
+                "warning: existing unowned optional artifact {} was not refreshed; run extract with {flag} to adopt and replace it",
+                path.display()
+            );
+        }
         return Ok(false);
     }
     if existing_public_artifact(path, false)? {
@@ -679,12 +793,18 @@ pub(super) fn write_public_artifacts(out: &Path, graph: &Graph, opts: ExtractOpt
     let had_optional_manifest = prior_optional_ownership.is_some();
     let mut optional_owned = prior_optional_ownership.unwrap_or_default();
     let svg_path = out.join("graph.svg");
-    let svg_selected =
-        select_optional_artifact(&svg_path, "graph.svg", opts.svg, &mut optional_owned)?;
+    let svg_selected = select_optional_artifact(
+        &svg_path,
+        "graph.svg",
+        "--svg",
+        opts.svg,
+        &mut optional_owned,
+    )?;
     let graphml_path = out.join("graph.graphml");
     let graphml_selected = select_optional_artifact(
         &graphml_path,
         "graph.graphml",
+        "--graphml",
         opts.graphml,
         &mut optional_owned,
     )?;
@@ -692,6 +812,7 @@ pub(super) fn write_public_artifacts(out: &Path, graph: &Graph, opts: ExtractOpt
     let cypher_selected = select_optional_artifact(
         &cypher_path,
         "graph.cypher",
+        "--neo4j",
         opts.neo4j,
         &mut optional_owned,
     )?;
@@ -803,8 +924,8 @@ mod tests {
     use tempfile::TempDir;
 
     use super::{
-        run, run_artifacts, sync_generated_vault, write_vault_manifest, write_wiki_manifest,
-        ExtractOpts,
+        run, run_artifacts, sync_generated_vault, sync_generated_wiki, write_vault_manifest,
+        write_wiki_manifest, ExtractOpts,
     };
 
     // ── Helpers ───────────────────────────────────────────────────────────────
@@ -832,6 +953,16 @@ mod tests {
             pos += idx + needle.len();
         }
         n
+    }
+
+    fn legacy_vault_note(id: u32, community: Option<u32>, label: &str) -> String {
+        let community_field =
+            community.map_or_else(String::new, |value| format!("community: {value}\n"));
+        let community_tag =
+            community.map_or_else(String::new, |value| format!(", community/{value}"));
+        format!(
+            "---\nid: {id}\n{community_field}crate: test\nlang: rust\nfile: \"lib.rs\"\nline: 1\ndegree: 0\ntags: [hg/node, crate/test, lang/rust{community_tag}]\n---\n\n# {label}\n\n> `lib.rs:1` · crate `test` · degree 0\n\n## Links\n"
+        )
     }
 
     // ── T1: .rs file with two functions → exit 0 ─────────────────────────────
@@ -953,6 +1084,54 @@ mod tests {
     }
 
     #[test]
+    fn legacy_vault_moc_accepts_a_generated_note_subset() {
+        let src = TempDir::new().unwrap();
+        let out = TempDir::new().unwrap();
+        let vault = TempDir::new().unwrap();
+        mk_file(src.path(), "lib.rs", "fn current() {}");
+        fs::write(
+            vault.path().join("stale.md"),
+            legacy_vault_note(1, Some(0), "stale"),
+        )
+        .unwrap();
+        fs::write(
+            vault.path().join("current.md"),
+            legacy_vault_note(2, Some(0), "current"),
+        )
+        .unwrap();
+        fs::write(
+            vault.path().join("_MOC.md"),
+            "# Map of Content\n\n## community c0\n\n- [[current]]\n",
+        )
+        .unwrap();
+
+        assert_eq!(run(src.path(), out.path(), Some(vault.path())), 0);
+        assert!(!vault.path().join("stale.md").exists());
+        assert!(vault.path().join(super::VAULT_MANIFEST).exists());
+    }
+
+    #[test]
+    fn legacy_empty_vault_moc_migrates_with_stale_notes() {
+        let src = TempDir::new().unwrap();
+        let out = TempDir::new().unwrap();
+        let vault = TempDir::new().unwrap();
+        fs::write(
+            vault.path().join("stale.md"),
+            legacy_vault_note(1, None, "stale"),
+        )
+        .unwrap();
+        fs::write(vault.path().join("_MOC.md"), "# Map of Content\n").unwrap();
+
+        assert_eq!(run(src.path(), out.path(), Some(vault.path())), 0);
+        assert!(!vault.path().join("stale.md").exists());
+        assert_eq!(
+            fs::read_to_string(vault.path().join("_MOC.md")).unwrap(),
+            "# Map of Content\n"
+        );
+        assert!(vault.path().join(super::VAULT_MANIFEST).exists());
+    }
+
+    #[test]
     fn vault_refuses_to_claim_user_authored_moc() {
         let src = TempDir::new().unwrap();
         let out = TempDir::new().unwrap();
@@ -1006,7 +1185,7 @@ mod tests {
     }
 
     #[test]
-    fn vault_sync_retries_after_partial_note_write() {
+    fn vault_sync_preflights_all_destinations_before_mutating() {
         let vault = TempDir::new().unwrap();
         let legacy_secret = "api_key_assignment_refused.md";
         let prior_owned =
@@ -1020,15 +1199,17 @@ mod tests {
         ];
 
         assert!(sync_generated_vault(vault.path(), &rendered).is_err());
+        assert!(!vault.path().join("written.md").exists());
+        let journal = fs::read_to_string(vault.path().join(super::VAULT_MANIFEST)).unwrap();
+        assert!(journal.contains(legacy_secret));
+
+        fs::remove_dir(vault.path().join("blocked.md")).unwrap();
+        sync_generated_vault(vault.path(), &rendered).unwrap();
+        assert!(!vault.path().join(legacy_secret).exists());
         assert_eq!(
             fs::read_to_string(vault.path().join("written.md")).unwrap(),
             "written"
         );
-        let journal = fs::read_to_string(vault.path().join(super::VAULT_MANIFEST)).unwrap();
-        assert!(!journal.contains(legacy_secret));
-
-        fs::remove_dir(vault.path().join("blocked.md")).unwrap();
-        sync_generated_vault(vault.path(), &rendered).unwrap();
         assert_eq!(
             fs::read_to_string(vault.path().join("blocked.md")).unwrap(),
             "unblocked"
@@ -1077,6 +1258,46 @@ mod tests {
         ));
         symlink(&wiki_victim, &wiki_temporary).unwrap();
         write_wiki_manifest(wiki.path(), &std::collections::HashSet::new()).unwrap();
+        assert_eq!(fs::read_to_string(&wiki_victim).unwrap(), "wiki sentinel");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn generated_note_sync_refuses_symlink_destinations() {
+        use std::os::unix::fs::symlink;
+
+        let victim_dir = TempDir::new().unwrap();
+        let vault_victim = victim_dir.path().join("vault-victim.md");
+        fs::write(&vault_victim, "vault sentinel").unwrap();
+        let vault = TempDir::new().unwrap();
+        write_vault_manifest(
+            vault.path(),
+            &std::collections::HashSet::from(["owned.md".to_owned()]),
+        )
+        .unwrap();
+        symlink(&vault_victim, vault.path().join("owned.md")).unwrap();
+        let vault_rendered = vec![("owned.md".to_owned(), "replacement".to_owned())];
+        assert!(sync_generated_vault(vault.path(), &vault_rendered).is_err());
+        assert_eq!(fs::read_to_string(&vault_victim).unwrap(), "vault sentinel");
+
+        let dangling_target = victim_dir.path().join("missing.md");
+        let dangling_vault = TempDir::new().unwrap();
+        symlink(&dangling_target, dangling_vault.path().join("new.md")).unwrap();
+        let dangling_rendered = vec![("new.md".to_owned(), "replacement".to_owned())];
+        assert!(sync_generated_vault(dangling_vault.path(), &dangling_rendered).is_err());
+        assert!(!dangling_target.exists());
+
+        let wiki_victim = victim_dir.path().join("wiki-victim.md");
+        fs::write(&wiki_victim, "wiki sentinel").unwrap();
+        let wiki = TempDir::new().unwrap();
+        write_wiki_manifest(
+            wiki.path(),
+            &std::collections::HashSet::from(["index.md".to_owned()]),
+        )
+        .unwrap();
+        symlink(&wiki_victim, wiki.path().join("index.md")).unwrap();
+        let wiki_rendered = vec![("index.md".to_owned(), "replacement".to_owned())];
+        assert!(sync_generated_wiki(wiki.path(), &wiki_rendered, false).is_err());
         assert_eq!(fs::read_to_string(&wiki_victim).unwrap(), "wiki sentinel");
     }
 
@@ -1655,6 +1876,31 @@ mod tests {
             );
         }
         assert!(!out.path().join(super::OPTIONAL_ARTIFACT_MANIFEST).exists());
+    }
+
+    #[test]
+    fn explicit_flags_adopt_pre_manifest_optional_public_artifacts() {
+        let src = TempDir::new().unwrap();
+        let out = TempDir::new().unwrap();
+        mk_file(src.path(), "lib.rs", "fn generated() {}");
+        for artifact in ["graph.svg", "graph.graphml", "graph.cypher"] {
+            fs::write(out.path().join(artifact), "legacy generated content").unwrap();
+        }
+        let opts = ExtractOpts {
+            svg: true,
+            graphml: true,
+            neo4j: true,
+            wiki: false,
+        };
+
+        assert_eq!(run_artifacts(src.path(), out.path(), None, opts), 0);
+        for artifact in ["graph.svg", "graph.graphml", "graph.cypher"] {
+            assert_ne!(
+                fs::read_to_string(out.path().join(artifact)).unwrap(),
+                "legacy generated content"
+            );
+        }
+        assert!(out.path().join(super::OPTIONAL_ARTIFACT_MANIFEST).exists());
     }
 
     #[test]

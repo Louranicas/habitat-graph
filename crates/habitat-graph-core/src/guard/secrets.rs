@@ -154,6 +154,10 @@ pub fn screen_for_secrets(text: &str) -> Vec<&'static str> {
         .chars()
         .filter(|character| character.is_alphanumeric())
         .collect();
+    let field_key_like: String = stripped
+        .chars()
+        .filter(|character| !matches!(character, '[' | ']' | ':'))
+        .collect();
 
     let mut encountered = HashSet::new();
     for candidate in [
@@ -162,6 +166,7 @@ pub fn screen_for_secrets(text: &str) -> Vec<&'static str> {
         separated.as_str(),
         filename_like.as_str(),
         compact.as_str(),
+        field_key_like.as_str(),
     ] {
         screen_candidate(candidate, &mut encountered);
     }
@@ -337,6 +342,19 @@ mod tests {
     #[test]
     fn detects_slack_token() {
         assert!(screen_for_secrets("xoxb-123-456-abc").contains(&"slack_token"));
+    }
+
+    #[test]
+    fn detects_secrets_reconstructed_by_punctuation_removal() {
+        for (value, tag) in [
+            ("xox[b]-123-secret", "slack_token"),
+            ("xox[p]-123-secret", "slack_token"),
+            ("-----BEG[IN] OPENSSH PRIVATE KEY-----", "private_key"),
+        ] {
+            assert!(screen_for_secrets(value).contains(&tag));
+            assert!(redact_public_text(value).contains(tag));
+        }
+        assert!(is_clean("begin_private_key_rotation"));
     }
 
     #[test]
