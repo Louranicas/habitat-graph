@@ -463,14 +463,13 @@ fn parse_journal_graph(value: &serde_json::Value, field: &str) -> Result<Graph> 
     Ok(graph)
 }
 
-fn load_add_journal(state_path: &Path) -> Result<Option<AddJournal>> {
-    let path = add_journal_path(state_path)?;
-    super::private_state::ensure(&path)?;
-    if !path.exists() {
-        return Ok(None);
-    }
-    let text = std::fs::read_to_string(&path)
-        .map_err(|error| GraphError::Io(format!("read add journal: {error}")))?;
+fn load_add_journal(path: &Path) -> Result<Option<AddJournal>> {
+    super::private_state::ensure(path)?;
+    let text = match std::fs::read_to_string(path) {
+        Ok(text) => text,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(error) => return Err(GraphError::Io(format!("read add journal: {error}"))),
+    };
     let value: serde_json::Value = serde_json::from_str(&text)
         .map_err(|error| GraphError::Schema(format!("add journal parse: {error}")))?;
     let legacy_generation = match value["schema"].as_str() {
@@ -554,8 +553,51 @@ fn load_add_journal(state_path: &Path) -> Result<Option<AddJournal>> {
     }))
 }
 
+fn add_journal_matches_public(journal: &AddJournal, public: &PublicOutput) -> bool {
+    let current_state = public.graph.as_ref().map(public_graph_state);
+    let current_matches_intended = current_state.as_ref() == Some(&journal.after_public);
+    let current_matches_prior = if let Some((before, after)) = &journal.legacy_generations {
+        let current = public.content_generation.as_deref();
+        current == Some(after.as_str()) || current == before.as_deref()
+    } else {
+        current_state.as_ref() == journal.before_public.as_ref()
+    };
+    current_matches_prior || current_matches_intended
+}
+
+fn select_add_journal(
+    state_path: &Path,
+    public: &PublicOutput,
+) -> Result<Option<(PathBuf, AddJournal)>> {
+    let mut journals = Vec::new();
+    for candidate in super::private_state::state_context_candidates(state_path)? {
+        let journal_path = add_journal_path(&candidate)?;
+        if let Some(journal) = load_add_journal(&journal_path)? {
+            journals.push((journal_path, journal));
+        }
+    }
+    if journals.is_empty() {
+        return Ok(None);
+    }
+    if journals.len() != 1 {
+        return Err(GraphError::Guard(format!(
+            "multiple pending add journals exist for {}",
+            state_path.display()
+        )));
+    }
+    let Some((path, journal)) = journals.pop() else {
+        return Ok(None);
+    };
+    if !add_journal_matches_public(&journal, public) {
+        return Err(GraphError::Guard(
+            "public graph changed while an add transaction is pending".to_owned(),
+        ));
+    }
+    Ok(Some((path, journal)))
+}
+
 fn recover_add_journal(out: &Path, state_path: &Path, public: &mut PublicOutput) -> Result<bool> {
-    let Some(journal) = load_add_journal(state_path)? else {
+    let Some((journal_path, journal)) = select_add_journal(state_path, public)? else {
         return Ok(false);
     };
     let intended_graph = habitat_graph_serve::from_node_link(&journal.public_json)?;
@@ -565,20 +607,6 @@ fn recover_add_journal(out: &Path, state_path: &Path, public: &mut PublicOutput)
             "add journal public state mismatch".to_owned(),
         ));
     }
-    let current_state = public.graph.as_ref().map(public_graph_state);
-    let current_matches_intended = current_state.as_ref() == Some(&journal.after_public);
-    let current_matches_prior = if let Some((before, after)) = &journal.legacy_generations {
-        let current = public.content_generation.as_deref();
-        current == Some(after.as_str()) || current == before.as_deref()
-    } else {
-        current_state.as_ref() == journal.before_public.as_ref()
-    };
-    if !current_matches_prior && !current_matches_intended {
-        return Err(GraphError::Guard(
-            "public graph changed while an add transaction is pending".to_owned(),
-        ));
-    }
-
     let intended_generation = content_generation(&journal.public_json);
     if public.content_generation.as_deref() != Some(intended_generation.as_str()) {
         super::atomic_file::write(
@@ -595,7 +623,7 @@ fn recover_add_journal(out: &Path, state_path: &Path, public: &mut PublicOutput)
         &intended_semantic_generation,
     )?;
     super::private_state::write_state(state_path, &state_json)?;
-    super::private_state::remove(&add_journal_path(state_path)?, "add journal")?;
+    super::private_state::remove(&journal_path, "add journal")?;
     *public = PublicOutput {
         graph: Some(intended_graph),
         content_generation: Some(intended_generation),
@@ -1137,6 +1165,38 @@ mod tests {
     }
 
     #[test]
+    fn reformatted_public_graph_inherits_private_lineage_across_git_contexts() {
+        let d = tdir();
+        fs::create_dir_all(d.join(".git/objects")).unwrap();
+        fs::create_dir_all(d.join(".git/refs/heads")).unwrap();
+        fs::write(d.join(".git/HEAD"), "ref: refs/heads/main\n").unwrap();
+        fs::write(
+            d.join(".git/refs/heads/main"),
+            "1111111111111111111111111111111111111111\n",
+        )
+        .unwrap();
+        let out = d.join("public/graph.json");
+        let original =
+            extract_from_bytes(b"fn api_key_original() {}", "rs").expect("extract original");
+        merge_into_output(original, &out).unwrap();
+
+        let public = fs::read_to_string(&out).unwrap();
+        fs::write(&out, format!("{public}\n")).unwrap();
+        fs::write(
+            d.join(".git/refs/heads/main"),
+            "2222222222222222222222222222222222222222\n",
+        )
+        .unwrap();
+        let added = extract_from_bytes(b"fn added() {}", "rs").unwrap();
+        merge_into_output(added, &out).unwrap();
+
+        let state_path = super::private_state_path(&out).unwrap();
+        let private = fs::read_to_string(state_path).unwrap();
+        assert!(private.contains("api_key_original"));
+        assert!(private.contains("added"));
+    }
+
+    #[test]
     fn committed_semantics_preserve_private_lineage_across_policy_and_format_changes() {
         let d = tdir();
         let out = d.join("g.json");
@@ -1230,6 +1290,54 @@ mod tests {
         assert!(public_text.contains("after_retry"));
         let value: serde_json::Value = serde_json::from_str(&public_text).expect("parse public");
         assert_eq!(value["nodes"].as_array().unwrap().len(), 3);
+    }
+
+    #[test]
+    fn merge_recovers_a_pending_add_after_git_context_rotation() {
+        let d = tdir();
+        fs::create_dir_all(d.join(".git/objects")).unwrap();
+        fs::create_dir_all(d.join(".git/refs/heads")).unwrap();
+        fs::write(d.join(".git/HEAD"), "ref: refs/heads/main\n").unwrap();
+        fs::write(
+            d.join(".git/refs/heads/main"),
+            "1111111111111111111111111111111111111111\n",
+        )
+        .unwrap();
+        let out = d.join("public/graph.json");
+        let original =
+            extract_from_bytes(b"fn api_key_original() {}", "rs").expect("extract original");
+        merge_into_output(original.clone(), &out).expect("write original");
+
+        let public_before = fs::read_to_string(&out).unwrap();
+        let before_graph = habitat_graph_serve::from_node_link(&public_before).unwrap();
+        let failed_add =
+            extract_from_bytes(b"fn api_key_pending() {}", "rs").expect("extract pending");
+        let pending = habitat_graph_build::merge(failed_add, original).sorted();
+        let pending_json = habitat_graph_export::to_node_link(&pending).unwrap();
+        let old_state_path = super::private_state_path(&out).unwrap();
+        super::write_add_journal(
+            &old_state_path,
+            Some(&before_graph),
+            &pending,
+            &pending_json,
+        )
+        .unwrap();
+
+        fs::write(
+            d.join(".git/refs/heads/main"),
+            "2222222222222222222222222222222222222222\n",
+        )
+        .unwrap();
+        let new_state_path = super::private_state_path(&out).unwrap();
+        assert_ne!(old_state_path, new_state_path);
+        let next = extract_from_bytes(b"fn after_retry() {}", "rs").unwrap();
+        merge_into_output(next, &out).unwrap();
+
+        let private = fs::read_to_string(&new_state_path).unwrap();
+        assert!(private.contains("api_key_original"));
+        assert!(private.contains("api_key_pending"));
+        assert!(private.contains("after_retry"));
+        assert!(!super::add_journal_path(&old_state_path).unwrap().exists());
     }
 
     #[test]

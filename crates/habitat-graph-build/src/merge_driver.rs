@@ -231,7 +231,7 @@ fn ambiguous_projected_node_ids(
     let mut ambiguous = [HashSet::new(), HashSet::new()];
     for group in groups {
         let projected_count = group.iter().filter(|(_, projected)| *projected).count();
-        if projected_count < 2 {
+        if group.len() < 2 || projected_count == 0 {
             continue;
         }
         let slots: HashSet<NodeId> = group.into_iter().map(|(id, _)| id).collect();
@@ -1610,6 +1610,22 @@ mod tests {
 
         let merged = merge3(&base, &ours, &theirs);
         assert_eq!(node_labels(&merged), vec!["Occupied", "Safe"]);
+        assert!(merged.edges.is_empty());
+    }
+
+    #[test]
+    fn single_projected_collision_occupant_respects_opposing_deletions() {
+        let marker = "[REDACTED:api_key]";
+        let mut base = nodes_graph(&[(10, "Clean"), (11, marker), (20, "Safe")]);
+        base.edges.push(edge(10, 20, "clean-edge"));
+        base.edges.push(edge(11, 20, "secret-edge"));
+        let mut ours = nodes_graph(&[(10, marker), (20, "Safe")]);
+        ours.edges.push(edge(10, 20, "secret-edge"));
+        let mut theirs = nodes_graph(&[(10, "Clean"), (20, "Safe")]);
+        theirs.edges.push(edge(10, 20, "clean-edge"));
+
+        let merged = merge3(&base, &ours, &theirs);
+        assert_eq!(node_labels(&merged), vec!["Safe"]);
         assert!(merged.edges.is_empty());
     }
 

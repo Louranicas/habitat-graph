@@ -14,6 +14,7 @@ const PRIVATE_STATE_SCHEMA: &str = "habitat-graph.private-state.v2";
 const SNAPSHOT_SEPARATOR: &str = ".snapshot-";
 const CONTEXT_SEPARATOR: &str = ".context-";
 const MIGRATION_CONFLICT_SEPARATOR: &str = ".migration-conflict-";
+const MIGRATION_CONFLICT_DIRECTORY: &str = ".migration-conflicts";
 const ADD_JOURNAL_SUFFIX: &str = ".add-journal";
 const MAX_SNAPSHOTS: usize = 16;
 const MAX_CONTEXTS_PER_OUTPUT: usize = 16;
@@ -257,7 +258,7 @@ pub(super) fn load_matching(
         }
 
         let mut inherited = Vec::new();
-        for candidate in context_state_candidates(path)? {
+        for candidate in state_context_candidates(path)? {
             if candidate == path {
                 continue;
             }
@@ -281,12 +282,19 @@ pub(super) fn load_matching(
     let Some(semantic_generation) = public_semantic_generation else {
         return Ok(None);
     };
-    let mut states = current.into_iter().collect::<Vec<_>>();
-    let mut candidates = snapshot_candidates(path)?;
-    candidates.sort_unstable();
-    for candidate in candidates {
-        if let Some(stored) = read(&candidate, context)? {
+    let mut states = Vec::new();
+    for candidate in state_context_candidates(path)? {
+        if candidate == path {
+            states.extend(current.iter().cloned());
+        } else if let Some(stored) = read(&candidate, context)? {
             states.push(stored);
+        }
+        let mut snapshots = snapshot_candidates(&candidate)?;
+        snapshots.sort_unstable();
+        for snapshot in snapshots {
+            if let Some(stored) = read(&snapshot, context)? {
+                states.push(stored);
+            }
         }
     }
     select_unique_state(
@@ -450,6 +458,12 @@ fn context_state_candidates(path: &Path) -> Result<Vec<PathBuf>> {
     Ok(candidates.into_iter().collect())
 }
 
+pub(super) fn state_context_candidates(path: &Path) -> Result<Vec<PathBuf>> {
+    let mut candidates: BTreeSet<PathBuf> = context_state_candidates(path)?.into_iter().collect();
+    candidates.insert(path.to_path_buf());
+    Ok(candidates.into_iter().collect())
+}
+
 fn context_filename_prefix(path: &Path) -> Option<String> {
     let filename = path.file_name()?.to_str()?;
     let (key, context) = filename.split_once(CONTEXT_SEPARATOR)?;
@@ -485,6 +499,7 @@ fn prune_contexts(path: &Path) -> Result<()> {
     for candidate in &candidates {
         let members = family_members(candidate)?;
         let keep = candidate == path
+            || has_migration_conflicts(candidate)?
             || members.iter().any(|(_, suffix)| {
                 suffix.contains(ADD_JOURNAL_SUFFIX) || suffix.contains(MIGRATION_CONFLICT_SEPARATOR)
             });
@@ -569,27 +584,7 @@ pub(super) fn migrate(legacy: &Path, current: &Path, context: &str) -> Result<()
         }
         let current_bytes = read_regular(current, &current_metadata, context)?;
         if current_bytes != bytes {
-            let conflict = migration_conflict_path(current, &bytes)?;
-            match std::fs::symlink_metadata(&conflict) {
-                Ok(conflict_metadata) => {
-                    if !conflict_metadata.file_type().is_file()
-                        || read_regular(&conflict, &conflict_metadata, context)? != bytes
-                    {
-                        return Err(GraphError::Guard(format!(
-                            "private state migration conflict is ambiguous: {}",
-                            conflict.display()
-                        )));
-                    }
-                }
-                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-                    write(&conflict, &bytes)?;
-                }
-                Err(error) => {
-                    return Err(GraphError::Io(format!(
-                        "inspect private state migration conflict: {error}"
-                    )))
-                }
-            }
+            let conflict = store_migration_conflict(current, &bytes, context)?;
             remove(legacy, context)?;
             return Err(GraphError::Guard(format!(
                 "conflicting {context} preserved at {}",
@@ -606,16 +601,26 @@ pub(super) fn migrate(legacy: &Path, current: &Path, context: &str) -> Result<()
 fn migrate_family(legacy: &Path, current: &Path, context: &str) -> Result<()> {
     let mut first_error = None;
     for (source, suffix) in family_members(legacy)? {
-        let filename = current
-            .file_name()
-            .ok_or_else(|| GraphError::Io("private state path has no filename".to_owned()))?;
-        let mut destination_name = OsString::from(filename);
-        destination_name.push(&suffix);
-        let destination = current.with_file_name(destination_name);
-        if let Err(error) = migrate(&source, &destination, context) {
+        let result = if suffix.contains(MIGRATION_CONFLICT_SEPARATOR) {
+            preserve_migration_conflict(&source, current, context)
+        } else {
+            let filename = current
+                .file_name()
+                .ok_or_else(|| GraphError::Io("private state path has no filename".to_owned()))?;
+            let mut destination_name = OsString::from(filename);
+            destination_name.push(&suffix);
+            let destination = current.with_file_name(destination_name);
+            migrate(&source, &destination, context)
+        };
+        if let Err(error) = result {
             if first_error.is_none() {
                 first_error = Some(error);
             }
+        }
+    }
+    if let Err(error) = migrate_conflict_family(legacy, current, context) {
+        if first_error.is_none() {
+            first_error = Some(error);
         }
     }
     if let Some(error) = first_error {
@@ -627,6 +632,9 @@ fn migrate_family(legacy: &Path, current: &Path, context: &str) -> Result<()> {
 fn remove_family(path: &Path, context: &str) -> Result<()> {
     for (member, _) in family_members(path)? {
         remove(&member, context)?;
+    }
+    for conflict in migration_conflict_candidates(path)? {
+        remove(&conflict, context)?;
     }
     Ok(())
 }
@@ -670,52 +678,188 @@ fn family_members(path: &Path) -> Result<Vec<(PathBuf, String)>> {
     Ok(members)
 }
 
-fn migration_conflict_path(path: &Path, bytes: &[u8]) -> Result<PathBuf> {
-    let filename = path
-        .file_name()
-        .ok_or_else(|| GraphError::Io("private state path has no filename".to_owned()))?;
-    let mut conflict_name = OsString::from(filename);
-    conflict_name.push(MIGRATION_CONFLICT_SEPARATOR);
-    conflict_name.push(generation(bytes));
-    Ok(path.with_file_name(conflict_name))
+fn family_base_path(path: &Path) -> PathBuf {
+    let Some(filename) = path.file_name().and_then(|filename| filename.to_str()) else {
+        return path.to_path_buf();
+    };
+    let without_legacy_conflict = filename
+        .rsplit_once(MIGRATION_CONFLICT_SEPARATOR)
+        .filter(|(_, suffix)| is_generation(suffix))
+        .map_or(filename, |(base, _)| base);
+    if let Some(base) = without_legacy_conflict.strip_suffix(ADD_JOURNAL_SUFFIX) {
+        return path.with_file_name(base);
+    }
+    if let Some((base, suffix)) = without_legacy_conflict.rsplit_once(SNAPSHOT_SEPARATOR) {
+        if is_generation(suffix) {
+            return path.with_file_name(base);
+        }
+    }
+    path.with_file_name(without_legacy_conflict)
 }
 
-fn ensure_no_migration_conflicts(path: &Path) -> Result<()> {
-    let parent = path
-        .parent()
+fn migration_conflict_directory(path: &Path) -> PathBuf {
+    path.parent()
         .filter(|parent| !parent.as_os_str().is_empty())
-        .unwrap_or_else(|| Path::new("."));
-    let filename = path
-        .file_name()
-        .ok_or_else(|| GraphError::Io("private state path has no filename".to_owned()))?;
-    let prefix = format!(
-        "{}{MIGRATION_CONFLICT_SEPARATOR}",
-        filename.to_string_lossy()
-    );
-    let entries = match std::fs::read_dir(parent) {
-        Ok(entries) => entries,
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        .unwrap_or_else(|| Path::new("."))
+        .join(MIGRATION_CONFLICT_DIRECTORY)
+}
+
+fn ensure_migration_conflict_directory(path: &Path) -> Result<()> {
+    ensure_private_directory(&migration_conflict_directory(path))
+}
+
+fn migration_conflict_candidates(path: &Path) -> Result<Vec<PathBuf>> {
+    let directory = migration_conflict_directory(path);
+    let metadata = match std::fs::symlink_metadata(&directory) {
+        Ok(metadata) => metadata,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
         Err(error) => {
             return Err(GraphError::Io(format!(
-                "list private state migration conflicts: {error}"
+                "inspect private state migration conflict directory: {error}"
             )))
         }
     };
+    if !metadata.file_type().is_dir() {
+        return Err(GraphError::Guard(format!(
+            "private state migration conflict directory is not a directory: {}",
+            directory.display()
+        )));
+    }
+
+    let prefix = format!("{}-", output_key(&family_base_path(path)));
+    let entries = std::fs::read_dir(&directory).map_err(|error| {
+        GraphError::Io(format!("list private state migration conflicts: {error}"))
+    })?;
+    let mut candidates = Vec::new();
     for entry in entries {
         let entry = entry.map_err(|error| {
             GraphError::Io(format!("list private state migration conflicts: {error}"))
         })?;
         let filename = entry.file_name();
-        if filename
-            .to_string_lossy()
-            .strip_prefix(&prefix)
-            .is_some_and(is_generation)
-        {
+        if !filename.to_string_lossy().starts_with(&prefix) {
+            continue;
+        }
+        let metadata = std::fs::symlink_metadata(entry.path()).map_err(|error| {
+            GraphError::Io(format!("inspect private state migration conflict: {error}"))
+        })?;
+        if !metadata.file_type().is_file() {
             return Err(GraphError::Guard(format!(
-                "unresolved private state migration conflict: {}",
+                "private state migration conflict is not a regular file: {}",
                 entry.path().display()
             )));
         }
+        candidates.push(entry.path());
+    }
+    candidates.sort_unstable();
+    Ok(candidates)
+}
+
+fn has_migration_conflicts(path: &Path) -> Result<bool> {
+    Ok(!migration_conflict_candidates(path)?.is_empty())
+}
+
+fn store_migration_conflict(path: &Path, bytes: &[u8], context: &str) -> Result<PathBuf> {
+    let conflict = migration_conflict_path(path, bytes);
+    ensure_migration_conflict_directory(path)?;
+    match std::fs::symlink_metadata(&conflict) {
+        Ok(metadata) => {
+            if !metadata.file_type().is_file()
+                || read_regular(&conflict, &metadata, context)? != bytes
+            {
+                return Err(GraphError::Guard(format!(
+                    "private state migration conflict is ambiguous: {}",
+                    conflict.display()
+                )));
+            }
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            write(&conflict, bytes)?;
+        }
+        Err(error) => {
+            return Err(GraphError::Io(format!(
+                "inspect private state migration conflict: {error}"
+            )))
+        }
+    }
+    Ok(conflict)
+}
+
+fn preserve_migration_conflict(source: &Path, current: &Path, context: &str) -> Result<()> {
+    let metadata = std::fs::symlink_metadata(source).map_err(|error| {
+        GraphError::Io(format!("inspect {context} {}: {error}", source.display()))
+    })?;
+    if !metadata.file_type().is_file() {
+        return Err(GraphError::Guard(format!(
+            "{context} is not a regular file: {}",
+            source.display()
+        )));
+    }
+    let bytes = read_regular(source, &metadata, context)?;
+    let conflict = store_migration_conflict(current, &bytes, context)?;
+    remove(source, context)?;
+    Err(GraphError::Guard(format!(
+        "conflicting {context} preserved at {}",
+        conflict.display()
+    )))
+}
+
+fn migrate_conflict_family(legacy: &Path, current: &Path, context: &str) -> Result<()> {
+    if family_base_path(legacy) == family_base_path(current) {
+        return Ok(());
+    }
+    let mut first_error = None;
+    let mut first_conflict = None;
+    for source in migration_conflict_candidates(legacy)? {
+        let result = (|| {
+            let metadata = std::fs::symlink_metadata(&source).map_err(|error| {
+                GraphError::Io(format!("inspect {context} {}: {error}", source.display()))
+            })?;
+            let bytes = read_regular(&source, &metadata, context)?;
+            let conflict = store_migration_conflict(current, &bytes, context)?;
+            remove(&source, context)?;
+            Ok(conflict)
+        })();
+        match result {
+            Ok(conflict) => {
+                first_conflict.get_or_insert(conflict);
+            }
+            Err(error) => {
+                if first_error.is_none() {
+                    first_error = Some(error);
+                }
+            }
+        }
+    }
+    if let Some(error) = first_error {
+        return Err(error);
+    }
+    if let Some(conflict) = first_conflict {
+        return Err(GraphError::Guard(format!(
+            "conflicting {context} preserved at {}",
+            conflict.display()
+        )));
+    }
+    Ok(())
+}
+
+fn migration_conflict_path(path: &Path, bytes: &[u8]) -> PathBuf {
+    let parent = path
+        .parent()
+        .filter(|parent| !parent.as_os_str().is_empty())
+        .unwrap_or_else(|| Path::new("."));
+    let family = output_key(&family_base_path(path));
+    let member = output_key(path);
+    parent
+        .join(MIGRATION_CONFLICT_DIRECTORY)
+        .join(format!("{family}-{member}-{}", generation(bytes)))
+}
+
+fn ensure_no_migration_conflicts(path: &Path) -> Result<()> {
+    if let Some(conflict) = migration_conflict_candidates(path)?.into_iter().next() {
+        return Err(GraphError::Guard(format!(
+            "unresolved private state migration conflict: {}",
+            conflict.display()
+        )));
     }
     Ok(())
 }
@@ -729,7 +873,7 @@ fn ensure_no_family_conflicts(path: &Path) -> Result<()> {
             )));
         }
     }
-    Ok(())
+    ensure_no_migration_conflicts(path)
 }
 
 fn read_regular(path: &Path, expected: &std::fs::Metadata, context: &str) -> Result<Vec<u8>> {
@@ -1382,6 +1526,78 @@ mod tests {
     }
 
     #[test]
+    fn new_context_inherits_unique_semantic_state_after_reformatting() {
+        let root = TempDir::new().unwrap();
+        let output = super::generation(b"output path");
+        let first_context = super::generation(b"first context");
+        let second_context = super::generation(b"second context");
+        let first_path = root.path().join(format!(
+            "{output}{}{first_context}.json",
+            super::CONTEXT_SEPARATOR
+        ));
+        let second_path = root.path().join(format!(
+            "{output}{}{second_context}.json",
+            super::CONTEXT_SEPARATOR
+        ));
+        let mut private = Graph::new();
+        private.manifest.tool_version = "private lineage".to_owned();
+        let semantic = super::semantic_generation(&Graph::new()).unwrap();
+        let old_generation = super::generation(b"old formatting");
+        let new_generation = super::generation(b"new formatting");
+        super::write_state(
+            &first_path,
+            &super::serialize(&private, &old_generation, &semantic).unwrap(),
+        )
+        .unwrap();
+
+        let inherited = super::load_matching(
+            &second_path,
+            Some(&new_generation),
+            Some(&semantic),
+            "test private state",
+        )
+        .unwrap()
+        .unwrap();
+        assert_eq!(inherited.graph, private);
+    }
+
+    #[test]
+    fn cross_context_semantic_ambiguity_fails_closed() {
+        let root = TempDir::new().unwrap();
+        let output = super::generation(b"output path");
+        let path = |context: &str| {
+            root.path().join(format!(
+                "{output}{}{context}.json",
+                super::CONTEXT_SEPARATOR
+            ))
+        };
+        let mut alpha = Graph::new();
+        alpha.manifest.tool_version = "alpha lineage".to_owned();
+        let mut beta = Graph::new();
+        beta.manifest.tool_version = "beta lineage".to_owned();
+        let semantic = super::semantic_generation(&Graph::new()).unwrap();
+        super::write_state(
+            &path(&super::generation(b"alpha context")),
+            &super::serialize(&alpha, &super::generation(b"alpha bytes"), &semantic).unwrap(),
+        )
+        .unwrap();
+        super::write_state(
+            &path(&super::generation(b"beta context")),
+            &super::serialize(&beta, &super::generation(b"beta bytes"), &semantic).unwrap(),
+        )
+        .unwrap();
+
+        let error = super::load_matching(
+            &path(&super::generation(b"current context")),
+            Some(&super::generation(b"current bytes")),
+            Some(&semantic),
+            "test private state",
+        )
+        .unwrap_err();
+        assert_eq!(error.kind(), "guard");
+    }
+
+    #[test]
     fn git_branches_keep_byte_identical_public_variants_separate() {
         let root = TempDir::new().unwrap();
         let git_dir = create_git(root.path(), "ref: refs/heads/alpha\n");
@@ -1553,13 +1769,37 @@ mod tests {
         let error = super::migrate(&legacy, &current, "test private state").unwrap_err();
         assert_eq!(error.kind(), "guard");
         assert!(!legacy.exists());
-        let conflict = super::migration_conflict_path(&current, b"new private lineage").unwrap();
+        let conflict = super::migration_conflict_path(&current, b"new private lineage");
         assert_eq!(
             fs::read_to_string(&conflict).unwrap(),
             "new private lineage"
         );
         let retry = super::migrate(&legacy, &current, "test private state").unwrap_err();
         assert_eq!(retry.kind(), "guard");
+    }
+
+    #[test]
+    fn long_snapshot_migration_conflict_uses_a_bounded_filename() {
+        let root = TempDir::new().unwrap();
+        let base = root.path().join(format!(
+            "{}{}{}.json",
+            super::generation(b"output"),
+            super::CONTEXT_SEPARATOR,
+            super::generation(b"context")
+        ));
+        let current = sibling(
+            &base,
+            &format!("{SNAPSHOT_SEPARATOR}{}", super::generation(b"snapshot")),
+        );
+        let legacy = root.path().join("legacy-snapshot.json");
+        fs::write(&legacy, "new private lineage").unwrap();
+        fs::write(&current, "old private lineage").unwrap();
+
+        let error = super::migrate(&legacy, &current, "test private state").unwrap_err();
+        assert_eq!(error.kind(), "guard");
+        let conflict = super::migration_conflict_path(&current, b"new private lineage");
+        assert!(conflict.file_name().unwrap().as_encoded_bytes().len() <= 255);
+        assert_eq!(fs::read_to_string(conflict).unwrap(), "new private lineage");
     }
 
     #[test]
