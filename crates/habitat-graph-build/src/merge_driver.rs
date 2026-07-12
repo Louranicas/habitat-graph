@@ -6,8 +6,9 @@
 //!
 //! ## Semantics
 //!
-//! Merge identity is by **label** — the same mechanism as the 2-way [`crate::merge::merge`].
-//! For each label `L` the outcome is:
+//! Clean-node merge identity is by **label**, while publicly redacted nodes retain stable-id
+//! identity — the same mechanism as the 2-way [`crate::merge::merge`]. For each identity `L` the
+//! outcome is:
 //!
 //! | `L ∈ base` | `L ∈ ours` | `L ∈ theirs` | outcome |
 //! |---|---|---|---|
@@ -18,7 +19,7 @@
 //! | yes | yes | no  | **drop** (deleted by `theirs`; unchanged in `ours`) |
 //! | yes | yes | yes | keep once (unchanged on both sides) |
 //!
-//! Edges follow the same policy keyed on `(source_label, target_label, relation)`.  Edges whose
+//! Edges follow the same policy keyed on `(source_identity, target_identity, relation)`. Edges whose
 //! endpoints were deleted by the node-level merge are also dropped even if the edge itself
 //! survived.  Communities follow the same policy keyed on community label; member [`NodeId`]s
 //! are remapped to the merged id space and members whose node was deleted are pruned.
@@ -28,19 +29,20 @@
 
 use std::collections::{HashMap, HashSet};
 
-use habitat_graph_core::{
-    content_id, is_canonical_redaction_marker, Community, CommunityId, Edge, Graph, Manifest, Node,
-    NodeId,
+use habitat_graph_core::{content_id, Community, CommunityId, Edge, Graph, Manifest, Node, NodeId};
+
+use crate::merge_identity::{
+    node_id_to_identity_map, node_identity, node_identity_set, redacted_node_ids, NodeIdentity,
 };
 
-type StableEdgeKey = (NodeId, NodeId, String);
+type EdgeKey = (NodeIdentity, NodeIdentity, String);
 
 /// Deterministically 3-way-merges `ours` and `theirs` against their common ancestor `base`.
 ///
-/// Merge identity is by label; see the module documentation for the full deletion/addition
-/// semantics table.  Node data (`source_file`, `source_location`) from `ours` wins when the same
-/// label appears in both branches.  The same preference applies to edge `confidence` and to
-/// community member lists.
+/// Merge identity is by label for clean nodes and stable id for publicly redacted nodes; see the
+/// module documentation for the full deletion/addition semantics table. Node data (`source_file`,
+/// `source_location`) from `ours` wins when the same identity appears in both branches. The same
+/// preference applies to edge `confidence` and to community member lists.
 ///
 /// The result is passed through [`crate::dedup`] and [`Graph::sorted`] so it is deduplicated
 /// and canonically ordered (R4).
@@ -52,54 +54,46 @@ type StableEdgeKey = (NodeId, NodeId, String);
 /// - **Infallible**: this function never returns an error or panics.
 #[must_use]
 pub fn merge3(base: &Graph, ours: &Graph, theirs: &Graph) -> Graph {
-    // Public projections replace multiple distinct labels with one display marker while retaining
-    // their stable content ids. Switch the entire merge to serialized-id identity when any side
-    // contains such a marker; mixing label and id identity would duplicate the same node.
-    if [base, ours, theirs].iter().any(|graph| {
-        graph
-            .nodes
-            .iter()
-            .any(|node| is_canonical_redaction_marker(&node.label))
-    }) {
-        return merge3_by_stable_id(base, ours, theirs);
-    }
+    let redacted_ids = redacted_node_ids(&[base, ours, theirs]);
+    let base_node_identities = node_identity_set(&base.nodes, &redacted_ids);
+    let ours_node_identities = node_identity_set(&ours.nodes, &redacted_ids);
+    let theirs_node_identities = node_identity_set(&theirs.nodes, &redacted_ids);
 
-    // ── Label-set and id-to-label lookup tables ───────────────────────────────
-    let base_node_labels = node_label_set(&base.nodes);
-    let ours_node_labels = node_label_set(&ours.nodes);
-    let theirs_node_labels = node_label_set(&theirs.nodes);
+    let base_id_to_identity = node_id_to_identity_map(&base.nodes, &redacted_ids);
+    let ours_id_to_identity = node_id_to_identity_map(&ours.nodes, &redacted_ids);
+    let theirs_id_to_identity = node_id_to_identity_map(&theirs.nodes, &redacted_ids);
 
-    let base_id_to_label = node_id_to_label_map(&base.nodes);
-    let ours_id_to_label = node_id_to_label_map(&ours.nodes);
-    let theirs_id_to_label = node_id_to_label_map(&theirs.nodes);
-
-    let ours_label_to_node: HashMap<&str, &Node> =
-        ours.nodes.iter().map(|n| (n.label.as_str(), n)).collect();
+    let ours_identity_to_node: HashMap<NodeIdentity, &Node> = ours
+        .nodes
+        .iter()
+        .map(|node| (node_identity(node, &redacted_ids), node))
+        .collect();
 
     // ── Phase 1: select winning nodes (base-aware deletion) ───────────────────
     let pre_nodes = select_winning_nodes(
         &ours.nodes,
         &theirs.nodes,
-        &base_node_labels,
-        &ours_node_labels,
-        &theirs_node_labels,
-        &ours_label_to_node,
+        &base_node_identities,
+        &ours_node_identities,
+        &theirs_node_identities,
+        &ours_identity_to_node,
+        &redacted_ids,
     );
 
-    // ── Phase 2: assign fresh NodeIds; build label → new_id map ──────────────
-    let (merged_nodes, label_to_new_id) = assign_node_ids(pre_nodes);
+    // ── Phase 2: assign NodeIds; build identity → new_id map ──────────────────
+    let (merged_nodes, identity_to_new_id) = assign_node_ids(pre_nodes);
 
-    // ── Phase 3: edge label-key set for base-aware deletion ───────────────────
-    let base_edge_keys = edge_key_set(&base.edges, &base_id_to_label);
+    // ── Phase 3: edge identity-key set for base-aware deletion ────────────────
+    let base_edge_keys = edge_key_set(&base.edges, &base_id_to_identity);
 
     // ── Phase 4: merge edges ──────────────────────────────────────────────────
     let merged_edges = merge_graph_edges(
         ours,
         theirs,
-        &ours_id_to_label,
-        &theirs_id_to_label,
+        &ours_id_to_identity,
+        &theirs_id_to_identity,
         &base_edge_keys,
-        &label_to_new_id,
+        &identity_to_new_id,
     );
 
     // ── Phase 5: merge communities ────────────────────────────────────────────
@@ -108,9 +102,9 @@ pub fn merge3(base: &Graph, ours: &Graph, theirs: &Graph) -> Graph {
         ours,
         theirs,
         &base_comm_labels,
-        &ours_id_to_label,
-        &theirs_id_to_label,
-        &label_to_new_id,
+        &ours_id_to_identity,
+        &theirs_id_to_identity,
+        &identity_to_new_id,
     );
 
     // ── Phase 6: merge manifest ───────────────────────────────────────────────
@@ -127,131 +121,21 @@ pub fn merge3(base: &Graph, ours: &Graph, theirs: &Graph) -> Graph {
     .sorted()
 }
 
-/// Three-way merge for redacted public projections, keyed by serialized stable ids.
-fn merge3_by_stable_id(base: &Graph, ours: &Graph, theirs: &Graph) -> Graph {
-    let base_ids: HashSet<NodeId> = base.nodes.iter().map(|node| node.id).collect();
-    let ours_ids: HashSet<NodeId> = ours.nodes.iter().map(|node| node.id).collect();
-    let theirs_ids: HashSet<NodeId> = theirs.nodes.iter().map(|node| node.id).collect();
-    let ours_nodes: HashMap<NodeId, &Node> =
-        ours.nodes.iter().map(|node| (node.id, node)).collect();
-
-    let mut seen_nodes = HashSet::new();
-    let mut nodes = Vec::new();
-    for node in ours.nodes.iter().chain(&theirs.nodes) {
-        if !seen_nodes.insert(node.id) {
-            continue;
-        }
-        let keep = !base_ids.contains(&node.id)
-            || (ours_ids.contains(&node.id) && theirs_ids.contains(&node.id));
-        if keep {
-            nodes.push(ours_nodes.get(&node.id).copied().unwrap_or(node).clone());
-        }
-    }
-    let surviving_ids: HashSet<NodeId> = nodes.iter().map(|node| node.id).collect();
-
-    let edge_key = |edge: &Edge| (edge.source, edge.target, edge.relation.clone());
-    let base_edges: HashSet<StableEdgeKey> = base.edges.iter().map(edge_key).collect();
-    let ours_edges: HashSet<StableEdgeKey> = ours.edges.iter().map(edge_key).collect();
-    let theirs_edges: HashSet<StableEdgeKey> = theirs.edges.iter().map(edge_key).collect();
-    let mut seen_edges = HashSet::new();
-    let mut edges = Vec::new();
-    for edge in ours.edges.iter().chain(&theirs.edges) {
-        let key = edge_key(edge);
-        let keep = !base_edges.contains(&key)
-            || (ours_edges.contains(&key) && theirs_edges.contains(&key));
-        if keep
-            && seen_edges.insert(key)
-            && surviving_ids.contains(&edge.source)
-            && surviving_ids.contains(&edge.target)
-        {
-            edges.push(edge.clone());
-        }
-    }
-
-    let base_communities: HashSet<CommunityId> = base
-        .communities
-        .iter()
-        .map(|community| community.id)
-        .collect();
-    let ours_communities: HashSet<CommunityId> = ours
-        .communities
-        .iter()
-        .map(|community| community.id)
-        .collect();
-    let theirs_communities: HashSet<CommunityId> = theirs
-        .communities
-        .iter()
-        .map(|community| community.id)
-        .collect();
-    let ours_community_map: HashMap<CommunityId, &Community> = ours
-        .communities
-        .iter()
-        .map(|community| (community.id, community))
-        .collect();
-    let mut seen_communities = HashSet::new();
-    let mut communities = Vec::new();
-    for community in ours.communities.iter().chain(&theirs.communities) {
-        if !seen_communities.insert(community.id) {
-            continue;
-        }
-        let keep = !base_communities.contains(&community.id)
-            || (ours_communities.contains(&community.id)
-                && theirs_communities.contains(&community.id));
-        if !keep {
-            continue;
-        }
-        let winner = ours_community_map
-            .get(&community.id)
-            .copied()
-            .unwrap_or(community);
-        let mut winner = winner.clone();
-        winner
-            .members
-            .retain(|member| surviving_ids.contains(member));
-        communities.push(winner);
-    }
-
-    let manifest = merge_manifest(&ours.manifest, &theirs.manifest);
-    crate::dedup(Graph {
-        schema: ours.schema.clone(),
-        nodes,
-        edges,
-        communities,
-        manifest,
-    })
-    .sorted()
-}
-
 // ─────────────────────────────────────────────────────────────────────────────
 // Private helpers
 // ─────────────────────────────────────────────────────────────────────────────
 
-/// Returns a set of every node label present in `nodes`.
-#[must_use]
-fn node_label_set(nodes: &[Node]) -> HashSet<&str> {
-    nodes.iter().map(|n| n.label.as_str()).collect()
-}
-
-/// Returns a `NodeId` → label map for `nodes`.
-#[must_use]
-fn node_id_to_label_map(nodes: &[Node]) -> HashMap<NodeId, &str> {
-    nodes.iter().map(|n| (n.id, n.label.as_str())).collect()
-}
-
-/// Returns a set of edge label-keys `(src_label, tgt_label, relation)` for `edges`.
-///
-/// Edges with dangling endpoints (no matching node id) are silently excluded from the set.
 #[must_use]
 fn edge_key_set(
     edges: &[Edge],
-    id_to_label: &HashMap<NodeId, &str>,
-) -> HashSet<(String, String, String)> {
+    id_to_identity: &HashMap<NodeId, NodeIdentity>,
+) -> HashSet<EdgeKey> {
     edges
         .iter()
         .filter_map(|e| {
-            let src = id_to_label.get(&e.source).copied()?;
-            let tgt = id_to_label.get(&e.target).copied()?;
-            Some((src.to_owned(), tgt.to_owned(), e.relation.clone()))
+            let src = id_to_identity.get(&e.source)?.clone();
+            let tgt = id_to_identity.get(&e.target)?.clone();
+            Some((src, tgt, e.relation.clone()))
         })
         .collect()
 }
@@ -264,98 +148,105 @@ fn community_label_set(communities: &[Community]) -> HashSet<&str> {
 
 /// Selects which nodes survive the 3-way merge, applying the base-aware deletion policy.
 ///
-/// Returned nodes retain their original `NodeId`s; call [`assign_node_ids`] next.  `ours` data
-/// wins when the same label appears in both branches.
+/// Returned nodes retain their original `NodeId`s; call [`assign_node_ids`] next. `ours` data
+/// wins when the same identity appears in both branches.
 #[must_use]
 fn select_winning_nodes<'a>(
     ours_nodes: &'a [Node],
     theirs_nodes: &'a [Node],
-    base_labels: &HashSet<&str>,
-    ours_labels: &HashSet<&str>,
-    theirs_labels: &HashSet<&str>,
-    ours_label_to_node: &HashMap<&str, &'a Node>,
-) -> Vec<Node> {
-    let mut seen: HashSet<&str> = HashSet::new();
-    let mut result: Vec<Node> = Vec::new();
+    base_identities: &HashSet<NodeIdentity>,
+    ours_identities: &HashSet<NodeIdentity>,
+    theirs_identities: &HashSet<NodeIdentity>,
+    ours_identity_to_node: &HashMap<NodeIdentity, &'a Node>,
+    redacted_ids: &HashSet<NodeId>,
+) -> Vec<(NodeIdentity, Node)> {
+    let mut seen: HashSet<NodeIdentity> = HashSet::new();
+    let mut result = Vec::new();
 
     for node in ours_nodes.iter().chain(theirs_nodes.iter()) {
-        let label = node.label.as_str();
-        if seen.contains(label) {
+        let identity = node_identity(node, redacted_ids);
+        if !seen.insert(identity.clone()) {
             continue;
         }
-        // Base-aware deletion: keep iff the label is new (not in base) OR both branches kept it.
-        let keep = !base_labels.contains(label)
-            || (ours_labels.contains(label) && theirs_labels.contains(label));
-        seen.insert(label);
+        let keep = !base_identities.contains(&identity)
+            || (ours_identities.contains(&identity) && theirs_identities.contains(&identity));
         if !keep {
             continue;
         }
-        // Prefer ours' node data; fall back to theirs when the label is theirs-only.
-        let winner = ours_label_to_node.get(label).map_or(node, |&n| n);
-        result.push(winner.clone());
+        let winner = ours_identity_to_node
+            .get(&identity)
+            .copied()
+            .unwrap_or(node);
+        result.push((identity, winner.clone()));
     }
     result
 }
 
-/// Assigns fresh monotonically-incrementing [`NodeId`]s (starting at 0) to `nodes`.
-///
-/// Returns the updated node list and a `label → NodeId` map for use in edge/community remapping.
 #[must_use]
-fn assign_node_ids(nodes: Vec<Node>) -> (Vec<Node>, HashMap<String, NodeId>) {
-    let mut label_to_new_id: HashMap<String, NodeId> = HashMap::with_capacity(nodes.len());
-    // Content-addressed ids (FO-4): a merged graph.json carries the SAME ids a fresh assemble would
-    // give the surviving labels, probing forward on the rare u32 collision.
-    let mut used_ids: HashSet<u32> = HashSet::with_capacity(nodes.len());
+fn assign_node_ids(nodes: Vec<(NodeIdentity, Node)>) -> (Vec<Node>, HashMap<NodeIdentity, NodeId>) {
+    let mut identity_to_new_id = HashMap::with_capacity(nodes.len());
+    let mut used_ids: HashSet<u32> = nodes
+        .iter()
+        .filter_map(|(identity, _)| match identity {
+            NodeIdentity::Stable(id) => Some(id.get()),
+            NodeIdentity::Label(_) => None,
+        })
+        .collect();
     let updated: Vec<Node> = nodes
         .into_iter()
-        .map(|mut node| {
-            let mut raw = content_id(&node.label);
-            while !used_ids.insert(raw) {
-                raw = raw.wrapping_add(1);
-            }
-            let new_id = NodeId::new(raw);
-            label_to_new_id.insert(node.label.clone(), new_id);
+        .map(|(identity, mut node)| {
+            let new_id = match &identity {
+                NodeIdentity::Stable(id) => *id,
+                NodeIdentity::Label(label) => {
+                    let mut raw = content_id(label);
+                    while !used_ids.insert(raw) {
+                        raw = raw.wrapping_add(1);
+                    }
+                    NodeId::new(raw)
+                }
+            };
+            identity_to_new_id.insert(identity, new_id);
             node.id = new_id;
             node
         })
         .collect();
-    (updated, label_to_new_id)
+    (updated, identity_to_new_id)
 }
 
 /// Merges edges from `ours` and `theirs` applying base-aware deletion and node-survival filtering.
 ///
-/// An edge is kept only when its label-key passes the same 3-way policy as nodes AND both
+/// An edge is kept only when its identity-key passes the same 3-way policy as nodes AND both
 /// endpoint nodes survived the node-level merge.  `ours` edges are processed first, so `ours`
 /// data wins when the same key appears in both branches.
 #[must_use]
 fn merge_graph_edges(
     ours: &Graph,
     theirs: &Graph,
-    ours_id_to_label: &HashMap<NodeId, &str>,
-    theirs_id_to_label: &HashMap<NodeId, &str>,
-    base_edge_keys: &HashSet<(String, String, String)>,
-    label_to_new_id: &HashMap<String, NodeId>,
+    ours_id_to_identity: &HashMap<NodeId, NodeIdentity>,
+    theirs_id_to_identity: &HashMap<NodeId, NodeIdentity>,
+    base_edge_keys: &HashSet<EdgeKey>,
+    identity_to_new_id: &HashMap<NodeIdentity, NodeId>,
 ) -> Vec<Edge> {
-    let ours_edge_keys = edge_key_set(&ours.edges, ours_id_to_label);
-    let theirs_edge_keys = edge_key_set(&theirs.edges, theirs_id_to_label);
+    let ours_edge_keys = edge_key_set(&ours.edges, ours_id_to_identity);
+    let theirs_edge_keys = edge_key_set(&theirs.edges, theirs_id_to_identity);
 
-    let mut seen: HashSet<(String, String, String)> = HashSet::new();
+    let mut seen: HashSet<EdgeKey> = HashSet::new();
     let mut result: Vec<Edge> = Vec::new();
 
-    for (edges, id_to_label) in [
-        (&ours.edges, ours_id_to_label),
-        (&theirs.edges, theirs_id_to_label),
+    for (edges, id_to_identity) in [
+        (&ours.edges, ours_id_to_identity),
+        (&theirs.edges, theirs_id_to_identity),
     ] {
         for edge in edges {
-            let Some(src_label) = id_to_label.get(&edge.source).copied() else {
+            let Some(src_identity) = id_to_identity.get(&edge.source) else {
                 continue;
             };
-            let Some(tgt_label) = id_to_label.get(&edge.target).copied() else {
+            let Some(tgt_identity) = id_to_identity.get(&edge.target) else {
                 continue;
             };
             let key = (
-                src_label.to_owned(),
-                tgt_label.to_owned(),
+                src_identity.clone(),
+                tgt_identity.clone(),
                 edge.relation.clone(),
             );
 
@@ -366,11 +257,10 @@ fn merge_graph_edges(
                 continue;
             }
 
-            // Both endpoint labels must exist in the merged node set.
-            let Some(src_new) = label_to_new_id.get(src_label).copied() else {
+            let Some(src_new) = identity_to_new_id.get(src_identity).copied() else {
                 continue;
             };
-            let Some(tgt_new) = label_to_new_id.get(tgt_label).copied() else {
+            let Some(tgt_new) = identity_to_new_id.get(tgt_identity).copied() else {
                 continue;
             };
 
@@ -395,9 +285,9 @@ fn merge_graph_communities(
     ours: &Graph,
     theirs: &Graph,
     base_comm_labels: &HashSet<&str>,
-    ours_id_to_label: &HashMap<NodeId, &str>,
-    theirs_id_to_label: &HashMap<NodeId, &str>,
-    label_to_new_id: &HashMap<String, NodeId>,
+    ours_id_to_identity: &HashMap<NodeId, NodeIdentity>,
+    theirs_id_to_identity: &HashMap<NodeId, NodeIdentity>,
+    identity_to_new_id: &HashMap<NodeIdentity, NodeId>,
 ) -> Vec<Community> {
     let ours_comm_labels: HashSet<&str> =
         ours.communities.iter().map(|c| c.label.as_str()).collect();
@@ -430,19 +320,19 @@ fn merge_graph_communities(
             continue;
         }
 
-        // Prefer ours' community data; choose the correct id-to-label map for member remapping.
-        let (comm, id_to_label) = if let Some(&c) = ours_comm_map.get(label) {
-            (c, ours_id_to_label)
+        // Prefer ours' community data; choose the correct id-to-identity map for member remapping.
+        let (comm, id_to_identity) = if let Some(&c) = ours_comm_map.get(label) {
+            (c, ours_id_to_identity)
         } else {
-            (community, theirs_id_to_label)
+            (community, theirs_id_to_identity)
         };
 
         let members: Vec<NodeId> = comm
             .members
             .iter()
             .filter_map(|&mid| {
-                let member_label = id_to_label.get(&mid).copied()?;
-                label_to_new_id.get(member_label).copied()
+                let member_identity = id_to_identity.get(&mid)?;
+                identity_to_new_id.get(member_identity).copied()
             })
             .collect();
 
@@ -1341,6 +1231,12 @@ mod tests {
         let theirs = base.clone();
 
         let merged = merge3(&base, &ours, &theirs);
+        let safe_id = merged
+            .nodes
+            .iter()
+            .find(|node| node.label == "Safe")
+            .unwrap()
+            .id;
         assert_eq!(merged.nodes.len(), 3);
         assert!(merged.nodes.iter().any(|node| node.id.get() == 10));
         assert!(merged.nodes.iter().any(|node| node.id.get() == 20));
@@ -1348,10 +1244,59 @@ mod tests {
         assert!(merged
             .edges
             .iter()
-            .any(|edge| edge.source.get() == 10 && edge.target.get() == 30));
+            .any(|edge| edge.source.get() == 10 && edge.target == safe_id));
         assert!(merged
             .edges
             .iter()
-            .any(|edge| edge.source.get() == 20 && edge.target.get() == 30));
+            .any(|edge| edge.source.get() == 20 && edge.target == safe_id));
+    }
+
+    #[test]
+    fn redacted_public_merge_uses_label_identity_for_clean_nodes() {
+        let mut base = nodes_graph(&[(90, "[REDACTED:api_key]"), (5, "Shared")]);
+        let mut ours = nodes_graph(&[(90, "[REDACTED:api_key]"), (6, "Shared"), (10, "Alpha")]);
+        let mut theirs = nodes_graph(&[(90, "[REDACTED:api_key]"), (7, "Shared"), (10, "Beta")]);
+        base.edges.push(edge(90, 5, "existing"));
+        ours.edges.push(edge(6, 10, "ours"));
+        theirs.edges.push(edge(7, 10, "theirs"));
+
+        let merged = merge3(&base, &ours, &theirs);
+        assert_eq!(
+            merged
+                .nodes
+                .iter()
+                .filter(|node| node.label == "Shared")
+                .count(),
+            1
+        );
+        assert!(merged.nodes.iter().any(|node| node.label == "Alpha"));
+        assert!(merged.nodes.iter().any(|node| node.label == "Beta"));
+
+        let shared = merged
+            .nodes
+            .iter()
+            .find(|node| node.label == "Shared")
+            .unwrap()
+            .id;
+        let alpha = merged
+            .nodes
+            .iter()
+            .find(|node| node.label == "Alpha")
+            .unwrap()
+            .id;
+        let beta = merged
+            .nodes
+            .iter()
+            .find(|node| node.label == "Beta")
+            .unwrap()
+            .id;
+        assert!(merged
+            .edges
+            .iter()
+            .any(|edge| edge.source == shared && edge.target == alpha));
+        assert!(merged
+            .edges
+            .iter()
+            .any(|edge| edge.source == shared && edge.target == beta));
     }
 }

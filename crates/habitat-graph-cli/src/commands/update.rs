@@ -27,11 +27,14 @@
 //! would corrupt the graph by mixing incompatible node/edge semantics.
 
 use std::collections::{HashMap, HashSet};
+#[cfg(unix)]
 use std::fs::OpenOptions;
+#[cfg(unix)]
 use std::io::Write as _;
 #[cfg(unix)]
 use std::os::unix::fs::OpenOptionsExt as _;
 use std::path::{Path, PathBuf};
+#[cfg(unix)]
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use habitat_graph_core::{Graph, GraphError, Manifest, NodeId, Result, SCHEMA_VERSION};
@@ -41,6 +44,7 @@ const SIDECAR: &str = ".habitat-graph-state.json";
 /// Primary artifact filename (node-link format, graphify-compatible).
 const GRAPH_JSON: &str = "graph.json";
 /// Monotonic suffix for collision-free private sidecar temporary files.
+#[cfg(unix)]
 static SIDECAR_TEMP_SEQUENCE: AtomicU64 = AtomicU64::new(0);
 
 /// Runs an incremental update over `dir`, writing refreshed artifacts into `out`.
@@ -59,6 +63,8 @@ static SIDECAR_TEMP_SEQUENCE: AtomicU64 = AtomicU64::new(0);
 ///   an exporter-policy upgrade cannot leave legacy output behind.
 ///
 /// Returns a process exit code: `0` on success, `4` on any error (diagnostics to stderr).
+/// Targets without Unix owner-only file creation reject incremental updates and remove any
+/// existing raw sidecar before source processing.
 ///
 /// # Errors
 ///
@@ -79,8 +85,14 @@ pub fn run(dir: &Path, out: &Path) -> u8 {
 /// # Errors
 ///
 /// Returns [`GraphError::Io`] on filesystem failures, [`GraphError::Parse`] on extraction
-/// failures, or [`GraphError::Schema`] on serialization failures.
+/// failures, [`GraphError::Schema`] on serialization failures, or [`GraphError::Guard`] when
+/// private sidecar permissions cannot be enforced.
 fn run_inner(dir: &Path, out: &Path) -> Result<()> {
+    #[cfg(unix)]
+    ensure_private_sidecar_support(out);
+    #[cfg(not(unix))]
+    ensure_private_sidecar_support(out)?;
+
     // ── Detect all source files (sorted for R4 determinism) ─────────────────────
     let files = habitat_graph_source::detect(dir, &["rs"])?;
     let sidecar_path = out.join(SIDECAR);
@@ -206,6 +218,24 @@ fn run_inner(dir: &Path, out: &Path) -> Result<()> {
     Ok(())
 }
 
+#[cfg(unix)]
+fn ensure_private_sidecar_support(_out: &Path) {}
+
+#[cfg(not(unix))]
+fn ensure_private_sidecar_support(out: &Path) -> Result<()> {
+    let sidecar = out.join(SIDECAR);
+    if let Err(error) = std::fs::remove_file(&sidecar) {
+        if error.kind() != std::io::ErrorKind::NotFound {
+            return Err(GraphError::Io(format!(
+                "remove unsupported private sidecar: {error}"
+            )));
+        }
+    }
+    Err(GraphError::Guard(
+        "private incremental sidecars require owner-only file permissions".to_owned(),
+    ))
+}
+
 /// Attempts to load the prior graph from the sidecar file.
 ///
 /// Returns `Ok(None)` when:
@@ -329,6 +359,7 @@ fn write_artifacts(out: &Path, graph: &Graph, current_manifest: Manifest) -> Res
 /// incremental merge behavior. It is not a public artifact, so bytes are first written and synced
 /// to a same-directory `0600` temporary file, then atomically renamed over the destination. This
 /// prevents both a truncate-before-chmod exposure window and a partially written live sidecar.
+#[cfg(unix)]
 fn write_private_sidecar(path: &Path, bytes: &[u8]) -> Result<()> {
     let parent = path
         .parent()
@@ -346,7 +377,6 @@ fn write_private_sidecar(path: &Path, bytes: &[u8]) -> Result<()> {
 
     let mut options = OpenOptions::new();
     options.create_new(true).write(true);
-    #[cfg(unix)]
     options.mode(0o600);
 
     let write_result = (|| -> Result<()> {
@@ -360,7 +390,6 @@ fn write_private_sidecar(path: &Path, bytes: &[u8]) -> Result<()> {
         drop(file);
         std::fs::rename(&temporary, path)
             .map_err(|error| GraphError::Io(format!("sidecar atomic rename: {error}")))?;
-        #[cfg(unix)]
         std::fs::File::open(parent)
             .and_then(|directory| directory.sync_all())
             .map_err(|error| GraphError::Io(format!("sidecar directory sync: {error}")))?;
@@ -376,6 +405,13 @@ fn write_private_sidecar(path: &Path, bytes: &[u8]) -> Result<()> {
         }
     }
     write_result
+}
+
+#[cfg(not(unix))]
+fn write_private_sidecar(_path: &Path, _bytes: &[u8]) -> Result<()> {
+    Err(GraphError::Guard(
+        "private incremental sidecars require owner-only file permissions".to_owned(),
+    ))
 }
 
 /// Returns `graph` with all nodes whose [`habitat_graph_core::Node::source_file`] appears in
@@ -405,7 +441,7 @@ fn prune_graph(mut graph: Graph, stale_files: &HashSet<&str>) -> Graph {
 
 // ── Tests ─────────────────────────────────────────────────────────────────────────────────────
 
-#[cfg(test)]
+#[cfg(all(test, unix))]
 mod tests {
     use std::fs;
     use std::path::Path;
@@ -1339,5 +1375,25 @@ mod tests {
         assert!(json.contains("v3"), "v3 must appear after second change");
         assert!(!json.contains("v2"), "v2 must be gone after second change");
         assert!(!json.contains("v1"), "v1 must still be gone");
+    }
+}
+
+#[cfg(all(test, not(unix)))]
+mod non_unix_tests {
+    use std::fs;
+
+    use tempfile::TempDir;
+
+    use super::{run, SIDECAR};
+
+    #[test]
+    fn update_rejects_and_removes_unsupported_sidecar() {
+        let source = TempDir::new().unwrap();
+        let output = TempDir::new().unwrap();
+        let sidecar = output.path().join(SIDECAR);
+        fs::write(&sidecar, "private").unwrap();
+
+        assert_eq!(run(source.path(), output.path()), 4);
+        assert!(!sidecar.exists());
     }
 }

@@ -10,6 +10,7 @@ pub mod assemble;
 pub mod dedup;
 pub mod merge;
 pub mod merge_driver;
+mod merge_identity;
 
 pub use assemble::assemble;
 pub use dedup::dedup;

@@ -214,7 +214,7 @@ fn render_node_note(
 ) -> String {
     let redacted_label = redact_public_text(&node.label);
     let redacted_file = redact_public_text(&node.source_file);
-    let safe_label = display_safe(&redacted_label);
+    let safe_label = wikilink_alias(&redacted_label);
     let krate = yaml_token(&crate_of(&redacted_file));
     let lang = lang_of(&redacted_file);
     let line = node.source_location.start_line;
@@ -320,7 +320,7 @@ fn render_wikilink(
     filename_map: &HashMap<NodeId, String>,
 ) -> String {
     let label = label_map.get(&node_id).map_or("", String::as_str);
-    let display = display_safe(label).replace('|', "\\|");
+    let display = wikilink_alias(label);
     let target = filename_map
         .get(&node_id)
         .and_then(|filename| filename.strip_suffix(".md"))
@@ -330,6 +330,18 @@ fn render_wikilink(
     } else {
         format!("[[{target}|{display}]]")
     }
+}
+
+fn wikilink_alias(label: &str) -> String {
+    let display = display_safe(label);
+    let mut escaped = String::with_capacity(display.len());
+    for character in display.chars() {
+        if matches!(character, '\\' | '[' | ']' | '|') {
+            escaped.push('\\');
+        }
+        escaped.push(character);
+    }
+    escaped
 }
 
 /// Converts a node label to a filesystem-safe filename stem (no path/link metacharacters,
@@ -906,6 +918,14 @@ mod tests {
     }
 
     #[test]
+    fn wikilink_alias_escapes_delimiters_and_backslashes() {
+        assert_eq!(
+            super::wikilink_alias(r"a\b|c]] [[injected"),
+            r"a\\b\|c\]\] \[\[injected"
+        );
+    }
+
+    #[test]
     fn yaml_dq_escapes_quote_and_backslash() {
         assert_eq!(super::yaml_dq("a\"b\\c"), "a\\\"b\\\\c");
     }
@@ -972,9 +992,9 @@ mod tests {
             .expect("MOC");
 
         assert!(rendered.iter().any(|(filename, _)| filename == second_name));
-        assert!(first.contains("[[REDACTED_api_key_n2|[REDACTED:api_key]]]"));
-        assert!(moc.contains("[[REDACTED_api_key_n1|[REDACTED:api_key]]]"));
-        assert!(moc.contains("[[REDACTED_api_key_n2|[REDACTED:api_key]]]"));
+        assert!(first.contains(r"[[REDACTED_api_key_n2|\[REDACTED:api_key\]]]"));
+        assert!(moc.contains(r"[[REDACTED_api_key_n1|\[REDACTED:api_key\]]]"));
+        assert!(moc.contains(r"[[REDACTED_api_key_n2|\[REDACTED:api_key\]]]"));
     }
 
     #[test]
@@ -996,6 +1016,22 @@ mod tests {
             !joined.contains("[[INJECTED"),
             "wikilink injection via relation must be neutralised: {joined}"
         );
+    }
+
+    #[test]
+    fn render_vault_neutralises_hostile_wikilink_alias() {
+        let mut g = Graph::new();
+        g.nodes.push(make_node(1, "alpha", "src/a.rs"));
+        g.nodes
+            .push(make_node(2, r"target\]] [[INJECTED]]", "src/b.rs"));
+        g.edges.push(make_edge(1, 2, "calls"));
+
+        let joined: String = render_vault(&g.sorted())
+            .iter()
+            .map(|(_, content)| content.as_str())
+            .collect();
+        assert!(!joined.contains("[[INJECTED]]"));
+        assert!(joined.contains(r"target\\\]\] \[\[INJECTED\]\]"));
     }
 
     #[test]

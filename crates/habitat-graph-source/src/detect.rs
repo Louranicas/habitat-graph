@@ -13,9 +13,10 @@ use habitat_graph_core::{GraphError, Result};
 /// Matching is case-insensitive: a file with extension `".RS"` matches the key `"rs"`, and a key
 /// of `"MD"` matches a file named `"readme.md"`.
 ///
-/// The walk is performed by [`ignore::WalkBuilder`], so all standard gitignore rules — including
-/// nested `.gitignore` files, `.ignore` files, and `.git/info/exclude` — are honoured
-/// automatically.
+/// Repository roots containing `.git` use the standard gitignore sources, including nested
+/// `.gitignore` files, `.ignore` files, global excludes, and `.git/info/exclude`. Roots without
+/// local git metadata honor only ignore files within the scan root, so staged trees do not depend
+/// on ambient parent or user configuration.
 ///
 /// # Errors
 ///
@@ -27,9 +28,13 @@ pub fn detect(root: &Path, extensions: &[&str]) -> Result<Vec<PathBuf>> {
 
     let mut paths: Vec<PathBuf> = Vec::new();
     let mut walker = ignore::WalkBuilder::new(root);
-    // The scan root can be a staged source tree without `.git` metadata. Its explicit
-    // `.gitignore` files still define the extraction boundary and must be honored.
-    walker.require_git(false);
+    if !root.join(".git").exists() {
+        walker
+            .require_git(false)
+            .parents(false)
+            .git_global(false)
+            .git_exclude(false);
+    }
 
     for entry in walker.build() {
         let entry = entry.map_err(|e| GraphError::Io(e.to_string()))?;
@@ -324,6 +329,30 @@ mod tests {
         let names = filenames(&got);
         assert!(names.contains(&"lib.rs".to_owned()));
         assert!(!names.contains(&"generated.rs".to_owned()));
+    }
+
+    #[test]
+    fn non_git_scan_does_not_inherit_parent_gitignore() {
+        let parent = TempDir::new().unwrap();
+        let root = parent.path().join("staged");
+        fs::create_dir_all(&root).unwrap();
+        fs::write(root.join("visible.rs"), b"").unwrap();
+        fs::write(parent.path().join(".gitignore"), "visible.rs\n").unwrap();
+
+        let got = detect(&root, &["rs"]).unwrap();
+        assert_eq!(filenames(&got), vec!["visible.rs"]);
+    }
+
+    #[test]
+    fn git_scan_still_inherits_repository_gitignore() {
+        let repository = TempDir::new().unwrap();
+        fs::create_dir_all(repository.path().join(".git")).unwrap();
+        fs::create_dir_all(repository.path().join("src")).unwrap();
+        fs::write(repository.path().join("src/ignored.rs"), b"").unwrap();
+        fs::write(repository.path().join(".gitignore"), "ignored.rs\n").unwrap();
+
+        let got = detect(repository.path(), &["rs"]).unwrap();
+        assert!(got.is_empty());
     }
 
     #[test]

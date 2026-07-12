@@ -9,7 +9,9 @@
 
 use std::borrow::Cow;
 
-use habitat_graph_core::{is_canonical_redaction_marker, screen_for_secrets, SECRET_TAG_ORDER};
+use habitat_graph_core::{
+    content_id, is_canonical_redaction_marker, screen_for_secrets, SECRET_TAG_ORDER,
+};
 
 /// Collects secret tags across the raw input and normalized forms used by downstream exporters.
 ///
@@ -74,6 +76,26 @@ pub fn redact_public_text(input: &str) -> Cow<'_, str> {
         Cow::Borrowed(input)
     } else {
         Cow::Owned(format!("[REDACTED:{}]", hits.join(",")))
+    }
+}
+
+pub(crate) fn project_relation(relation: &str) -> String {
+    if let Some((marker, suffix)) = relation.rsplit_once("#r") {
+        if is_canonical_redaction_marker(marker)
+            && suffix.len() == 8
+            && suffix
+                .chars()
+                .all(|character| character.is_ascii_hexdigit())
+        {
+            return relation.to_owned();
+        }
+    }
+
+    let redacted = redact_public_text(relation);
+    if redacted.as_ref() == relation {
+        relation.to_owned()
+    } else {
+        format!("{redacted}#r{:08x}", content_id(relation))
     }
 }
 

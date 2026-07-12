@@ -11,7 +11,7 @@ use std::fmt::Write as FmtWrite;
 
 use habitat_graph_core::Graph;
 
-use crate::escape::{cypher_escape, redact_public_text};
+use crate::escape::{cypher_escape, project_relation, redact_public_text};
 
 /// Renders `graph` as a Neo4j Cypher import script (deterministic, infallible).
 ///
@@ -77,8 +77,8 @@ pub fn render_cypher(graph: &Graph) -> String {
         let tgt = edge.target.get();
         // `relation` is attacker-influenced — escaped AND stored as a property, never as the
         // relationship-type identifier (which is always the fixed literal :REL).
-        let redacted_relation = redact_public_text(&edge.relation);
-        let relation = cypher_escape(&redacted_relation);
+        let projected_relation = project_relation(&edge.relation);
+        let relation = cypher_escape(&projected_relation);
         // `confidence` is a bounded enum string from this library's own code; cypher_escape
         // is applied for uniformity (the canonical strings contain no escapable characters).
         let confidence = cypher_escape(edge.confidence.as_str());
@@ -970,6 +970,28 @@ mod tests {
         assert!(!cypher.contains("Authorization: Bearer token"));
         assert!(cypher.contains("[REDACTED:api_key]"));
         assert!(cypher.contains("[REDACTED:bearer_token]"));
+    }
+
+    #[test]
+    fn distinct_redacted_relations_keep_distinct_merge_identity() {
+        let mut g = Graph::new();
+        g.nodes.push(node(1, "A", "a.rs", 1));
+        g.nodes.push(node(2, "B", "b.rs", 1));
+        g.edges
+            .push(edge(1, 2, "api_key=alpha", Confidence::Extracted));
+        g.edges
+            .push(edge(1, 2, "api_key=beta", Confidence::Extracted));
+
+        let cypher = render_cypher(&g);
+        let relationships: Vec<&str> = cypher
+            .lines()
+            .filter(|line| line.starts_with("MATCH"))
+            .collect();
+        assert_eq!(relationships.len(), 2);
+        assert_ne!(relationships[0], relationships[1]);
+        assert!(relationships
+            .iter()
+            .all(|line| line.contains("[REDACTED:api_key]#r")));
     }
 
     #[test]

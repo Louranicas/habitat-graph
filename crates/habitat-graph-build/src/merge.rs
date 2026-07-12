@@ -2,18 +2,18 @@
 
 use std::collections::{HashMap, HashSet};
 
-use habitat_graph_core::{
-    content_id, is_canonical_redaction_marker, Edge, Graph, Manifest, Node, NodeId,
-};
+use habitat_graph_core::{content_id, Edge, Graph, Manifest, Node, NodeId};
 use indexmap::IndexMap;
+
+use crate::merge_identity::{node_identity, redacted_node_ids, NodeIdentity};
 
 /// Merges two [`Graph`]s whose [`NodeId`] spaces are **independent** into one coherent graph.
 ///
 /// ## Algorithm
 ///
-/// 1. A fresh `IndexMap<label, NodeId>` is built; labels are interned in first-seen order
-///    (all of `a` before all of `b`).  When the same label appears in both graphs only one
-///    node is kept — the one from `a`.
+/// 1. A fresh node-identity map is built in first-seen order (all of `a` before all of `b`).
+///    Clean nodes use label identity, while publicly redacted nodes retain stable-id identity.
+///    When the same identity appears in both graphs only one node is kept — the one from `a`.
 /// 2. Per-graph `old_id → new_id` maps let each graph's edges be remapped into the merged id
 ///    space.  An edge whose source **or** target lacks a mapping is silently dropped
 ///    (dangling-edge policy).
@@ -29,13 +29,7 @@ use indexmap::IndexMap;
 /// This function is infallible.
 #[must_use]
 pub fn merge(a: Graph, b: Graph) -> Graph {
-    // Public node-link graphs retain stable content ids but replace secret-bearing labels with a
-    // shared display marker. Label interning would collapse those distinct nodes and recompute
-    // their ids from the marker. When either input carries a canonical marker, merge by the
-    // serialized stable ids instead; `a` still wins shared-node metadata.
-    if graph_contains_public_redaction(&a) || graph_contains_public_redaction(&b) {
-        return merge_by_stable_id(a, b);
-    }
+    let redacted_ids = redacted_node_ids(&[&a, &b]);
 
     // Destructure both graphs upfront so individual fields can be moved or borrowed
     // independently without triggering partial-move conflicts.
@@ -54,13 +48,11 @@ pub fn merge(a: Graph, b: Graph) -> Graph {
         manifest: b_manifest,
     } = b;
 
-    // ── Phase 1: label interning + per-graph old → new id maps ───────────────
+    // ── Phase 1: identity interning + per-graph old → new id maps ────────────
 
     let capacity = a_nodes.len().saturating_add(b_nodes.len());
-    let mut label_to_new_id: IndexMap<String, NodeId> = IndexMap::with_capacity(capacity);
-    // Content-addressed ids (FO-4): every label maps to content_id(label) so a merge produces the
-    // SAME ids as a full assemble of the same labels — incremental update == full rebuild (R4).
-    let mut used_ids: HashSet<u32> = HashSet::with_capacity(capacity);
+    let mut identity_to_new_id: IndexMap<NodeIdentity, NodeId> = IndexMap::with_capacity(capacity);
+    let mut used_ids: HashSet<u32> = redacted_ids.iter().map(|id| id.get()).collect();
     let mut merged_nodes: Vec<Node> = Vec::with_capacity(capacity);
 
     // Per-graph remaps: (original NodeId) → (new merged NodeId).
@@ -69,13 +61,25 @@ pub fn merge(a: Graph, b: Graph) -> Graph {
 
     // Walk a first: its nodes (and its version of shared labels) take priority.
     for node in &a_nodes {
-        let new_id = intern_label(&mut label_to_new_id, &mut used_ids, &mut merged_nodes, node);
+        let new_id = intern_node(
+            &mut identity_to_new_id,
+            &mut used_ids,
+            &mut merged_nodes,
+            node,
+            &redacted_ids,
+        );
         a_remap.insert(node.id, new_id);
     }
 
-    // Walk b second: new labels get fresh ids; existing labels reuse a's id.
+    // Walk b second: new identities get ids; existing identities reuse a's id.
     for node in &b_nodes {
-        let new_id = intern_label(&mut label_to_new_id, &mut used_ids, &mut merged_nodes, node);
+        let new_id = intern_node(
+            &mut identity_to_new_id,
+            &mut used_ids,
+            &mut merged_nodes,
+            node,
+            &redacted_ids,
+        );
         b_remap.insert(node.id, new_id);
     }
 
@@ -135,86 +139,28 @@ pub fn merge(a: Graph, b: Graph) -> Graph {
     .sorted()
 }
 
-/// Returns whether a graph contains a canonical public redaction marker.
-fn graph_contains_public_redaction(graph: &Graph) -> bool {
-    graph
-        .nodes
-        .iter()
-        .any(|node| is_canonical_redaction_marker(&node.label))
-}
-
-/// Merges public-projection graphs by their serialized stable [`NodeId`]s.
-///
-/// Content-addressed ids remain the only non-secret identity available after label redaction. The
-/// first graph wins metadata for a shared id, edges require surviving endpoints, and all output is
-/// deduplicated/sorted exactly like the ordinary label merge.
-fn merge_by_stable_id(a: Graph, b: Graph) -> Graph {
-    let Graph {
-        schema,
-        nodes: a_nodes,
-        mut edges,
-        mut communities,
-        manifest: a_manifest,
-    } = a;
-    let Graph {
-        schema: _,
-        nodes: b_nodes,
-        edges: b_edges,
-        communities: b_communities,
-        manifest: b_manifest,
-    } = b;
-
-    let mut nodes_by_id: IndexMap<NodeId, Node> =
-        IndexMap::with_capacity(a_nodes.len().saturating_add(b_nodes.len()));
-    for node in a_nodes.into_iter().chain(b_nodes) {
-        nodes_by_id.entry(node.id).or_insert(node);
-    }
-    let nodes: Vec<Node> = nodes_by_id.into_values().collect();
-    let surviving: HashSet<NodeId> = nodes.iter().map(|node| node.id).collect();
-    edges.extend(b_edges);
-    edges.retain(|edge| surviving.contains(&edge.source) && surviving.contains(&edge.target));
-    communities.extend(b_communities);
-
-    let mut inputs = a_manifest.inputs;
-    inputs.extend(b_manifest.inputs);
-    let manifest = Manifest {
-        inputs,
-        tool_version: a_manifest.tool_version,
-        generated_at: a_manifest.generated_at.or(b_manifest.generated_at),
-    };
-
-    crate::dedup(Graph {
-        schema,
-        nodes,
-        edges,
-        communities,
-        manifest,
-    })
-    .sorted()
-}
-
-/// Interns `node.label` into `label_to_new_id`, assigning a fresh monotonically-incrementing
-/// [`NodeId`] when the label is seen for the first time, and pushing a copy of the node (with
-/// the fresh id) into `merged_nodes`.  When the label already exists the existing id is returned
-/// immediately and `merged_nodes` is left unchanged (first-occurrence wins).
-///
-/// Returns the [`NodeId`] associated with `node.label` in the merged graph.
-fn intern_label(
-    label_to_new_id: &mut IndexMap<String, NodeId>,
+fn intern_node(
+    identity_to_new_id: &mut IndexMap<NodeIdentity, NodeId>,
     used_ids: &mut HashSet<u32>,
     merged_nodes: &mut Vec<Node>,
     node: &Node,
+    redacted_ids: &HashSet<NodeId>,
 ) -> NodeId {
     use indexmap::map::Entry;
-    match label_to_new_id.entry(node.label.clone()) {
+    let identity = node_identity(node, redacted_ids);
+    match identity_to_new_id.entry(identity.clone()) {
         Entry::Occupied(e) => *e.get(),
         Entry::Vacant(e) => {
-            // Content-addressed id (FO-4): content_id(label), probing forward on a u32 collision.
-            let mut raw = content_id(&node.label);
-            while !used_ids.insert(raw) {
-                raw = raw.wrapping_add(1);
-            }
-            let new_id = NodeId::new(raw);
+            let new_id = match identity {
+                NodeIdentity::Stable(id) => id,
+                NodeIdentity::Label(label) => {
+                    let mut raw = content_id(&label);
+                    while !used_ids.insert(raw) {
+                        raw = raw.wrapping_add(1);
+                    }
+                    NodeId::new(raw)
+                }
+            };
             let _ = e.insert(new_id);
             merged_nodes.push(Node {
                 id: new_id,
@@ -764,15 +710,18 @@ mod tests {
 
     #[test]
     fn public_redaction_markers_merge_by_stable_id_without_collapsing() {
+        let secret_id = content_id("api_key_alpha");
         let mut new_graph = Graph::new();
-        new_graph.nodes.push(node(10, "api_key_alpha", "new.rs"));
+        new_graph
+            .nodes
+            .push(node(secret_id, "api_key_alpha", "new.rs"));
         new_graph.nodes.push(node(20, "Safe", "new.rs"));
-        new_graph.edges.push(edge(10, 20, "calls"));
+        new_graph.edges.push(edge(secret_id, 20, "calls"));
 
         let mut prior_public = Graph::new();
         prior_public
             .nodes
-            .push(node(10, "[REDACTED:api_key]", "old.rs"));
+            .push(node(secret_id, "[REDACTED:api_key]", "old.rs"));
         prior_public
             .nodes
             .push(node(30, "[REDACTED:api_key]", "other.rs"));
@@ -785,7 +734,7 @@ mod tests {
             result
                 .nodes
                 .iter()
-                .filter(|node| node.id.get() == 10)
+                .filter(|node| node.id.get() == secret_id)
                 .count(),
             1
         );
@@ -793,12 +742,65 @@ mod tests {
             result
                 .nodes
                 .iter()
-                .find(|node| node.id.get() == 10)
+                .find(|node| node.id.get() == secret_id)
                 .map(|node| node.label.as_str()),
             Some("api_key_alpha"),
             "new raw graph metadata must win for the same stable id"
         );
         assert!(result.nodes.iter().any(|node| node.id.get() == 30));
         assert_eq!(result.edges.len(), 2, "both stable-id edges survive");
+    }
+
+    #[test]
+    fn redaction_uses_hybrid_identity_for_unrelated_clean_nodes() {
+        let mut a = Graph::new();
+        a.nodes.push(node(90, "[REDACTED:api_key]", "public.rs"));
+        a.nodes.push(node(1, "Shared", "a.rs"));
+        a.nodes.push(node(2, "Alpha", "a.rs"));
+        a.edges.push(edge(1, 2, "a-edge"));
+
+        let mut b = Graph::new();
+        b.nodes.push(node(11, "Shared", "b.rs"));
+        b.nodes.push(node(2, "Beta", "b.rs"));
+        b.edges.push(edge(11, 2, "b-edge"));
+
+        let result = merge(a, b);
+        assert_eq!(
+            result
+                .nodes
+                .iter()
+                .filter(|node| node.label == "Shared")
+                .count(),
+            1
+        );
+        assert!(result.nodes.iter().any(|node| node.label == "Alpha"));
+        assert!(result.nodes.iter().any(|node| node.label == "Beta"));
+
+        let shared = result
+            .nodes
+            .iter()
+            .find(|node| node.label == "Shared")
+            .unwrap()
+            .id;
+        let alpha = result
+            .nodes
+            .iter()
+            .find(|node| node.label == "Alpha")
+            .unwrap()
+            .id;
+        let beta = result
+            .nodes
+            .iter()
+            .find(|node| node.label == "Beta")
+            .unwrap()
+            .id;
+        assert!(result
+            .edges
+            .iter()
+            .any(|edge| edge.source == shared && edge.target == alpha));
+        assert!(result
+            .edges
+            .iter()
+            .any(|edge| edge.source == shared && edge.target == beta));
     }
 }

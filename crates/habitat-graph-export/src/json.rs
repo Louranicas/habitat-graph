@@ -3,37 +3,11 @@
 use std::collections::HashMap;
 
 use habitat_graph_core::{
-    content_id, display_safe, is_canonical_redaction_marker, sanitize_label, Graph, GraphError,
-    NodeId, Result, SCHEMA_VERSION,
+    display_safe, sanitize_label, Graph, GraphError, NodeId, Result, SCHEMA_VERSION,
 };
 use serde_json::Value;
 
-use crate::escape::redact_public_text;
-
-/// Returns a safe relation display value with a stable non-secret identity suffix when redacted.
-///
-/// Edge relations have no standalone id field in node-link JSON. Without this suffix, two distinct
-/// secret-bearing relations between the same endpoints both become one marker and collapse on a
-/// later add/git merge. Existing canonical suffixed markers pass through unchanged.
-fn project_relation(relation: &str) -> String {
-    if let Some((marker, suffix)) = relation.rsplit_once("#r") {
-        if is_canonical_redaction_marker(marker)
-            && suffix.len() == 8
-            && suffix
-                .chars()
-                .all(|character| character.is_ascii_hexdigit())
-        {
-            return relation.to_owned();
-        }
-    }
-
-    let redacted = redact_public_text(relation);
-    if redacted.as_ref() == relation {
-        relation.to_owned()
-    } else {
-        format!("{redacted}#r{:08x}", content_id(relation))
-    }
-}
+use crate::escape::{project_relation, redact_public_text};
 
 /// Renders `graph` as `NetworkX` node-link JSON.
 ///
