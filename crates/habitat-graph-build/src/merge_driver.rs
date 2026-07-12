@@ -230,8 +230,11 @@ fn ambiguous_projected_node_ids(
 
     let mut ambiguous = [HashSet::new(), HashSet::new()];
     for group in groups {
-        let projected_count = group.iter().filter(|(_, projected)| *projected).count();
-        if group.len() < 2 || projected_count == 0 {
+        let projected_slots: HashSet<NodeId> = group
+            .iter()
+            .filter_map(|(id, projected)| projected.then_some(*id))
+            .collect();
+        if group.len() < 2 || projected_slots.is_empty() {
             continue;
         }
         let slots: HashSet<NodeId> = group.into_iter().map(|(id, _)| id).collect();
@@ -244,9 +247,9 @@ fn ambiguous_projected_node_ids(
                         && habitat_graph_core::is_canonical_redaction_marker(&node.label)
                 })
                 .map(|node| node.id)
-                .collect::<Vec<_>>()
+                .collect::<HashSet<_>>()
         });
-        if side_ids.iter().any(|ids| ids.len() < projected_count) {
+        if side_ids.iter().any(|ids| ids != &projected_slots) {
             for (ambiguous, ids) in ambiguous.iter_mut().zip(side_ids) {
                 ambiguous.extend(ids);
             }
@@ -1623,6 +1626,20 @@ mod tests {
         ours.edges.push(edge(10, 20, "secret-edge"));
         let mut theirs = nodes_graph(&[(10, "Clean"), (20, "Safe")]);
         theirs.edges.push(edge(10, 20, "clean-edge"));
+
+        let merged = merge3(&base, &ours, &theirs);
+        assert_eq!(node_labels(&merged), vec!["Safe"]);
+        assert!(merged.edges.is_empty());
+    }
+
+    #[test]
+    fn shifted_projected_slot_is_ambiguous_without_a_count_change() {
+        let marker = "[REDACTED:api_key]";
+        let mut base = nodes_graph(&[(10, "Clean"), (11, marker), (20, "Safe")]);
+        base.edges.push(edge(11, 20, "secret-edge"));
+        let mut ours = nodes_graph(&[(10, marker), (20, "Safe")]);
+        ours.edges.push(edge(10, 20, "secret-edge"));
+        let theirs = ours.clone();
 
         let merged = merge3(&base, &ours, &theirs);
         assert_eq!(node_labels(&merged), vec!["Safe"]);

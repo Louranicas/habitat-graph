@@ -77,6 +77,7 @@ pub fn run(dir: &Path, out: &Path) -> u8 {
 /// private sidecar permissions cannot be enforced.
 fn run_inner(dir: &Path, out: &Path) -> Result<()> {
     let (sidecar_path, legacy_sidecar_path) = prepare_private_state(out)?;
+    super::private_state::ensure_no_pending_add_journals(&sidecar_path)?;
     let public_output = load_public_output(&out.join("graph.json"))?;
 
     // ── Detect all source files (sorted for R4 determinism) ─────────────────────
@@ -584,6 +585,7 @@ mod tests {
         let states: Vec<_> = fs::read_dir(&state_dir)
             .unwrap()
             .filter_map(std::result::Result::ok)
+            .filter(|entry| entry.file_name().to_string_lossy().ends_with(".json"))
             .collect();
         assert_eq!(states.len(), 1);
         assert!(fs::read_to_string(states[0].path())
@@ -1540,6 +1542,21 @@ mod tests {
         assert!(json.contains("v3"), "v3 must appear after second change");
         assert!(!json.contains("v2"), "v2 must be gone after second change");
         assert!(!json.contains("v1"), "v1 must still be gone");
+    }
+
+    #[test]
+    fn pending_add_transaction_blocks_update_artifact_writes() {
+        let src = TempDir::new().unwrap();
+        let out = TempDir::new().unwrap();
+        mk_file(src.path(), "lib.rs", "fn before_pending_add() {}");
+        assert_eq!(run(src.path(), out.path()), 0);
+        let public_before = read_graph_json(out.path());
+        fs::write(out.path().join(format!("{SIDECAR}.add-journal")), "pending").unwrap();
+        mk_file(src.path(), "lib.rs", "fn changed_during_pending_add() {}");
+
+        assert_eq!(run(src.path(), out.path()), 4);
+        assert_eq!(read_graph_json(out.path()), public_before);
+        assert!(out.path().join(format!("{SIDECAR}.add-journal")).exists());
     }
 }
 
