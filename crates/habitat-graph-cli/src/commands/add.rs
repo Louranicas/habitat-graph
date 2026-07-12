@@ -387,6 +387,13 @@ fn public_graph_state(graph: &Graph) -> Graph {
     state
 }
 
+fn projected_public_state(graph: &Graph) -> Result<Graph> {
+    let projection = habitat_graph_export::to_node_link(graph)?;
+    Ok(public_graph_state(&habitat_graph_serve::from_node_link(
+        &projection,
+    )?))
+}
+
 fn add_journal_path(state_path: &Path) -> Result<PathBuf> {
     let filename = state_path
         .file_name()
@@ -547,7 +554,8 @@ fn recover_add_journal(out: &Path, state_path: &Path, public: &mut PublicOutput)
         ));
     }
 
-    if !current_matches_intended {
+    let intended_generation = content_generation(&journal.public_json);
+    if public.content_generation.as_deref() != Some(intended_generation.as_str()) {
         super::atomic_file::write(
             out,
             journal.public_json.as_bytes(),
@@ -555,19 +563,12 @@ fn recover_add_journal(out: &Path, state_path: &Path, public: &mut PublicOutput)
             "public graph recovery",
         )?;
     }
-    let state_json = super::private_state::serialize(
-        &journal.graph,
-        &super::private_state::generation(journal.public_json.as_bytes()),
-    )?;
+    let state_json = super::private_state::serialize(&journal.graph, &intended_generation)?;
     super::private_state::write(state_path, &state_json)?;
     super::private_state::remove(&add_journal_path(state_path)?, "add journal")?;
     *public = PublicOutput {
         graph: Some(intended_graph),
-        content_generation: if current_matches_intended {
-            public.content_generation.clone()
-        } else {
-            Some(content_generation(&journal.public_json))
-        },
+        content_generation: Some(intended_generation),
     };
     Ok(true)
 }
@@ -580,15 +581,11 @@ fn select_prior(
     match (private, public) {
         (Some(private), Some(public)) => {
             if let Some(committed_generation) = private.public_generation.as_deref() {
-                return if Some(committed_generation) == public_generation {
-                    Ok(private.graph)
-                } else {
-                    Ok(public)
-                };
+                if Some(committed_generation) == public_generation {
+                    return Ok(private.graph);
+                }
             }
-            let private_projection = habitat_graph_export::to_node_link(&private.graph)?;
-            let public_projection = habitat_graph_export::to_node_link(&public)?;
-            if private_projection == public_projection {
+            if projected_public_state(&private.graph)? == public_graph_state(&public) {
                 Ok(private.graph)
             } else {
                 Ok(public)
@@ -1086,6 +1083,26 @@ mod tests {
     }
 
     #[test]
+    fn byte_only_public_edit_preserves_private_lineage() {
+        let d = tdir();
+        let out = d.join("g.json");
+        let original =
+            extract_from_bytes(b"fn api_key_original() {}", "rs").expect("extract original");
+        merge_into_output(original, &out).expect("write original");
+
+        let public = fs::read_to_string(&out).expect("read public graph");
+        fs::write(&out, format!("{public}\n")).expect("reformat public graph");
+
+        let added = extract_from_bytes(b"fn added() {}", "rs").expect("extract added");
+        merge_into_output(added, &out).expect("merge added");
+
+        let state_path = super::private_state_path(&out).expect("state path");
+        let private = fs::read_to_string(state_path).expect("read private state");
+        assert!(private.contains("api_key_original"));
+        assert!(private.contains("added"));
+    }
+
+    #[test]
     fn committed_generation_preserves_private_lineage_across_policy_changes() {
         let d = tdir();
         let out = d.join("g.json");
@@ -1183,6 +1200,38 @@ mod tests {
         assert_eq!(fs::read_to_string(&out).unwrap(), stored_projection);
         assert!(fs::read_to_string(&state_path).unwrap().contains("pending"));
         assert!(!super::add_journal_path(&state_path).unwrap().exists());
+    }
+
+    #[test]
+    fn journal_recovery_rewrites_equivalent_public_bytes() {
+        let d = tdir();
+        let out = d.join("g.json");
+        let original = extract_from_bytes(b"fn original() {}", "rs").expect("extract original");
+        merge_into_output(original.clone(), &out).expect("write original");
+
+        let public_before = fs::read_to_string(&out).expect("read original public graph");
+        let added = extract_from_bytes(b"fn pending() {}", "rs").expect("extract pending");
+        let pending = habitat_graph_build::merge(added, original).sorted();
+        let intended = habitat_graph_export::to_node_link(&pending).expect("render pending");
+        let state_path = super::private_state_path(&out).expect("state path");
+        let before_graph =
+            habitat_graph_serve::from_node_link(&public_before).expect("parse original graph");
+        super::write_add_journal(&state_path, Some(&before_graph), &pending, &intended)
+            .expect("write interrupted transaction");
+        fs::write(&out, format!("{intended}\n")).expect("write equivalent public graph");
+
+        let mut public = super::load_public_output(&out).expect("load public graph");
+        super::recover_add_journal(&out, &state_path, &mut public).expect("recover journal");
+
+        assert_eq!(fs::read_to_string(&out).unwrap(), intended);
+        let state = super::super::private_state::parse(
+            &fs::read_to_string(&state_path).expect("read private state"),
+        )
+        .expect("parse private state");
+        assert_eq!(
+            state.public_generation.as_deref(),
+            Some(super::content_generation(&intended).as_str())
+        );
     }
 
     #[test]

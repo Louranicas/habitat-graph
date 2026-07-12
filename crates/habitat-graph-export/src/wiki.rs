@@ -136,17 +136,7 @@ fn node_filename(id: NodeId) -> String {
 #[must_use]
 fn md_link_text(label: &str) -> String {
     let redacted = redact_public_text(label);
-    let safe = markdown_text(&display_safe(&redacted));
-    // Capacity hint: add a small margin for potential escapes.
-    let mut out = String::with_capacity(safe.len().saturating_add(8));
-    for ch in safe.chars() {
-        match ch {
-            '[' => out.push_str("\\["),
-            ']' => out.push_str("\\]"),
-            c => out.push(c),
-        }
-    }
-    out
+    markdown_text(&display_safe(&redacted))
 }
 
 /// Renders the `index.md` listing every node as a plain Markdown link.
@@ -1124,7 +1114,7 @@ mod tests {
         let article = content_of(&pages, "node-1.md");
         // The heading should contain the label with pipe.
         assert!(
-            article.contains("a|b"),
+            article.contains("a\\|b"),
             "pipe in label should appear literally in H1: {article}"
         );
     }
@@ -1335,8 +1325,8 @@ mod tests {
         assert!(!joined.contains("api_key_assignment_refused"));
         assert!(!joined.contains("src/api_key.rs"));
         assert!(!joined.contains("Authorization: Bearer token"));
-        assert!(joined.contains("[REDACTED:api_key]"));
-        assert!(joined.contains("[REDACTED:bearer_token]"));
+        assert!(joined.contains("\\[REDACTED:api_key\\]"));
+        assert!(joined.contains("\\[REDACTED:bearer_token\\]"));
     }
 
     #[test]
@@ -1352,7 +1342,7 @@ mod tests {
             .collect::<String>();
 
         assert!(!joined.contains("api&#95;key=SECRET"));
-        assert!(joined.contains("[REDACTED:api_key]"));
+        assert!(joined.contains("\\[REDACTED:api_key\\]"));
         assert!(joined.contains("safe<em>path</em>.rs"));
     }
 

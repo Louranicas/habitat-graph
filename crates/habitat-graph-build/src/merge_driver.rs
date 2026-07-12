@@ -1505,6 +1505,35 @@ mod tests {
     }
 
     #[test]
+    fn preupgrade_secret_relation_anchors_both_projected_branches() {
+        let projected = "[REDACTED:api_key]#e00000000000000000000";
+        let mut base = nodes_graph(&[(1, "A"), (2, "B")]);
+        base.edges.push(edge(1, 2, "api_key=base"));
+        let mut ours = nodes_graph(&[(1, "A"), (2, "B")]);
+        ours.edges.push(edge(1, 2, projected));
+        let mut theirs = nodes_graph(&[(1, "A"), (2, "B")]);
+        theirs.edges.push(edge(1, 2, projected));
+
+        let merged = merge3(&base, &ours, &theirs);
+        assert_eq!(merged.edges.len(), 1);
+        assert_eq!(merged.edges[0].relation, projected);
+    }
+
+    #[test]
+    fn preupgrade_secret_relation_deletion_is_not_resurrected() {
+        let mut base = nodes_graph(&[(1, "A"), (2, "B")]);
+        base.edges.push(edge(1, 2, "api_key=base"));
+        let ours = nodes_graph(&[(1, "A"), (2, "B")]);
+        let mut theirs = nodes_graph(&[(1, "A"), (2, "B")]);
+        theirs
+            .edges
+            .push(edge(1, 2, "[REDACTED:api_key]#e00000000000000000000"));
+
+        let merged = merge3(&base, &ours, &theirs);
+        assert!(merged.edges.is_empty());
+    }
+
+    #[test]
     fn concurrent_projected_edge_reductions_keep_only_provable_survivors() {
         let first = "[REDACTED:api_key]#e00000000000000000000";
         let second = "[REDACTED:api_key]#e00000000000000000001";

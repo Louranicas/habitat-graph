@@ -55,13 +55,26 @@ pub(crate) fn project_public_edges(graph: &Graph) -> Vec<ProjectedPublicEdge<'_>
 
 pub(crate) fn markdown_text(input: &str) -> String {
     let mut output = String::with_capacity(input.len());
-    for character in input.chars() {
+    let mut characters = input.chars().peekable();
+    let mut previous = None;
+    while let Some(character) = characters.next() {
+        let next = characters.peek().copied();
         match character {
             '&' => output.push_str("&amp;"),
             '<' => output.push_str("&lt;"),
             '>' => output.push_str("&gt;"),
+            '_' if !previous.is_some_and(char::is_alphanumeric)
+                || !next.is_some_and(char::is_alphanumeric) =>
+            {
+                output.push_str("\\_");
+            }
+            '\\' | '`' | '*' | '[' | ']' | '|' | '~' | '$' | '%' | '^' | '=' => {
+                output.push('\\');
+                output.push(character);
+            }
             _ => output.push(character),
         }
+        previous = Some(character);
     }
     output
 }
@@ -265,7 +278,18 @@ mod tests {
     fn markdown_text_neutralizes_html_parsing() {
         assert_eq!(
             markdown_text("api&#95;key=<em>secret</em>"),
-            "api&amp;#95;key=&lt;em&gt;secret&lt;/em&gt;"
+            "api&amp;#95;key\\=&lt;em&gt;secret&lt;/em&gt;"
+        );
+    }
+
+    #[test]
+    fn markdown_text_makes_inline_markdown_delimiters_inert() {
+        let private_key = markdown_text("-----BEG**IN OPENSSH PRIVATE KEY-----");
+        assert!(private_key.contains("BEG\\*\\*IN"));
+        assert!(!private_key.contains("**"));
+        assert_eq!(
+            markdown_text("Author[iza](noise)tion"),
+            "Author\\[iza\\](noise)tion"
         );
     }
 

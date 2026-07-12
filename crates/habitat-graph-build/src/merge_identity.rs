@@ -105,10 +105,12 @@ pub(crate) fn relation_identities(
     edges
         .iter()
         .map(|edge| {
-            let projected = projector.project(edge.source, edge.target, &edge.relation);
             let marker = project_public_relation(&edge.relation);
-            if is_canonical_redaction_marker(&marker) && edge.relation.starts_with(&marker) {
-                RelationIdentity::Projected(projected, projected_provenance)
+            if is_canonical_redaction_marker(&marker) {
+                RelationIdentity::Projected(
+                    projector.project(edge.source, edge.target, &edge.relation),
+                    projected_provenance,
+                )
             } else {
                 RelationIdentity::Exact(edge.relation.clone())
             }

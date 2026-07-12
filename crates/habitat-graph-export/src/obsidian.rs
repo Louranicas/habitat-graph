@@ -436,15 +436,7 @@ fn render_wikilink(
 }
 
 fn wikilink_alias(label: &str) -> String {
-    let display = markdown_text(&display_safe(label));
-    let mut escaped = String::with_capacity(display.len());
-    for character in display.chars() {
-        if matches!(character, '\\' | '[' | ']' | '|') {
-            escaped.push('\\');
-        }
-        escaped.push(character);
-    }
-    escaped
+    markdown_text(&display_safe(label))
 }
 
 /// Converts a node label to a filesystem-safe filename stem (no path/link metacharacters,

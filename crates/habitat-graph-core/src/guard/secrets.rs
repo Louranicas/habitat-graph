@@ -172,6 +172,8 @@ fn html_character_reference(body: &str) -> Option<char> {
 }
 
 fn decode_html_character_references(input: &str) -> Option<String> {
+    const MAX_REFERENCE_BODY_LEN: usize = 32;
+
     let mut output = String::with_capacity(input.len());
     let mut copied_until = 0_usize;
     let mut search_from = 0_usize;
@@ -179,12 +181,17 @@ fn decode_html_character_references(input: &str) -> Option<String> {
     while let Some(relative_start) = input[search_from..].find('&') {
         let start = search_from + relative_start;
         let body_start = start.saturating_add(1);
-        let Some(relative_end) = input[body_start..].find(';') else {
-            break;
+        let Some(relative_end) = input.as_bytes()[body_start..]
+            .iter()
+            .take(MAX_REFERENCE_BODY_LEN.saturating_add(1))
+            .position(|byte| *byte == b';')
+        else {
+            search_from = body_start;
+            continue;
         };
         let end = body_start + relative_end;
         let body = &input[body_start..end];
-        if body.len() <= 32 {
+        if body.len() <= MAX_REFERENCE_BODY_LEN {
             if let Some(character) = html_character_reference(body) {
                 output.push_str(&input[copied_until..start]);
                 output.push(character);
@@ -478,6 +485,13 @@ mod tests {
             redact_public_text("xox&#98;-123-secret"),
             "[REDACTED:slack_token]"
         );
+    }
+
+    #[test]
+    fn html_reference_decoder_bounds_invalid_candidate_scans() {
+        let input = format!("{}#95;", "&".repeat(8_192));
+        let decoded = decode_html_character_references(&input).expect("decode final reference");
+        assert_eq!(decoded, format!("{}_", "&".repeat(8_191)));
     }
 
     #[test]
