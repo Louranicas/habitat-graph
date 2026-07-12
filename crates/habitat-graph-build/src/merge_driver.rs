@@ -184,48 +184,69 @@ fn ambiguous_projected_node_ids(
     ours: &Graph,
     theirs: &Graph,
 ) -> [HashSet<NodeId>; 2] {
-    let mut base_ids: Vec<NodeId> = base
+    let mut occupied: Vec<(NodeId, bool)> = base
         .nodes
         .iter()
-        .filter(|node| habitat_graph_core::is_canonical_redaction_marker(&node.label))
-        .map(|node| node.id)
+        .map(|node| {
+            (
+                node.id,
+                habitat_graph_core::is_canonical_redaction_marker(&node.label),
+            )
+        })
         .collect();
-    base_ids.sort_unstable();
-    let mut groups: Vec<Vec<NodeId>> = Vec::new();
-    for id in base_ids {
-        let extends_group = groups
-            .last()
-            .and_then(|group| group.last())
-            .is_some_and(|last| last.get() != u32::MAX && last.get().saturating_add(1) == id.get());
+    occupied.sort_unstable_by_key(|(id, _)| *id);
+    let mut groups: Vec<Vec<(NodeId, bool)>> = Vec::new();
+    for candidate in occupied {
+        let extends_group =
+            groups
+                .last()
+                .and_then(|group| group.last())
+                .is_some_and(|(last, _)| {
+                    last.get() != u32::MAX && last.get().saturating_add(1) == candidate.0.get()
+                });
         if extends_group {
             if let Some(group) = groups.last_mut() {
-                group.push(id);
+                group.push(candidate);
             }
         } else {
-            groups.push(vec![id]);
+            groups.push(vec![candidate]);
+        }
+    }
+    if groups.len() > 1
+        && groups
+            .first()
+            .and_then(|group| group.first())
+            .is_some_and(|(id, _)| id.get() == 0)
+        && groups
+            .last()
+            .and_then(|group| group.last())
+            .is_some_and(|(id, _)| id.get() == u32::MAX)
+    {
+        let first = groups.remove(0);
+        if let Some(last) = groups.last_mut() {
+            last.extend(first);
         }
     }
 
     let mut ambiguous = [HashSet::new(), HashSet::new()];
-    for group in groups.into_iter().filter(|group| group.len() > 1) {
-        let (Some(start), Some(end)) = (group.first(), group.last()) else {
+    for group in groups {
+        let projected_count = group.iter().filter(|(_, projected)| *projected).count();
+        if projected_count < 2 {
             continue;
-        };
-        let start = start.get();
-        let end = end.get();
+        }
+        let slots: HashSet<NodeId> = group.into_iter().map(|(id, _)| id).collect();
         let side_ids = [ours, theirs].map(|graph| {
             graph
                 .nodes
                 .iter()
                 .filter(|node| {
-                    node.id.get() >= start
-                        && node.id.get() <= end
+                    slots.contains(&node.id)
                         && habitat_graph_core::is_canonical_redaction_marker(&node.label)
                 })
                 .map(|node| node.id)
                 .collect::<Vec<_>>()
         });
-        if side_ids.iter().any(|ids| ids.len() < group.len()) {
+        if side_ids.iter().any(|ids| ids.len() < projected_count) {
             for (ambiguous, ids) in ambiguous.iter_mut().zip(side_ids) {
                 ambiguous.extend(ids);
             }
@@ -1574,6 +1595,21 @@ mod tests {
 
         let merged = merge3(&base, &ours, &theirs);
         assert_eq!(node_labels(&merged), vec!["Safe"]);
+        assert!(merged.edges.is_empty());
+    }
+
+    #[test]
+    fn clean_occupied_slot_does_not_split_projected_collision_chain() {
+        let marker = "[REDACTED:api_key]";
+        let mut base = nodes_graph(&[(10, marker), (11, "Occupied"), (12, marker), (20, "Safe")]);
+        base.edges.push(edge(10, 20, "calls"));
+        base.edges.push(edge(12, 20, "calls"));
+        let mut ours = nodes_graph(&[(10, marker), (11, "Occupied"), (20, "Safe")]);
+        ours.edges.push(edge(10, 20, "calls"));
+        let theirs = ours.clone();
+
+        let merged = merge3(&base, &ours, &theirs);
+        assert_eq!(node_labels(&merged), vec!["Occupied", "Safe"]);
         assert!(merged.edges.is_empty());
     }
 

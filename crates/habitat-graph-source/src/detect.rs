@@ -2,9 +2,12 @@
 //!
 //! Entry point: [`detect`].
 
+use std::io::{BufRead as _, Read as _};
 use std::path::{Path, PathBuf};
 
 use habitat_graph_core::{GraphError, Result};
+
+const MAX_GIT_MARKER_LINE_BYTES: u64 = 4096;
 
 /// Collects files under `root` whose extension is in `extensions` (case-insensitive), honoring
 /// `.gitignore`.  Results are returned in a deterministic (sorted) order.
@@ -66,17 +69,7 @@ fn is_git_metadata(path: &Path) -> bool {
     if path.is_dir() {
         path.join("HEAD").is_file()
     } else if path.is_file() {
-        std::fs::read_to_string(path)
-            .ok()
-            .and_then(|contents| {
-                contents
-                    .lines()
-                    .next()
-                    .and_then(|line| line.trim().strip_prefix("gitdir:"))
-                    .map(str::trim)
-                    .filter(|gitdir| !gitdir.is_empty())
-                    .map(PathBuf::from)
-            })
+        gitdir_marker(path)
             .map(|gitdir| {
                 if gitdir.is_absolute() {
                     gitdir
@@ -88,6 +81,21 @@ fn is_git_metadata(path: &Path) -> bool {
     } else {
         false
     }
+}
+
+fn gitdir_marker(path: &Path) -> Option<PathBuf> {
+    let file = std::fs::File::open(path).ok()?;
+    let mut line = Vec::new();
+    let mut reader = std::io::BufReader::new(file).take(MAX_GIT_MARKER_LINE_BYTES + 1);
+    reader.read_until(b'\n', &mut line).ok()?;
+    if line.is_empty() || line.len() as u64 > MAX_GIT_MARKER_LINE_BYTES {
+        return None;
+    }
+    let line = std::str::from_utf8(&line).ok()?.trim();
+    line.strip_prefix("gitdir:")
+        .map(str::trim)
+        .filter(|gitdir| !gitdir.is_empty())
+        .map(PathBuf::from)
 }
 
 #[cfg(test)]
@@ -416,6 +424,22 @@ mod tests {
     fn stale_worktree_pointer_does_not_enable_parent_ignores() {
         let repository = TempDir::new().unwrap();
         fs::write(repository.path().join(".git"), "gitdir: .missing-gitdir\n").unwrap();
+        fs::create_dir_all(repository.path().join("src")).unwrap();
+        fs::write(repository.path().join("src/ignored.rs"), b"").unwrap();
+        fs::write(repository.path().join(".gitignore"), "ignored.rs\n").unwrap();
+
+        let got = detect(&repository.path().join("src"), &["rs"]).unwrap();
+        assert_eq!(filenames(&got), vec!["ignored.rs"]);
+    }
+
+    #[test]
+    fn oversized_worktree_pointer_is_not_git_metadata() {
+        let repository = TempDir::new().unwrap();
+        fs::write(
+            repository.path().join(".git"),
+            vec![b'x'; usize::try_from(super::MAX_GIT_MARKER_LINE_BYTES).unwrap() + 1],
+        )
+        .unwrap();
         fs::create_dir_all(repository.path().join("src")).unwrap();
         fs::write(repository.path().join("src/ignored.rs"), b"").unwrap();
         fs::write(repository.path().join(".gitignore"), "ignored.rs\n").unwrap();

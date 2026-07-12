@@ -1,5 +1,6 @@
+use std::collections::BTreeSet;
 use std::ffi::OsString;
-use std::io::Read as _;
+use std::io::{BufRead as _, Read as _};
 use std::path::{Path, PathBuf};
 
 use habitat_graph_core::{Graph, GraphError, Result};
@@ -15,6 +16,8 @@ const CONTEXT_SEPARATOR: &str = ".context-";
 const MIGRATION_CONFLICT_SEPARATOR: &str = ".migration-conflict-";
 const ADD_JOURNAL_SUFFIX: &str = ".add-journal";
 const MAX_SNAPSHOTS: usize = 16;
+const MAX_CONTEXTS_PER_OUTPUT: usize = 16;
+const MAX_GIT_CONTROL_LINE_BYTES: u64 = 4096;
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(super) struct StoredGraph {
@@ -55,9 +58,19 @@ pub(super) fn path_for_output(output: &Path, legacy: &Path) -> Result<PathBuf> {
     let unscoped_state_path = state_dir.join(format!("{key}.json"));
     let context = git_context_key(&git_dir)?;
     let state_path = state_dir.join(format!("{key}{CONTEXT_SEPARATOR}{context}.json"));
-    ensure_no_family_conflicts(&state_path)?;
-    migrate_family(&unscoped_state_path, &state_path, "unscoped private state")?;
-    migrate_family(legacy, &state_path, "legacy private state")?;
+    let mut first_error = None;
+    for result in [
+        migrate_family(&unscoped_state_path, &state_path, "unscoped private state"),
+        migrate_family(legacy, &state_path, "legacy private state"),
+        ensure_no_family_conflicts(&state_path),
+    ] {
+        if let Err(error) = result {
+            first_error.get_or_insert(error);
+        }
+    }
+    if let Some(error) = first_error {
+        return Err(error);
+    }
     Ok(state_path)
 }
 
@@ -242,6 +255,27 @@ pub(super) fn load_matching(
         if let Some(stored) = select_unique_state(exact.iter(), path)? {
             return Ok(Some(stored));
         }
+
+        let mut inherited = Vec::new();
+        for candidate in context_state_candidates(path)? {
+            if candidate == path {
+                continue;
+            }
+            if let Some(stored) = read(&candidate, context)? {
+                if stored.public_generation.as_deref() == Some(generation) {
+                    inherited.push(stored);
+                }
+            }
+            let snapshot = snapshot_path(&candidate, generation)?;
+            if let Some(stored) = read(&snapshot, context)? {
+                if stored.public_generation.as_deref() == Some(generation) {
+                    inherited.push(stored);
+                }
+            }
+        }
+        if let Some(stored) = select_unique_state(inherited.iter(), path)? {
+            return Ok(Some(stored));
+        }
     }
 
     let Some(semantic_generation) = public_semantic_generation else {
@@ -309,7 +343,8 @@ pub(super) fn write_state(path: &Path, bytes: &[u8]) -> Result<()> {
         }
     }
     write(path, bytes)?;
-    prune_snapshots(path)
+    prune_snapshots(path)?;
+    prune_contexts(path)
 }
 
 fn snapshot_path(path: &Path, public_generation: &str) -> Result<PathBuf> {
@@ -382,15 +417,124 @@ fn prune_snapshots(path: &Path) -> Result<()> {
     Ok(())
 }
 
+fn context_state_candidates(path: &Path) -> Result<Vec<PathBuf>> {
+    let Some(prefix) = context_filename_prefix(path) else {
+        return Ok(Vec::new());
+    };
+    let parent = path
+        .parent()
+        .filter(|parent| !parent.as_os_str().is_empty())
+        .unwrap_or_else(|| Path::new("."));
+    let entries = match std::fs::read_dir(parent) {
+        Ok(entries) => entries,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
+        Err(error) => {
+            return Err(GraphError::Io(format!(
+                "list private state contexts: {error}"
+            )))
+        }
+    };
+    let mut candidates = BTreeSet::new();
+    for entry in entries {
+        let entry = entry
+            .map_err(|error| GraphError::Io(format!("list private state contexts: {error}")))?;
+        let filename = entry.file_name();
+        let Some(filename) = filename.to_str() else {
+            continue;
+        };
+        let Some(context) = context_member_key(filename, &prefix) else {
+            continue;
+        };
+        candidates.insert(parent.join(format!("{prefix}{context}.json")));
+    }
+    Ok(candidates.into_iter().collect())
+}
+
+fn context_filename_prefix(path: &Path) -> Option<String> {
+    let filename = path.file_name()?.to_str()?;
+    let (key, context) = filename.split_once(CONTEXT_SEPARATOR)?;
+    let context = context.strip_suffix(".json")?;
+    if key.is_empty() || !is_generation(context) {
+        return None;
+    }
+    Some(format!("{key}{CONTEXT_SEPARATOR}"))
+}
+
+fn context_member_key<'a>(filename: &'a str, prefix: &str) -> Option<&'a str> {
+    let rest = filename.strip_prefix(prefix)?;
+    let context = rest.get(..64)?;
+    if !is_generation(context) {
+        return None;
+    }
+    let suffix = rest.get(64..)?.strip_prefix(".json")?;
+    (suffix.is_empty()
+        || suffix.starts_with(SNAPSHOT_SEPARATOR)
+        || suffix.starts_with(ADD_JOURNAL_SUFFIX)
+        || suffix.starts_with(MIGRATION_CONFLICT_SEPARATOR))
+    .then_some(context)
+}
+
+fn prune_contexts(path: &Path) -> Result<()> {
+    let candidates = context_state_candidates(path)?;
+    if candidates.len() <= MAX_CONTEXTS_PER_OUTPUT {
+        return Ok(());
+    }
+
+    let mut removable = Vec::new();
+    let mut protected = 0;
+    for candidate in &candidates {
+        let members = family_members(candidate)?;
+        let keep = candidate == path
+            || members.iter().any(|(_, suffix)| {
+                suffix.contains(ADD_JOURNAL_SUFFIX) || suffix.contains(MIGRATION_CONFLICT_SEPARATOR)
+            });
+        let mut modified = std::time::SystemTime::UNIX_EPOCH;
+        for (member, _) in &members {
+            let metadata = std::fs::symlink_metadata(member).map_err(|error| {
+                GraphError::Io(format!("inspect private state context: {error}"))
+            })?;
+            if !metadata.file_type().is_file() {
+                return Err(GraphError::Guard(format!(
+                    "private state context member is not a regular file: {}",
+                    member.display()
+                )));
+            }
+            modified = modified.max(
+                metadata
+                    .modified()
+                    .unwrap_or(std::time::SystemTime::UNIX_EPOCH),
+            );
+        }
+        if keep {
+            protected += 1;
+        } else {
+            removable.push((modified, candidate.clone()));
+        }
+    }
+    removable.sort_unstable();
+
+    let remove_count = candidates.len().saturating_sub(MAX_CONTEXTS_PER_OUTPUT);
+    if removable.len() < remove_count {
+        return Err(GraphError::Guard(format!(
+            "private state context retention is blocked by {protected} protected contexts"
+        )));
+    }
+    for (_, candidate) in removable.into_iter().take(remove_count) {
+        remove_family(&candidate, "expired private state context")?;
+    }
+    Ok(())
+}
+
 pub(super) fn migrate(legacy: &Path, current: &Path, context: &str) -> Result<()> {
     if legacy == current {
         return Ok(());
     }
-    ensure_no_migration_conflicts(current)?;
     ensure(current)?;
     let metadata = match std::fs::symlink_metadata(legacy) {
         Ok(metadata) => metadata,
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            return ensure_no_migration_conflicts(current)
+        }
         Err(error) => {
             return Err(GraphError::Io(format!(
                 "inspect {context} {}: {error}",
@@ -455,10 +599,12 @@ pub(super) fn migrate(legacy: &Path, current: &Path, context: &str) -> Result<()
     } else {
         write(current, &bytes)?;
     }
-    remove(legacy, context)
+    remove(legacy, context)?;
+    ensure_no_migration_conflicts(current)
 }
 
 fn migrate_family(legacy: &Path, current: &Path, context: &str) -> Result<()> {
+    let mut first_error = None;
     for (source, suffix) in family_members(legacy)? {
         let filename = current
             .file_name()
@@ -466,12 +612,18 @@ fn migrate_family(legacy: &Path, current: &Path, context: &str) -> Result<()> {
         let mut destination_name = OsString::from(filename);
         destination_name.push(&suffix);
         let destination = current.with_file_name(destination_name);
-        migrate(&source, &destination, context)?;
+        if let Err(error) = migrate(&source, &destination, context) {
+            if first_error.is_none() {
+                first_error = Some(error);
+            }
+        }
+    }
+    if let Some(error) = first_error {
+        return Err(error);
     }
     Ok(())
 }
 
-#[cfg(not(unix))]
 fn remove_family(path: &Path, context: &str) -> Result<()> {
     for (member, _) in family_members(path)? {
         remove(&member, context)?;
@@ -641,8 +793,8 @@ fn find_git_dir(start: &Path) -> Result<Option<PathBuf>> {
                 marker.display()
             )));
         }
-        let marker_text = std::fs::read_to_string(&marker)
-            .map_err(|error| GraphError::Io(format!("read Git metadata marker: {error}")))?;
+        let marker_text = read_git_control_line(&marker, "Git metadata marker")?
+            .ok_or_else(|| GraphError::Guard("Git metadata marker is missing".to_owned()))?;
         let target = marker_text
             .strip_prefix("gitdir:")
             .map(str::trim)
@@ -700,32 +852,203 @@ fn valid_git_dir(path: &Path) -> Result<bool> {
 
 fn git_context_key(git_dir: &Path) -> Result<String> {
     let head = git_dir.join("HEAD");
-    let metadata = std::fs::symlink_metadata(&head)
-        .map_err(|error| GraphError::Io(format!("inspect Git HEAD: {error}")))?;
-    if !metadata.file_type().is_file() {
+    let identity = read_git_control_line(&head, "Git HEAD")?
+        .ok_or_else(|| GraphError::Guard("Git HEAD is missing".to_owned()))?;
+    let context = if is_object_id(&identity) {
+        format!("detached:{}", identity.to_ascii_lowercase())
+    } else {
+        let reference = identity
+            .strip_prefix("ref:")
+            .map(str::trim)
+            .filter(|reference| valid_git_reference(reference))
+            .ok_or_else(|| GraphError::Guard("invalid Git HEAD".to_owned()))?;
+        match resolve_git_reference(git_dir, reference)? {
+            Some(commit) => format!("ref:{reference}\ncommit:{commit}"),
+            None => format!("ref:{reference}\nunborn"),
+        }
+    };
+    Ok(generation(context.as_bytes()))
+}
+
+fn resolve_git_reference(git_dir: &Path, initial: &str) -> Result<Option<String>> {
+    let common_dir = git_common_dir(git_dir)?;
+    let mut reference = initial.to_owned();
+    for _ in 0..8 {
+        let mut value = read_git_control_line(&git_dir.join(&reference), "Git reference")?;
+        if value.is_none() && common_dir != git_dir {
+            value = read_git_control_line(&common_dir.join(&reference), "Git reference")?;
+        }
+        let Some(value) = value else {
+            return read_packed_reference(&common_dir, &reference);
+        };
+        if is_object_id(&value) {
+            return Ok(Some(value.to_ascii_lowercase()));
+        }
+        value
+            .strip_prefix("ref:")
+            .map(str::trim)
+            .filter(|candidate| valid_git_reference(candidate))
+            .ok_or_else(|| GraphError::Guard("invalid symbolic Git reference".to_owned()))?
+            .clone_into(&mut reference);
+    }
+    Err(GraphError::Guard(
+        "Git symbolic reference chain is too deep".to_owned(),
+    ))
+}
+
+fn git_common_dir(git_dir: &Path) -> Result<PathBuf> {
+    let Some(value) = read_git_control_line(&git_dir.join("commondir"), "Git common directory")?
+    else {
+        return Ok(git_dir.to_path_buf());
+    };
+    if value.is_empty() || value.chars().any(char::is_control) {
+        return Err(GraphError::Guard("invalid Git common directory".to_owned()));
+    }
+    let value = Path::new(&value);
+    let candidate = if value.is_absolute() {
+        value.to_path_buf()
+    } else {
+        git_dir.join(value)
+    };
+    let canonical = std::fs::canonicalize(&candidate).map_err(|error| {
+        GraphError::Io(format!(
+            "resolve Git common directory {}: {error}",
+            candidate.display()
+        ))
+    })?;
+    let metadata = std::fs::symlink_metadata(&canonical)
+        .map_err(|error| GraphError::Io(format!("inspect Git common directory: {error}")))?;
+    if !metadata.file_type().is_dir() {
         return Err(GraphError::Guard(format!(
-            "Git HEAD is not a regular file: {}",
-            head.display()
+            "Git common directory is not a directory: {}",
+            canonical.display()
         )));
     }
-    let bytes = read_regular(&head, &metadata, "Git HEAD")?;
-    let text = std::str::from_utf8(&bytes)
-        .map_err(|error| GraphError::Guard(format!("Git HEAD is not UTF-8: {error}")))?;
-    let identity = text.trim();
-    let valid = identity
-        .strip_prefix("ref:")
-        .map(str::trim)
-        .is_some_and(|reference| {
-            reference.starts_with("refs/")
-                && !reference.is_empty()
-                && !reference.chars().any(char::is_control)
-        })
-        || matches!(identity.len(), 40 | 64)
-            && identity.bytes().all(|byte| byte.is_ascii_hexdigit());
-    if !valid {
-        return Err(GraphError::Guard("invalid Git HEAD".to_owned()));
+    Ok(canonical)
+}
+
+fn read_packed_reference(git_dir: &Path, reference: &str) -> Result<Option<String>> {
+    let path = git_dir.join("packed-refs");
+    let metadata = match std::fs::symlink_metadata(&path) {
+        Ok(metadata) => metadata,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(error) => {
+            return Err(GraphError::Io(format!(
+                "inspect Git packed references: {error}"
+            )))
+        }
+    };
+    if !metadata.file_type().is_file() {
+        return Err(GraphError::Guard(format!(
+            "Git packed references are not a regular file: {}",
+            path.display()
+        )));
     }
-    Ok(generation(identity.as_bytes()))
+    let file = std::fs::File::open(&path)
+        .map_err(|error| GraphError::Io(format!("read Git packed references: {error}")))?;
+    let opened = file
+        .metadata()
+        .map_err(|error| GraphError::Io(format!("inspect Git packed references: {error}")))?;
+    if !same_file(&metadata, &opened) {
+        return Err(GraphError::Guard(
+            "Git packed references changed while being read".to_owned(),
+        ));
+    }
+    let mut reader = std::io::BufReader::new(file);
+    loop {
+        let mut line = Vec::new();
+        let mut limited = (&mut reader).take(MAX_GIT_CONTROL_LINE_BYTES + 1);
+        let read = limited
+            .read_until(b'\n', &mut line)
+            .map_err(|error| GraphError::Io(format!("read Git packed references: {error}")))?;
+        if read == 0 {
+            return Ok(None);
+        }
+        if line.len() as u64 > MAX_GIT_CONTROL_LINE_BYTES {
+            return Err(GraphError::Guard(
+                "Git packed reference line is too long".to_owned(),
+            ));
+        }
+        let line = std::str::from_utf8(&line)
+            .map_err(|error| {
+                GraphError::Guard(format!("Git packed references are not UTF-8: {error}"))
+            })?
+            .trim();
+        if line.is_empty() || line.starts_with('#') || line.starts_with('^') {
+            continue;
+        }
+        let (commit, name) = line
+            .split_once(' ')
+            .ok_or_else(|| GraphError::Guard("invalid Git packed reference".to_owned()))?;
+        if !is_object_id(commit) || !valid_git_reference(name) {
+            return Err(GraphError::Guard("invalid Git packed reference".to_owned()));
+        }
+        if name == reference {
+            return Ok(Some(commit.to_ascii_lowercase()));
+        }
+    }
+}
+
+fn read_git_control_line(path: &Path, context: &str) -> Result<Option<String>> {
+    let metadata = match std::fs::symlink_metadata(path) {
+        Ok(metadata) => metadata,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(error) => return Err(GraphError::Io(format!("inspect {context}: {error}"))),
+    };
+    if !metadata.file_type().is_file() {
+        return Err(GraphError::Guard(format!(
+            "{context} is not a regular file: {}",
+            path.display()
+        )));
+    }
+    let file = std::fs::File::open(path)
+        .map_err(|error| GraphError::Io(format!("read {context}: {error}")))?;
+    let opened = file
+        .metadata()
+        .map_err(|error| GraphError::Io(format!("inspect {context}: {error}")))?;
+    if !same_file(&metadata, &opened) {
+        return Err(GraphError::Guard(format!(
+            "{context} changed while being read"
+        )));
+    }
+    let mut line = Vec::new();
+    let mut reader = std::io::BufReader::new(file).take(MAX_GIT_CONTROL_LINE_BYTES + 1);
+    reader
+        .read_until(b'\n', &mut line)
+        .map_err(|error| GraphError::Io(format!("read {context}: {error}")))?;
+    if line.is_empty() {
+        return Ok(Some(String::new()));
+    }
+    if line.len() as u64 > MAX_GIT_CONTROL_LINE_BYTES {
+        return Err(GraphError::Guard(format!("{context} is too long")));
+    }
+    let value = std::str::from_utf8(&line)
+        .map_err(|error| GraphError::Guard(format!("{context} is not UTF-8: {error}")))?
+        .trim();
+    Ok(Some(value.to_owned()))
+}
+
+fn is_object_id(value: &str) -> bool {
+    matches!(value.len(), 40 | 64) && value.bytes().all(|byte| byte.is_ascii_hexdigit())
+}
+
+fn valid_git_reference(reference: &str) -> bool {
+    reference.starts_with("refs/")
+        && !reference.ends_with('/')
+        && !reference.ends_with('.')
+        && !reference.contains("..")
+        && !reference.contains("@{")
+        && reference.split('/').all(|component| {
+            !component.is_empty()
+                && component != "."
+                && component != ".."
+                && !component.as_bytes().ends_with(b".lock")
+        })
+        && !reference.chars().any(|character| {
+            character.is_control()
+                || character.is_whitespace()
+                || matches!(character, '~' | '^' | ':' | '?' | '*' | '[' | '\\')
+        })
 }
 
 #[cfg(unix)]
@@ -858,6 +1181,12 @@ mod tests {
         git_dir
     }
 
+    fn write_ref(git_dir: &Path, reference: &str, commit: &str) {
+        let path = git_dir.join(reference);
+        fs::create_dir_all(path.parent().unwrap()).unwrap();
+        fs::write(path, format!("{commit}\n")).unwrap();
+    }
+
     #[test]
     fn worktree_git_file_uses_its_private_git_directory() {
         let root = TempDir::new().unwrap();
@@ -875,6 +1204,22 @@ mod tests {
         let state = super::path_for_output(&output_dir.join("graph.json"), &legacy).unwrap();
         assert!(state.starts_with(git_dir.join("habitat-graph/state")));
         assert_ne!(state, legacy);
+    }
+
+    #[test]
+    fn oversized_git_metadata_marker_is_rejected() {
+        let root = TempDir::new().unwrap();
+        fs::write(
+            root.path().join(".git"),
+            vec![b'x'; usize::try_from(super::MAX_GIT_CONTROL_LINE_BYTES).unwrap() + 1],
+        )
+        .unwrap();
+        let output_dir = root.path().join("public");
+        fs::create_dir_all(&output_dir).unwrap();
+        let legacy = output_dir.join(".habitat-graph-state.json");
+
+        let error = super::path_for_output(&output_dir.join("graph.json"), &legacy).unwrap_err();
+        assert_eq!(error.kind(), "guard");
     }
 
     #[test]
@@ -1078,6 +1423,100 @@ mod tests {
     }
 
     #[test]
+    fn git_context_tracks_the_resolved_commit() {
+        let root = TempDir::new().unwrap();
+        let git_dir = create_git(root.path(), "ref: refs/heads/main\n");
+        let first_commit = "1111111111111111111111111111111111111111";
+        let second_commit = "2222222222222222222222222222222222222222";
+        write_ref(&git_dir, "refs/heads/main", first_commit);
+        let output_dir = root.path().join("public");
+        fs::create_dir_all(&output_dir).unwrap();
+        let output = output_dir.join("graph.json");
+        let legacy = output_dir.join(".habitat-graph-state.json");
+
+        let first = super::path_for_output(&output, &legacy).unwrap();
+        write_ref(&git_dir, "refs/heads/main", second_commit);
+        let second = super::path_for_output(&output, &legacy).unwrap();
+        assert_ne!(first, second);
+
+        write_ref(&git_dir, "refs/heads/renamed", second_commit);
+        fs::write(git_dir.join("HEAD"), "ref: refs/heads/renamed\n").unwrap();
+        let renamed = super::path_for_output(&output, &legacy).unwrap();
+        assert_ne!(second, renamed);
+    }
+
+    #[test]
+    fn new_commit_inherits_only_unique_exact_generation_state() {
+        let root = TempDir::new().unwrap();
+        let git_dir = create_git(root.path(), "ref: refs/heads/main\n");
+        let output_dir = root.path().join("public");
+        fs::create_dir_all(&output_dir).unwrap();
+        let output = output_dir.join("graph.json");
+        let legacy = output_dir.join(".habitat-graph-state.json");
+        let public_generation = super::generation(b"shared public bytes");
+        let semantic = super::semantic_generation(&Graph::new()).unwrap();
+        let mut alpha = Graph::new();
+        alpha.manifest.tool_version = "alpha-private-lineage".to_owned();
+        let mut beta = Graph::new();
+        beta.manifest.tool_version = "beta-private-lineage".to_owned();
+
+        write_ref(
+            &git_dir,
+            "refs/heads/main",
+            "1111111111111111111111111111111111111111",
+        );
+        let alpha_path = super::path_for_output(&output, &legacy).unwrap();
+        super::write_state(
+            &alpha_path,
+            &super::serialize(&alpha, &public_generation, &semantic).unwrap(),
+        )
+        .unwrap();
+
+        write_ref(
+            &git_dir,
+            "refs/heads/main",
+            "2222222222222222222222222222222222222222",
+        );
+        let inherited_path = super::path_for_output(&output, &legacy).unwrap();
+        let inherited = super::load_matching(
+            &inherited_path,
+            Some(&public_generation),
+            Some(&semantic),
+            "test private state",
+        )
+        .unwrap()
+        .unwrap();
+        assert_eq!(inherited.graph, alpha);
+
+        write_ref(
+            &git_dir,
+            "refs/heads/main",
+            "3333333333333333333333333333333333333333",
+        );
+        let beta_path = super::path_for_output(&output, &legacy).unwrap();
+        super::write_state(
+            &beta_path,
+            &super::serialize(&beta, &public_generation, &semantic).unwrap(),
+        )
+        .unwrap();
+
+        write_ref(
+            &git_dir,
+            "refs/heads/main",
+            "4444444444444444444444444444444444444444",
+        );
+        let ambiguous_path = super::path_for_output(&output, &legacy).unwrap();
+        let error = super::load_matching(
+            &ambiguous_path,
+            Some(&public_generation),
+            Some(&semantic),
+            "test private state",
+        )
+        .unwrap_err();
+        assert_eq!(error.kind(), "guard");
+    }
+
+    #[test]
     fn git_private_path_migrates_the_complete_legacy_family() {
         let root = TempDir::new().unwrap();
         create_git(root.path(), "ref: refs/heads/main\n");
@@ -1124,6 +1563,42 @@ mod tests {
     }
 
     #[test]
+    fn family_migration_secures_every_member_before_reporting_conflict() {
+        let root = TempDir::new().unwrap();
+        create_git(root.path(), "ref: refs/heads/main\n");
+        let output_dir = root.path().join("public");
+        fs::create_dir_all(&output_dir).unwrap();
+        let output = output_dir.join("graph.json");
+        let legacy = output_dir.join(".habitat-graph-state.json");
+        let state = super::path_for_output(&output, &legacy).unwrap();
+        fs::write(&state, "current state").unwrap();
+        let snapshot_suffix = format!(
+            "{SNAPSHOT_SEPARATOR}{}",
+            super::generation(b"legacy snapshot")
+        );
+        let legacy_snapshot = sibling(&legacy, &snapshot_suffix);
+        let legacy_journal = sibling(&legacy, ADD_JOURNAL_SUFFIX);
+        fs::write(&legacy, "conflicting state").unwrap();
+        fs::write(&legacy_snapshot, "legacy snapshot").unwrap();
+        fs::write(&legacy_journal, "legacy journal").unwrap();
+
+        let error = super::path_for_output(&output, &legacy).unwrap_err();
+        assert_eq!(error.kind(), "guard");
+        assert!(!legacy.exists());
+        assert!(!legacy_snapshot.exists());
+        assert!(!legacy_journal.exists());
+        assert_eq!(
+            fs::read_to_string(sibling(&state, &snapshot_suffix)).unwrap(),
+            "legacy snapshot"
+        );
+        assert_eq!(
+            fs::read_to_string(sibling(&state, ADD_JOURNAL_SUFFIX)).unwrap(),
+            "legacy journal"
+        );
+        assert!(super::path_for_output(&output, &legacy).is_err());
+    }
+
+    #[test]
     fn private_state_snapshot_retention_is_bounded() {
         let root = TempDir::new().unwrap();
         let path = root.path().join("state.json");
@@ -1140,6 +1615,39 @@ mod tests {
         assert_eq!(
             super::snapshot_candidates(&path).unwrap().len(),
             super::MAX_SNAPSHOTS
+        );
+    }
+
+    #[test]
+    fn private_state_context_retention_is_bounded_per_output() {
+        let root = TempDir::new().unwrap();
+        let output_key = super::generation(b"output path");
+        let semantic = super::semantic_generation(&Graph::new()).unwrap();
+        let mut current = None;
+
+        for index in 0..(super::MAX_CONTEXTS_PER_OUTPUT + 4) {
+            let context = super::generation(format!("commit-{index}").as_bytes());
+            let path = root.path().join(format!(
+                "{output_key}{}{}.json",
+                super::CONTEXT_SEPARATOR,
+                context
+            ));
+            let mut graph = Graph::new();
+            graph.manifest.tool_version = format!("private-lineage-{index}");
+            let public = super::generation(format!("public-{index}").as_bytes());
+            super::write_state(
+                &path,
+                &super::serialize(&graph, &public, &semantic).unwrap(),
+            )
+            .unwrap();
+            current = Some(path);
+        }
+
+        let current = current.unwrap();
+        assert!(current.exists());
+        assert_eq!(
+            super::context_state_candidates(&current).unwrap().len(),
+            super::MAX_CONTEXTS_PER_OUTPUT
         );
     }
 

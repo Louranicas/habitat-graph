@@ -9,9 +9,11 @@ use habitat_graph_core::{Graph, GraphError, Result};
 /// Ownership manifest for generated Obsidian notes. Only files recorded here (or recognized by
 /// the conservative legacy signature during first migration) may be removed on a later sync.
 const VAULT_MANIFEST: &str = ".habitat-graph-generated.json";
-const VAULT_MANIFEST_SCHEMA: &str = "habitat-graph.vault-manifest.v1";
+const LEGACY_VAULT_MANIFEST_SCHEMA: &str = "habitat-graph.vault-manifest.v1";
+const VAULT_MANIFEST_SCHEMA: &str = "habitat-graph.vault-manifest.v2";
 const WIKI_MANIFEST: &str = ".habitat-graph-generated.json";
-const WIKI_MANIFEST_SCHEMA: &str = "habitat-graph.wiki-manifest.v1";
+const LEGACY_WIKI_MANIFEST_SCHEMA: &str = "habitat-graph.wiki-manifest.v1";
+const WIKI_MANIFEST_SCHEMA: &str = "habitat-graph.wiki-manifest.v2";
 const OPTIONAL_ARTIFACT_MANIFEST: &str = ".habitat-graph-artifacts.json";
 const OPTIONAL_ARTIFACT_MANIFEST_SCHEMA: &str = "habitat-graph.artifact-manifest.v1";
 const OPTIONAL_ARTIFACTS: &[&str] = &["graph.svg", "graph.graphml", "graph.cypher"];
@@ -325,48 +327,154 @@ fn is_generated_vault_moc(content: &str, notes: &[(String, GeneratedVaultNode)])
     })
 }
 
+fn read_generated_manifest(
+    directory: &Path,
+    manifest_name: &str,
+    legacy_schema: &str,
+    schema: &str,
+    valid_filename: fn(&str) -> bool,
+    context: &str,
+) -> Result<Option<HashSet<String>>> {
+    let manifest_path = directory.join(manifest_name);
+    let metadata = match std::fs::symlink_metadata(&manifest_path) {
+        Ok(metadata) => metadata,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(error) => {
+            return Err(GraphError::Io(format!(
+                "inspect {context} manifest: {error}"
+            )))
+        }
+    };
+    if !metadata.file_type().is_file() {
+        return Err(GraphError::Guard(format!(
+            "{context} manifest is not a regular file: {}",
+            manifest_path.display()
+        )));
+    }
+    let text = std::fs::read_to_string(&manifest_path)
+        .map_err(|error| GraphError::Io(format!("{context} manifest read: {error}")))?;
+    let value: serde_json::Value = serde_json::from_str(&text)
+        .map_err(|error| GraphError::Schema(format!("{context} manifest parse: {error}")))?;
+    let manifest_schema = value["schema"].as_str();
+    if !matches!(manifest_schema, Some(candidate) if candidate == legacy_schema || candidate == schema)
+    {
+        return Err(GraphError::Schema(format!(
+            "unsupported {context} manifest schema: {:?}",
+            value["schema"]
+        )));
+    }
+    let files = value["files"].as_array().ok_or_else(|| {
+        GraphError::Schema(format!("{context} manifest `files` must be an array"))
+    })?;
+    let mut owned = HashSet::with_capacity(files.len());
+    for entry in files {
+        let filename = entry.as_str().ok_or_else(|| {
+            GraphError::Schema(format!("{context} manifest filename must be a string"))
+        })?;
+        if !valid_filename(filename) || !owned.insert(filename.to_owned()) {
+            return Err(GraphError::Guard(format!(
+                "invalid generated {context} filename in manifest: {filename:?}"
+            )));
+        }
+    }
+
+    if manifest_schema == Some(schema) {
+        let pending = value["pending"].as_object().ok_or_else(|| {
+            GraphError::Schema(format!("{context} manifest `pending` must be an object"))
+        })?;
+        for (filename, expected) in pending {
+            let expected = expected.as_str().ok_or_else(|| {
+                GraphError::Schema(format!("{context} manifest pending hash must be a string"))
+            })?;
+            if !valid_filename(filename)
+                || !is_content_generation(expected)
+                || owned.contains(filename)
+            {
+                return Err(GraphError::Guard(format!(
+                    "invalid pending generated {context} file: {filename:?}"
+                )));
+            }
+            let destination = directory.join(filename);
+            let metadata = match std::fs::symlink_metadata(&destination) {
+                Ok(metadata) => metadata,
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
+                Err(error) => {
+                    return Err(GraphError::Io(format!(
+                        "inspect pending {context} file {filename}: {error}"
+                    )))
+                }
+            };
+            if metadata.file_type().is_file() {
+                let bytes = std::fs::read(&destination).map_err(|error| {
+                    GraphError::Io(format!("read pending {context} file {filename}: {error}"))
+                })?;
+                if content_generation(&bytes) == expected {
+                    owned.insert(filename.clone());
+                }
+            }
+        }
+    }
+    Ok(Some(owned))
+}
+
+fn write_generated_manifest(
+    directory: &Path,
+    manifest_name: &str,
+    schema: &str,
+    names: &HashSet<String>,
+    pending: &BTreeMap<String, String>,
+    context: &str,
+) -> Result<()> {
+    let mut files: Vec<&str> = names.iter().map(String::as_str).collect();
+    files.sort_unstable();
+    let manifest = serde_json::to_string_pretty(&serde_json::json!({
+        "schema": schema,
+        "files": files,
+        "pending": pending,
+    }))
+    .map_err(|error| GraphError::Schema(format!("{context} manifest serialize: {error}")))?;
+    super::atomic_file::write(
+        &directory.join(manifest_name),
+        manifest.as_bytes(),
+        false,
+        &format!("{context} manifest"),
+    )
+}
+
+fn pending_generated_files(
+    rendered: &[(String, String)],
+    prior_owned: &HashSet<String>,
+) -> BTreeMap<String, String> {
+    rendered
+        .iter()
+        .filter(|(filename, _)| !prior_owned.contains(filename))
+        .map(|(filename, content)| (filename.clone(), content_generation(content.as_bytes())))
+        .collect()
+}
+
+fn content_generation(bytes: &[u8]) -> String {
+    blake3::hash(bytes).to_hex().to_string()
+}
+
+fn is_content_generation(value: &str) -> bool {
+    value.len() == 64
+        && value
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+}
+
 /// Loads the generated-file ownership set, migrating conservative legacy note signatures when no
 /// manifest exists. An invalid existing manifest fails closed rather than guessing ownership.
 fn generated_vault_ownership(vault_dir: &Path) -> Result<HashSet<String>> {
-    let manifest_path = vault_dir.join(VAULT_MANIFEST);
-    match std::fs::symlink_metadata(&manifest_path) {
-        Ok(metadata) if metadata.file_type().is_file() => {
-            let text = std::fs::read_to_string(&manifest_path)
-                .map_err(|error| GraphError::Io(format!("vault manifest read: {error}")))?;
-            let value: serde_json::Value = serde_json::from_str(&text)
-                .map_err(|error| GraphError::Schema(format!("vault manifest parse: {error}")))?;
-            if value["schema"] != VAULT_MANIFEST_SCHEMA {
-                return Err(GraphError::Schema(format!(
-                    "unsupported vault manifest schema: {:?}",
-                    value["schema"]
-                )));
-            }
-            let files = value["files"].as_array().ok_or_else(|| {
-                GraphError::Schema("vault manifest `files` must be an array".to_owned())
-            })?;
-            return files
-                .iter()
-                .map(|entry| {
-                    let filename = entry.as_str().ok_or_else(|| {
-                        GraphError::Schema("vault manifest filename must be a string".to_owned())
-                    })?;
-                    if !safe_vault_filename(filename) {
-                        return Err(GraphError::Guard(format!(
-                            "unsafe generated vault filename in manifest: {filename:?}"
-                        )));
-                    }
-                    Ok(filename.to_owned())
-                })
-                .collect();
-        }
-        Ok(_) => {
-            return Err(GraphError::Guard(format!(
-                "vault manifest is not a regular file: {}",
-                manifest_path.display()
-            )))
-        }
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
-        Err(error) => return Err(GraphError::Io(format!("inspect vault manifest: {error}"))),
+    if let Some(owned) = read_generated_manifest(
+        vault_dir,
+        VAULT_MANIFEST,
+        LEGACY_VAULT_MANIFEST_SCHEMA,
+        VAULT_MANIFEST_SCHEMA,
+        safe_vault_filename,
+        "vault",
+    )? {
+        return Ok(owned);
     }
 
     let mut owned = HashSet::new();
@@ -405,18 +513,21 @@ fn generated_vault_ownership(vault_dir: &Path) -> Result<HashSet<String>> {
 }
 
 fn write_vault_manifest(vault_dir: &Path, names: &HashSet<String>) -> Result<()> {
-    let mut files: Vec<&str> = names.iter().map(String::as_str).collect();
-    files.sort_unstable();
-    let manifest = serde_json::to_string_pretty(&serde_json::json!({
-        "schema": VAULT_MANIFEST_SCHEMA,
-        "files": files,
-    }))
-    .map_err(|error| GraphError::Schema(format!("vault manifest serialize: {error}")))?;
-    super::atomic_file::write(
-        &vault_dir.join(VAULT_MANIFEST),
-        manifest.as_bytes(),
-        false,
-        "vault manifest",
+    write_vault_manifest_state(vault_dir, names, &BTreeMap::new())
+}
+
+fn write_vault_manifest_state(
+    vault_dir: &Path,
+    names: &HashSet<String>,
+    pending: &BTreeMap<String, String>,
+) -> Result<()> {
+    write_generated_manifest(
+        vault_dir,
+        VAULT_MANIFEST,
+        VAULT_MANIFEST_SCHEMA,
+        names,
+        pending,
+        "vault",
     )
 }
 
@@ -424,13 +535,9 @@ fn write_vault_manifest(vault_dir: &Path, names: &HashSet<String>) -> Result<()>
 fn sync_generated_vault(vault_dir: &Path, rendered: &[(String, String)]) -> Result<()> {
     std::fs::create_dir_all(vault_dir).map_err(|error| GraphError::Io(error.to_string()))?;
     let prior_owned = generated_vault_ownership(vault_dir)?;
-    let current_names: HashSet<String> = rendered
-        .iter()
-        .map(|(filename, _)| filename.clone())
-        .collect();
-
-    for filename in &current_names {
-        if !safe_vault_filename(filename) {
+    let mut current_names = HashSet::with_capacity(rendered.len());
+    for (filename, _) in rendered {
+        if !safe_vault_filename(filename) || !current_names.insert(filename.clone()) {
             return Err(GraphError::Guard(format!(
                 "exporter produced unsafe vault filename: {filename:?}"
             )));
@@ -454,8 +561,8 @@ fn sync_generated_vault(vault_dir: &Path, rendered: &[(String, String)]) -> Resu
         }
     }
 
-    let pending_names: HashSet<String> = prior_owned.union(&current_names).cloned().collect();
-    write_vault_manifest(vault_dir, &pending_names)?;
+    let pending = pending_generated_files(rendered, &prior_owned);
+    write_vault_manifest_state(vault_dir, &prior_owned, &pending)?;
 
     // Remove only files proven to be generated by the prior manifest/signature. This happens
     // before new writes so a legacy raw-label note cannot remain beside its redacted successor.
@@ -469,9 +576,6 @@ fn sync_generated_vault(vault_dir: &Path, rendered: &[(String, String)]) -> Resu
         }
     }
 
-    if pending_names != current_names {
-        write_vault_manifest(vault_dir, &current_names)?;
-    }
     for (filename, content) in rendered {
         super::atomic_file::write(
             &vault_dir.join(filename),
@@ -480,7 +584,7 @@ fn sync_generated_vault(vault_dir: &Path, rendered: &[(String, String)]) -> Resu
             filename,
         )?;
     }
-    Ok(())
+    write_vault_manifest(vault_dir, &current_names)
 }
 
 fn generated_wiki_filename(filename: &str) -> bool {
@@ -695,45 +799,15 @@ fn legacy_generated_wiki_ownership(contents: &BTreeMap<String, String>) -> HashS
 }
 
 fn generated_wiki_ownership(wiki_dir: &Path, claim_unowned: bool) -> Result<HashSet<String>> {
-    let manifest_path = wiki_dir.join(WIKI_MANIFEST);
-    match std::fs::symlink_metadata(&manifest_path) {
-        Ok(metadata) if metadata.file_type().is_file() => {
-            let text = std::fs::read_to_string(&manifest_path)
-                .map_err(|error| GraphError::Io(format!("wiki manifest read: {error}")))?;
-            let value: serde_json::Value = serde_json::from_str(&text)
-                .map_err(|error| GraphError::Schema(format!("wiki manifest parse: {error}")))?;
-            if value["schema"] != WIKI_MANIFEST_SCHEMA {
-                return Err(GraphError::Schema(format!(
-                    "unsupported wiki manifest schema: {:?}",
-                    value["schema"]
-                )));
-            }
-            let files = value["files"].as_array().ok_or_else(|| {
-                GraphError::Schema("wiki manifest `files` must be an array".to_owned())
-            })?;
-            return files
-                .iter()
-                .map(|entry| {
-                    let filename = entry.as_str().ok_or_else(|| {
-                        GraphError::Schema("wiki manifest filename must be a string".to_owned())
-                    })?;
-                    if !generated_wiki_filename(filename) {
-                        return Err(GraphError::Guard(format!(
-                            "invalid generated wiki filename in manifest: {filename:?}"
-                        )));
-                    }
-                    Ok(filename.to_owned())
-                })
-                .collect();
-        }
-        Ok(_) => {
-            return Err(GraphError::Guard(format!(
-                "wiki manifest is not a regular file: {}",
-                manifest_path.display()
-            )))
-        }
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
-        Err(error) => return Err(GraphError::Io(format!("inspect wiki manifest: {error}"))),
+    if let Some(owned) = read_generated_manifest(
+        wiki_dir,
+        WIKI_MANIFEST,
+        LEGACY_WIKI_MANIFEST_SCHEMA,
+        WIKI_MANIFEST_SCHEMA,
+        generated_wiki_filename,
+        "wiki",
+    )? {
+        return Ok(owned);
     }
 
     if !claim_unowned {
@@ -770,18 +844,21 @@ fn generated_wiki_ownership(wiki_dir: &Path, claim_unowned: bool) -> Result<Hash
 }
 
 fn write_wiki_manifest(wiki_dir: &Path, names: &HashSet<String>) -> Result<()> {
-    let mut files: Vec<&str> = names.iter().map(String::as_str).collect();
-    files.sort_unstable();
-    let manifest = serde_json::to_string_pretty(&serde_json::json!({
-        "schema": WIKI_MANIFEST_SCHEMA,
-        "files": files,
-    }))
-    .map_err(|error| GraphError::Schema(format!("wiki manifest serialize: {error}")))?;
-    super::atomic_file::write(
-        &wiki_dir.join(WIKI_MANIFEST),
-        manifest.as_bytes(),
-        false,
-        "wiki manifest",
+    write_wiki_manifest_state(wiki_dir, names, &BTreeMap::new())
+}
+
+fn write_wiki_manifest_state(
+    wiki_dir: &Path,
+    names: &HashSet<String>,
+    pending: &BTreeMap<String, String>,
+) -> Result<()> {
+    write_generated_manifest(
+        wiki_dir,
+        WIKI_MANIFEST,
+        WIKI_MANIFEST_SCHEMA,
+        names,
+        pending,
+        "wiki",
     )
 }
 
@@ -844,8 +921,8 @@ pub(super) fn sync_generated_wiki(
         }
     }
 
-    let pending_names: HashSet<String> = prior_owned.union(&current_names).cloned().collect();
-    write_wiki_manifest(wiki_dir, &pending_names)?;
+    let pending = pending_generated_files(rendered, &prior_owned);
+    write_wiki_manifest_state(wiki_dir, &prior_owned, &pending)?;
 
     for stale in prior_owned.difference(&current_names) {
         if let Err(error) = std::fs::remove_file(wiki_dir.join(stale)) {
@@ -857,9 +934,6 @@ pub(super) fn sync_generated_wiki(
         }
     }
 
-    if pending_names != current_names {
-        write_wiki_manifest(wiki_dir, &current_names)?;
-    }
     for (filename, content) in rendered {
         super::atomic_file::write(
             &wiki_dir.join(filename),
@@ -868,7 +942,7 @@ pub(super) fn sync_generated_wiki(
             filename,
         )?;
     }
-    Ok(())
+    write_wiki_manifest(wiki_dir, &current_names)
 }
 
 fn existing_public_artifact(path: &Path, directory: bool) -> Result<bool> {
@@ -1468,6 +1542,33 @@ mod tests {
         assert!(committed.contains("current.md"));
         assert!(!committed.contains("stale.md"));
         assert!(!committed.contains("blocked.md"));
+    }
+
+    #[test]
+    fn vault_pending_creation_requires_the_recorded_content() {
+        let vault = TempDir::new().unwrap();
+        let expected = "generated note";
+        let pending = std::collections::BTreeMap::from([(
+            "new.md".to_owned(),
+            super::content_generation(expected.as_bytes()),
+        )]);
+        super::write_vault_manifest_state(
+            vault.path(),
+            &std::collections::HashSet::new(),
+            &pending,
+        )
+        .unwrap();
+        fs::write(vault.path().join("new.md"), "user note").unwrap();
+        let rendered = vec![("new.md".to_owned(), expected.to_owned())];
+
+        assert!(sync_generated_vault(vault.path(), &rendered).is_err());
+        assert_eq!(
+            fs::read_to_string(vault.path().join("new.md")).unwrap(),
+            "user note"
+        );
+
+        fs::write(vault.path().join("new.md"), expected).unwrap();
+        sync_generated_vault(vault.path(), &rendered).unwrap();
     }
 
     #[test]
@@ -2100,6 +2201,29 @@ mod tests {
         assert!(committed.contains("index.md"));
         assert!(!committed.contains("node-1.md"));
         assert!(!committed.contains("node-2.md"));
+    }
+
+    #[test]
+    fn wiki_pending_creation_requires_the_recorded_content() {
+        let wiki = TempDir::new().unwrap();
+        let expected = "generated page";
+        let pending = std::collections::BTreeMap::from([(
+            "index.md".to_owned(),
+            super::content_generation(expected.as_bytes()),
+        )]);
+        super::write_wiki_manifest_state(wiki.path(), &std::collections::HashSet::new(), &pending)
+            .unwrap();
+        fs::write(wiki.path().join("index.md"), "user page").unwrap();
+        let rendered = vec![("index.md".to_owned(), expected.to_owned())];
+
+        assert!(sync_generated_wiki(wiki.path(), &rendered, false).is_err());
+        assert_eq!(
+            fs::read_to_string(wiki.path().join("index.md")).unwrap(),
+            "user page"
+        );
+
+        fs::write(wiki.path().join("index.md"), expected).unwrap();
+        sync_generated_wiki(wiki.path(), &rendered, false).unwrap();
     }
 
     #[test]
