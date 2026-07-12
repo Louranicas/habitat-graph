@@ -26,6 +26,7 @@ pub(crate) type NodeIdentityMap = HashMap<NodeId, NodeIdentity>;
 struct ProjectionCandidate {
     graph_index: usize,
     marker: bool,
+    raw_label: Option<String>,
 }
 
 #[derive(Clone, Debug, Eq, Hash, PartialEq)]
@@ -52,14 +53,14 @@ pub(crate) fn node_identity_maps(
 
     for (graph_index, graph) in graphs.iter().enumerate() {
         for node in &graph.nodes {
-            let marker = if is_canonical_redaction_marker(&node.label) {
-                true
+            let (marker, raw_label) = if is_canonical_redaction_marker(&node.label) {
+                (true, None)
             } else {
                 let projected = redact_public_text(&node.label);
                 if projected.as_ref() == node.label {
                     continue;
                 }
-                false
+                (false, Some(node.label.clone()))
             };
             candidates
                 .entry(node.id)
@@ -67,17 +68,27 @@ pub(crate) fn node_identity_maps(
                 .push(ProjectionCandidate {
                     graph_index,
                     marker,
+                    raw_label,
                 });
         }
     }
 
     for (id, group) in candidates {
+        if !group.iter().any(|candidate| candidate.marker) {
+            continue;
+        }
         let lineage_anchor = lineage_root
             .filter(|root| group.iter().any(|candidate| candidate.graph_index == *root));
 
         if let Some(anchor) = lineage_anchor {
+            let anchor_raw_label = group
+                .iter()
+                .find(|candidate| candidate.graph_index == anchor)
+                .and_then(|candidate| candidate.raw_label.clone());
             for candidate in group {
-                maps[candidate.graph_index].insert(id, NodeIdentity::Projected(id, anchor));
+                if candidate.marker || candidate.raw_label == anchor_raw_label {
+                    maps[candidate.graph_index].insert(id, NodeIdentity::Projected(id, anchor));
+                }
             }
         } else {
             for candidate in group.into_iter().filter(|candidate| candidate.marker) {

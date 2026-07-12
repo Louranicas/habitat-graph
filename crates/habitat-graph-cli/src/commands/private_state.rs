@@ -11,8 +11,12 @@ const PRIVATE_STATE_METADATA: &str = "_habitat_graph_private_state";
 const LEGACY_PRIVATE_STATE_SCHEMA: &str = "habitat-graph.private-state.v1";
 const PRIVATE_STATE_SCHEMA: &str = "habitat-graph.private-state.v2";
 const SNAPSHOT_SEPARATOR: &str = ".snapshot-";
+const CONTEXT_SEPARATOR: &str = ".context-";
+const MIGRATION_CONFLICT_SEPARATOR: &str = ".migration-conflict-";
+const ADD_JOURNAL_SUFFIX: &str = ".add-journal";
+const MAX_SNAPSHOTS: usize = 16;
 
-#[derive(Clone, Eq, PartialEq)]
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub(super) struct StoredGraph {
     pub(super) graph: Graph,
     pub(super) public_generation: Option<String>,
@@ -21,7 +25,7 @@ pub(super) struct StoredGraph {
 
 pub(super) fn path_for_output(output: &Path, legacy: &Path) -> Result<PathBuf> {
     #[cfg(not(unix))]
-    remove(legacy, "unsupported legacy private state")?;
+    remove_family(legacy, "unsupported legacy private state")?;
 
     let parent = output
         .parent()
@@ -48,8 +52,12 @@ pub(super) fn path_for_output(output: &Path, legacy: &Path) -> Result<PathBuf> {
             .ok_or_else(|| GraphError::Io("output path has no filename".to_owned()))?,
     );
     let key = output_key(&canonical_output);
-    let state_path = state_dir.join(format!("{key}.json"));
-    migrate(legacy, &state_path, "legacy private state")?;
+    let unscoped_state_path = state_dir.join(format!("{key}.json"));
+    let context = git_context_key(&git_dir)?;
+    let state_path = state_dir.join(format!("{key}{CONTEXT_SEPARATOR}{context}.json"));
+    ensure_no_family_conflicts(&state_path)?;
+    migrate_family(&unscoped_state_path, &state_path, "unscoped private state")?;
+    migrate_family(legacy, &state_path, "legacy private state")?;
     Ok(state_path)
 }
 
@@ -215,46 +223,61 @@ pub(super) fn load_matching(
     public_semantic_generation: Option<&str>,
     context: &str,
 ) -> Result<Option<StoredGraph>> {
-    if let Some(stored) = read(path, context)? {
-        if matches_public(&stored, public_generation, public_semantic_generation) {
-            return Ok(Some(stored));
-        }
-    }
+    let current = read(path, context)?;
 
     if let Some(generation) = public_generation {
+        let mut exact = Vec::new();
+        if current
+            .as_ref()
+            .is_some_and(|stored| stored.public_generation.as_deref() == Some(generation))
+        {
+            exact.extend(current.iter().cloned());
+        }
         let snapshot = snapshot_path(path, generation)?;
         if let Some(stored) = read(&snapshot, context)? {
-            if matches_public(&stored, public_generation, public_semantic_generation) {
-                return Ok(Some(stored));
+            if stored.public_generation.as_deref() == Some(generation) {
+                exact.push(stored);
             }
+        }
+        if let Some(stored) = select_unique_state(exact.iter(), path)? {
+            return Ok(Some(stored));
         }
     }
 
     let Some(semantic_generation) = public_semantic_generation else {
         return Ok(None);
     };
+    let mut states = current.into_iter().collect::<Vec<_>>();
     let mut candidates = snapshot_candidates(path)?;
     candidates.sort_unstable();
-    let mut selected: Option<StoredGraph> = None;
     for candidate in candidates {
-        let Some(stored) = read(&candidate, context)? else {
-            continue;
-        };
-        if stored.public_semantic_generation.as_deref() != Some(semantic_generation) {
-            continue;
+        if let Some(stored) = read(&candidate, context)? {
+            states.push(stored);
         }
-        if selected
-            .as_ref()
-            .is_some_and(|existing| existing.graph != stored.graph)
-        {
+    }
+    select_unique_state(
+        states.iter().filter(|stored| {
+            stored.public_semantic_generation.as_deref() == Some(semantic_generation)
+        }),
+        path,
+    )
+}
+
+fn select_unique_state<'a>(
+    candidates: impl Iterator<Item = &'a StoredGraph>,
+    path: &Path,
+) -> Result<Option<StoredGraph>> {
+    let mut selected: Option<&StoredGraph> = None;
+    for candidate in candidates {
+        if selected.is_some_and(|existing| existing.graph != candidate.graph) {
             return Err(GraphError::Guard(format!(
-                "multiple private state snapshots match the public graph: {}",
+                "multiple private states match the public graph: {}",
                 path.display()
             )));
         }
-        selected = Some(stored);
+        selected = Some(candidate);
     }
-    Ok(selected)
+    Ok(selected.cloned())
 }
 
 pub(super) fn write_state(path: &Path, bytes: &[u8]) -> Result<()> {
@@ -267,7 +290,7 @@ pub(super) fn write_state(path: &Path, bytes: &[u8]) -> Result<()> {
         Err(error) => return Err(error),
     };
     if let Some(existing) = existing {
-        if existing.public_generation != replacement.public_generation {
+        if existing != replacement && existing.public_generation != replacement.public_generation {
             if let Some(existing_generation) = existing.public_generation.as_deref() {
                 let existing_bytes = std::fs::read(path)
                     .map_err(|error| GraphError::Io(format!("read private state: {error}")))?;
@@ -285,7 +308,8 @@ pub(super) fn write_state(path: &Path, bytes: &[u8]) -> Result<()> {
             }
         }
     }
-    write(path, bytes)
+    write(path, bytes)?;
+    prune_snapshots(path)
 }
 
 fn snapshot_path(path: &Path, public_generation: &str) -> Result<PathBuf> {
@@ -330,10 +354,39 @@ fn snapshot_candidates(path: &Path) -> Result<Vec<PathBuf>> {
     Ok(candidates)
 }
 
+fn prune_snapshots(path: &Path) -> Result<()> {
+    let candidates = snapshot_candidates(path)?;
+    if candidates.len() <= MAX_SNAPSHOTS {
+        return Ok(());
+    }
+    let mut dated = Vec::with_capacity(candidates.len());
+    for candidate in candidates {
+        let metadata = std::fs::symlink_metadata(&candidate)
+            .map_err(|error| GraphError::Io(format!("inspect private state snapshot: {error}")))?;
+        if !metadata.file_type().is_file() {
+            return Err(GraphError::Guard(format!(
+                "private state snapshot is not a regular file: {}",
+                candidate.display()
+            )));
+        }
+        let modified = metadata
+            .modified()
+            .unwrap_or(std::time::SystemTime::UNIX_EPOCH);
+        dated.push((modified, candidate));
+    }
+    dated.sort_unstable();
+    let remove_count = dated.len().saturating_sub(MAX_SNAPSHOTS);
+    for (_, candidate) in dated.into_iter().take(remove_count) {
+        remove(&candidate, "expired private state snapshot")?;
+    }
+    Ok(())
+}
+
 pub(super) fn migrate(legacy: &Path, current: &Path, context: &str) -> Result<()> {
     if legacy == current {
         return Ok(());
     }
+    ensure_no_migration_conflicts(current)?;
     ensure(current)?;
     let metadata = match std::fs::symlink_metadata(legacy) {
         Ok(metadata) => metadata,
@@ -352,11 +405,179 @@ pub(super) fn migrate(legacy: &Path, current: &Path, context: &str) -> Result<()
         )));
     }
     ensure(legacy)?;
-    if !current.exists() {
-        let bytes = read_regular(legacy, &metadata, context)?;
+    let bytes = read_regular(legacy, &metadata, context)?;
+    let current_metadata = match std::fs::symlink_metadata(current) {
+        Ok(metadata) => Some(metadata),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
+        Err(error) => {
+            return Err(GraphError::Io(format!(
+                "inspect migrated {context} {}: {error}",
+                current.display()
+            )))
+        }
+    };
+    if let Some(current_metadata) = current_metadata {
+        if !current_metadata.file_type().is_file() {
+            return Err(GraphError::Guard(format!(
+                "migrated {context} is not a regular file: {}",
+                current.display()
+            )));
+        }
+        let current_bytes = read_regular(current, &current_metadata, context)?;
+        if current_bytes != bytes {
+            let conflict = migration_conflict_path(current, &bytes)?;
+            match std::fs::symlink_metadata(&conflict) {
+                Ok(conflict_metadata) => {
+                    if !conflict_metadata.file_type().is_file()
+                        || read_regular(&conflict, &conflict_metadata, context)? != bytes
+                    {
+                        return Err(GraphError::Guard(format!(
+                            "private state migration conflict is ambiguous: {}",
+                            conflict.display()
+                        )));
+                    }
+                }
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                    write(&conflict, &bytes)?;
+                }
+                Err(error) => {
+                    return Err(GraphError::Io(format!(
+                        "inspect private state migration conflict: {error}"
+                    )))
+                }
+            }
+            remove(legacy, context)?;
+            return Err(GraphError::Guard(format!(
+                "conflicting {context} preserved at {}",
+                conflict.display()
+            )));
+        }
+    } else {
         write(current, &bytes)?;
     }
     remove(legacy, context)
+}
+
+fn migrate_family(legacy: &Path, current: &Path, context: &str) -> Result<()> {
+    for (source, suffix) in family_members(legacy)? {
+        let filename = current
+            .file_name()
+            .ok_or_else(|| GraphError::Io("private state path has no filename".to_owned()))?;
+        let mut destination_name = OsString::from(filename);
+        destination_name.push(&suffix);
+        let destination = current.with_file_name(destination_name);
+        migrate(&source, &destination, context)?;
+    }
+    Ok(())
+}
+
+#[cfg(not(unix))]
+fn remove_family(path: &Path, context: &str) -> Result<()> {
+    for (member, _) in family_members(path)? {
+        remove(&member, context)?;
+    }
+    Ok(())
+}
+
+fn family_members(path: &Path) -> Result<Vec<(PathBuf, String)>> {
+    let parent = path
+        .parent()
+        .filter(|parent| !parent.as_os_str().is_empty())
+        .unwrap_or_else(|| Path::new("."));
+    let base = path
+        .file_name()
+        .ok_or_else(|| GraphError::Io("private state path has no filename".to_owned()))?
+        .to_string_lossy();
+    let entries = match std::fs::read_dir(parent) {
+        Ok(entries) => entries,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
+        Err(error) => {
+            return Err(GraphError::Io(format!(
+                "list private state family: {error}"
+            )))
+        }
+    };
+    let mut members = Vec::new();
+    for entry in entries {
+        let entry =
+            entry.map_err(|error| GraphError::Io(format!("list private state family: {error}")))?;
+        let filename = entry.file_name();
+        let filename = filename.to_string_lossy();
+        let Some(suffix) = filename.strip_prefix(base.as_ref()) else {
+            continue;
+        };
+        if suffix.is_empty()
+            || suffix.starts_with(SNAPSHOT_SEPARATOR)
+            || suffix.starts_with(ADD_JOURNAL_SUFFIX)
+            || suffix.starts_with(MIGRATION_CONFLICT_SEPARATOR)
+        {
+            members.push((entry.path(), suffix.to_owned()));
+        }
+    }
+    members.sort_unstable_by(|left, right| left.0.cmp(&right.0));
+    Ok(members)
+}
+
+fn migration_conflict_path(path: &Path, bytes: &[u8]) -> Result<PathBuf> {
+    let filename = path
+        .file_name()
+        .ok_or_else(|| GraphError::Io("private state path has no filename".to_owned()))?;
+    let mut conflict_name = OsString::from(filename);
+    conflict_name.push(MIGRATION_CONFLICT_SEPARATOR);
+    conflict_name.push(generation(bytes));
+    Ok(path.with_file_name(conflict_name))
+}
+
+fn ensure_no_migration_conflicts(path: &Path) -> Result<()> {
+    let parent = path
+        .parent()
+        .filter(|parent| !parent.as_os_str().is_empty())
+        .unwrap_or_else(|| Path::new("."));
+    let filename = path
+        .file_name()
+        .ok_or_else(|| GraphError::Io("private state path has no filename".to_owned()))?;
+    let prefix = format!(
+        "{}{MIGRATION_CONFLICT_SEPARATOR}",
+        filename.to_string_lossy()
+    );
+    let entries = match std::fs::read_dir(parent) {
+        Ok(entries) => entries,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(error) => {
+            return Err(GraphError::Io(format!(
+                "list private state migration conflicts: {error}"
+            )))
+        }
+    };
+    for entry in entries {
+        let entry = entry.map_err(|error| {
+            GraphError::Io(format!("list private state migration conflicts: {error}"))
+        })?;
+        let filename = entry.file_name();
+        if filename
+            .to_string_lossy()
+            .strip_prefix(&prefix)
+            .is_some_and(is_generation)
+        {
+            return Err(GraphError::Guard(format!(
+                "unresolved private state migration conflict: {}",
+                entry.path().display()
+            )));
+        }
+    }
+    Ok(())
+}
+
+fn ensure_no_family_conflicts(path: &Path) -> Result<()> {
+    for (member, suffix) in family_members(path)? {
+        if suffix.contains(MIGRATION_CONFLICT_SEPARATOR) {
+            return Err(GraphError::Guard(format!(
+                "unresolved private state migration conflict: {}",
+                member.display()
+            )));
+        }
+    }
+    Ok(())
 }
 
 fn read_regular(path: &Path, expected: &std::fs::Metadata, context: &str) -> Result<Vec<u8>> {
@@ -477,6 +698,36 @@ fn valid_git_dir(path: &Path) -> Result<bool> {
         .is_ok_and(|metadata| metadata.file_type().is_file()))
 }
 
+fn git_context_key(git_dir: &Path) -> Result<String> {
+    let head = git_dir.join("HEAD");
+    let metadata = std::fs::symlink_metadata(&head)
+        .map_err(|error| GraphError::Io(format!("inspect Git HEAD: {error}")))?;
+    if !metadata.file_type().is_file() {
+        return Err(GraphError::Guard(format!(
+            "Git HEAD is not a regular file: {}",
+            head.display()
+        )));
+    }
+    let bytes = read_regular(&head, &metadata, "Git HEAD")?;
+    let text = std::str::from_utf8(&bytes)
+        .map_err(|error| GraphError::Guard(format!("Git HEAD is not UTF-8: {error}")))?;
+    let identity = text.trim();
+    let valid = identity
+        .strip_prefix("ref:")
+        .map(str::trim)
+        .is_some_and(|reference| {
+            reference.starts_with("refs/")
+                && !reference.is_empty()
+                && !reference.chars().any(char::is_control)
+        })
+        || matches!(identity.len(), 40 | 64)
+            && identity.bytes().all(|byte| byte.is_ascii_hexdigit());
+    if !valid {
+        return Err(GraphError::Guard("invalid Git HEAD".to_owned()));
+    }
+    Ok(generation(identity.as_bytes()))
+}
+
 #[cfg(unix)]
 fn output_key(path: &Path) -> String {
     use std::os::unix::ffi::OsStrExt as _;
@@ -585,10 +836,27 @@ pub(super) fn remove(path: &Path, context: &str) -> Result<()> {
 
 #[cfg(test)]
 mod tests {
+    use std::ffi::OsString;
     use std::fs;
+    use std::path::{Path, PathBuf};
 
     use habitat_graph_core::Graph;
     use tempfile::TempDir;
+
+    use super::{ADD_JOURNAL_SUFFIX, SNAPSHOT_SEPARATOR};
+
+    fn sibling(path: &Path, suffix: &str) -> PathBuf {
+        let mut name = OsString::from(path.file_name().unwrap());
+        name.push(suffix);
+        path.with_file_name(name)
+    }
+
+    fn create_git(root: &Path, head: &str) -> PathBuf {
+        let git_dir = root.join(".git");
+        fs::create_dir_all(git_dir.join("objects")).unwrap();
+        fs::write(git_dir.join("HEAD"), head).unwrap();
+        git_dir
+    }
 
     #[test]
     fn worktree_git_file_uses_its_private_git_directory() {
@@ -703,15 +971,199 @@ mod tests {
         );
     }
 
+    #[test]
+    fn exact_snapshot_precedes_semantically_matching_current_state() {
+        let root = TempDir::new().unwrap();
+        let path = root.path().join("state.json");
+        let mut first = Graph::new();
+        first.manifest.tool_version = "first-private-lineage".to_owned();
+        let mut second = Graph::new();
+        second.manifest.tool_version = "second-private-lineage".to_owned();
+        let first_generation = super::generation(b"first formatting");
+        let second_generation = super::generation(b"second formatting");
+        let semantic = super::semantic_generation(&Graph::new()).unwrap();
+
+        let first_bytes = super::serialize(&first, &first_generation, &semantic).unwrap();
+        super::write_state(&path, &first_bytes).unwrap();
+        let second_bytes = super::serialize(&second, &second_generation, &semantic).unwrap();
+        super::write_state(&path, &second_bytes).unwrap();
+
+        let restored = super::load_matching(
+            &path,
+            Some(&first_generation),
+            Some(&semantic),
+            "test private state",
+        )
+        .unwrap()
+        .unwrap();
+        assert_eq!(
+            restored.graph.manifest.tool_version,
+            "first-private-lineage"
+        );
+    }
+
+    #[test]
+    fn semantic_fallback_rejects_current_snapshot_ambiguity() {
+        let root = TempDir::new().unwrap();
+        let path = root.path().join("state.json");
+        let mut first = Graph::new();
+        first.manifest.tool_version = "first-private-lineage".to_owned();
+        let mut second = Graph::new();
+        second.manifest.tool_version = "second-private-lineage".to_owned();
+        let first_generation = super::generation(b"first formatting");
+        let second_generation = super::generation(b"second formatting");
+        let unmatched_generation = super::generation(b"unmatched formatting");
+        let semantic = super::semantic_generation(&Graph::new()).unwrap();
+
+        super::write_state(
+            &path,
+            &super::serialize(&first, &first_generation, &semantic).unwrap(),
+        )
+        .unwrap();
+        super::write_state(
+            &path,
+            &super::serialize(&second, &second_generation, &semantic).unwrap(),
+        )
+        .unwrap();
+
+        let error = super::load_matching(
+            &path,
+            Some(&unmatched_generation),
+            Some(&semantic),
+            "test private state",
+        )
+        .unwrap_err();
+        assert_eq!(error.kind(), "guard");
+    }
+
+    #[test]
+    fn git_branches_keep_byte_identical_public_variants_separate() {
+        let root = TempDir::new().unwrap();
+        let git_dir = create_git(root.path(), "ref: refs/heads/alpha\n");
+        let output_dir = root.path().join("public");
+        fs::create_dir_all(&output_dir).unwrap();
+        let output = output_dir.join("graph.json");
+        let legacy = output_dir.join(".habitat-graph-state.json");
+        let generation = super::generation(b"shared public graph");
+        let semantic = super::semantic_generation(&Graph::new()).unwrap();
+        let mut alpha = Graph::new();
+        alpha.manifest.tool_version = "alpha-private-lineage".to_owned();
+        let mut beta = Graph::new();
+        beta.manifest.tool_version = "beta-private-lineage".to_owned();
+
+        let alpha_path = super::path_for_output(&output, &legacy).unwrap();
+        super::write_state(
+            &alpha_path,
+            &super::serialize(&alpha, &generation, &semantic).unwrap(),
+        )
+        .unwrap();
+        fs::write(git_dir.join("HEAD"), "ref: refs/heads/beta\n").unwrap();
+        let beta_path = super::path_for_output(&output, &legacy).unwrap();
+        assert_ne!(alpha_path, beta_path);
+        super::write_state(
+            &beta_path,
+            &super::serialize(&beta, &generation, &semantic).unwrap(),
+        )
+        .unwrap();
+
+        fs::write(git_dir.join("HEAD"), "ref: refs/heads/alpha\n").unwrap();
+        let restored_path = super::path_for_output(&output, &legacy).unwrap();
+        let restored = super::read(&restored_path, "test private state")
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            restored.graph.manifest.tool_version,
+            "alpha-private-lineage"
+        );
+    }
+
+    #[test]
+    fn git_private_path_migrates_the_complete_legacy_family() {
+        let root = TempDir::new().unwrap();
+        create_git(root.path(), "ref: refs/heads/main\n");
+        let output_dir = root.path().join("public");
+        fs::create_dir_all(&output_dir).unwrap();
+        let legacy = output_dir.join(".habitat-graph-state.json");
+        let generation = super::generation(b"legacy snapshot");
+        let legacy_snapshot = sibling(&legacy, &format!("{SNAPSHOT_SEPARATOR}{generation}"));
+        let legacy_journal = sibling(&legacy, ADD_JOURNAL_SUFFIX);
+        fs::write(&legacy, "legacy state").unwrap();
+        fs::write(&legacy_snapshot, "legacy snapshot").unwrap();
+        fs::write(&legacy_journal, "legacy journal").unwrap();
+
+        let state = super::path_for_output(&output_dir.join("graph.json"), &legacy).unwrap();
+        let snapshot = sibling(&state, &format!("{SNAPSHOT_SEPARATOR}{generation}"));
+        let journal = sibling(&state, ADD_JOURNAL_SUFFIX);
+
+        assert_eq!(fs::read_to_string(state).unwrap(), "legacy state");
+        assert_eq!(fs::read_to_string(snapshot).unwrap(), "legacy snapshot");
+        assert_eq!(fs::read_to_string(journal).unwrap(), "legacy journal");
+        assert!(!legacy.exists());
+        assert!(!legacy_snapshot.exists());
+        assert!(!legacy_journal.exists());
+    }
+
+    #[test]
+    fn migration_conflicts_are_preserved_and_remain_blocking() {
+        let root = TempDir::new().unwrap();
+        let legacy = root.path().join("legacy-state.json");
+        let current = root.path().join("current-state.json");
+        fs::write(&legacy, "new private lineage").unwrap();
+        fs::write(&current, "old private lineage").unwrap();
+
+        let error = super::migrate(&legacy, &current, "test private state").unwrap_err();
+        assert_eq!(error.kind(), "guard");
+        assert!(!legacy.exists());
+        let conflict = super::migration_conflict_path(&current, b"new private lineage").unwrap();
+        assert_eq!(
+            fs::read_to_string(&conflict).unwrap(),
+            "new private lineage"
+        );
+        let retry = super::migrate(&legacy, &current, "test private state").unwrap_err();
+        assert_eq!(retry.kind(), "guard");
+    }
+
+    #[test]
+    fn private_state_snapshot_retention_is_bounded() {
+        let root = TempDir::new().unwrap();
+        let path = root.path().join("state.json");
+        let semantic = super::semantic_generation(&Graph::new()).unwrap();
+
+        for index in 0..(super::MAX_SNAPSHOTS + 4) {
+            let mut graph = Graph::new();
+            graph.manifest.tool_version = format!("private-lineage-{index}");
+            let generation = super::generation(format!("public-{index}").as_bytes());
+            let bytes = super::serialize(&graph, &generation, &semantic).unwrap();
+            super::write_state(&path, &bytes).unwrap();
+        }
+
+        assert_eq!(
+            super::snapshot_candidates(&path).unwrap().len(),
+            super::MAX_SNAPSHOTS
+        );
+    }
+
     #[cfg(not(unix))]
     #[test]
     fn unsupported_platform_removes_legacy_state_before_path_resolution() {
         let root = TempDir::new().unwrap();
         let output_dir = root.path().join("missing");
         let legacy = root.path().join(".habitat-graph-state.json");
+        let snapshot = sibling(
+            &legacy,
+            &format!(
+                "{SNAPSHOT_SEPARATOR}{}",
+                super::generation(b"legacy snapshot")
+            ),
+        );
+        let journal = sibling(&legacy, ADD_JOURNAL_SUFFIX);
         fs::write(&legacy, "raw state").unwrap();
+        fs::write(&snapshot, "raw snapshot").unwrap();
+        fs::write(&journal, "raw journal").unwrap();
 
         assert!(super::path_for_output(&output_dir.join("graph.json"), &legacy).is_err());
         assert!(!legacy.exists());
+        assert!(!snapshot.exists());
+        assert!(!journal.exists());
     }
 }
