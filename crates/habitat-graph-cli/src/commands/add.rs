@@ -18,7 +18,7 @@
 //! # Pipeline
 //!
 //! ```text
-//! URL → SSRF check → fetch → size-cap → temp file → extract → merge → write graph.json
+//! URL → SSRF check → fetch → size-cap → temp file → extract → private-state merge → graph.json
 //! ```
 //!
 //! The extension inferred from the URL path determines which extractor runs. Unknown extensions
@@ -30,11 +30,12 @@
 //! [`run`] immediately returns exit code `2` with a message explaining the missing feature. All
 //! other logic (SSRF validation, extension inference, merge) is always compiled and fully tested.
 
+use std::ffi::OsString;
 use std::io::Write as _;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::time::Duration;
 
-use habitat_graph_core::{GraphError, Result};
+use habitat_graph_core::{Graph, GraphError, Result, SCHEMA_VERSION};
 use habitat_graph_source::ssrf::is_safe_url;
 
 // ── Constants ─────────────────────────────────────────────────────────────────
@@ -48,6 +49,9 @@ pub const MAX_CONTENT_BYTES: usize = 10 * 1024 * 1024;
 // Only actively used when `--features live` is enabled.
 #[allow(dead_code)]
 pub const FETCH_TIMEOUT: Duration = Duration::from_secs(30);
+
+const PRIVATE_STATE_SUFFIX: &str = ".habitat-graph-state.json";
+const SHARED_PRIVATE_STATE: &str = ".habitat-graph-state.json";
 
 // ── Extension inference ───────────────────────────────────────────────────────
 
@@ -197,8 +201,8 @@ pub fn extract_from_bytes(bytes: &[u8], ext: &str) -> Result<habitat_graph_core:
 
 // ── Graph merge & persistence ─────────────────────────────────────────────────
 
-/// Loads the graph at `out` (or an empty graph if absent/empty), merges `new_graph` in, and
-/// writes the result back to `out`.
+/// Loads matching owner-only graph state when available, otherwise uses `out` (or an empty graph
+/// if absent/empty), merges `new_graph` in, and writes both projections back.
 ///
 /// # Errors
 ///
@@ -207,28 +211,8 @@ pub fn extract_from_bytes(bytes: &[u8], ext: &str) -> Result<habitat_graph_core:
 ///   serialization failure. A pre-existing `out` that fails to parse aborts the merge (the file
 ///   is left untouched) instead of being silently treated as an empty graph — overwriting it
 ///   would destroy any prior content that is not otherwise regenerable.
-pub fn merge_into_output(new_graph: habitat_graph_core::Graph, out: &Path) -> Result<()> {
-    // Load existing graph (or start fresh).
-    let prior = if out.exists() {
-        let text = std::fs::read_to_string(out)
-            .map_err(|e| GraphError::Io(format!("read {}: {e}", out.display())))?;
-        if text.trim().is_empty() {
-            habitat_graph_core::Graph::default()
-        } else {
-            // Propagate parse failures instead of swallowing them: an existing `out` that fails
-            // to parse must abort the merge (leaving the file untouched) rather than silently
-            // being treated as empty, which would overwrite — and destroy — the prior graph.
-            // This matches both this function's documented `# Errors` contract above and the
-            // git merge-driver's fail-closed handling of the same `from_node_link` call.
-            habitat_graph_serve::from_node_link(&text)?
-        }
-    } else {
-        habitat_graph_core::Graph::default()
-    };
-
-    let merged = habitat_graph_build::merge(new_graph, prior).sorted();
-
-    // Ensure parent directory exists.
+/// - [`GraphError::Guard`] when owner-only private state cannot be enforced.
+pub fn merge_into_output(new_graph: Graph, out: &Path) -> Result<()> {
     if let Some(parent) = out.parent() {
         if !parent.as_os_str().is_empty() {
             std::fs::create_dir_all(parent)
@@ -236,9 +220,107 @@ pub fn merge_into_output(new_graph: habitat_graph_core::Graph, out: &Path) -> Re
         }
     }
 
+    let state_path = private_state_path(out)?;
+    super::private_state::ensure(&state_path)?;
+    let public_prior = load_public_output(out)?;
+    let private_prior = load_private_state(&state_path)?;
+    let replaying_legacy_projection = match (&private_prior, &public_prior) {
+        (None, Some(public)) => public_topology(&new_graph)? == public_topology(public)?,
+        _ => false,
+    };
+    let prior = select_prior(private_prior, public_prior)?;
+    let merged = if replaying_legacy_projection {
+        new_graph.sorted()
+    } else {
+        habitat_graph_build::merge(new_graph, prior).sorted()
+    };
+
+    let state_json = merged.to_json()?;
     let json = habitat_graph_export::to_node_link(&merged)?;
+    super::private_state::write(&state_path, state_json.as_bytes())?;
     std::fs::write(out, json.as_bytes())
         .map_err(|e| GraphError::Io(format!("write {}: {e}", out.display())))
+}
+
+fn private_state_path(out: &Path) -> Result<PathBuf> {
+    let parent = out.parent().unwrap_or_else(|| Path::new(""));
+    let filename = out
+        .file_name()
+        .ok_or_else(|| GraphError::Io("output path has no filename".to_owned()))?;
+    if filename == "graph.json" {
+        return Ok(parent.join(SHARED_PRIVATE_STATE));
+    }
+    let mut state_filename = OsString::from(".");
+    state_filename.push(filename);
+    state_filename.push(PRIVATE_STATE_SUFFIX);
+    Ok(parent.join(state_filename))
+}
+
+fn load_public_output(out: &Path) -> Result<Option<Graph>> {
+    let metadata = match std::fs::symlink_metadata(out) {
+        Ok(metadata) => metadata,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(error) => {
+            return Err(GraphError::Io(format!(
+                "inspect output {}: {error}",
+                out.display()
+            )))
+        }
+    };
+    if !metadata.file_type().is_file() {
+        return Err(GraphError::Guard(format!(
+            "output is not a regular file: {}",
+            out.display()
+        )));
+    }
+    let text = std::fs::read_to_string(out)
+        .map_err(|e| GraphError::Io(format!("read {}: {e}", out.display())))?;
+    if text.trim().is_empty() {
+        Ok(Some(Graph::default()))
+    } else {
+        habitat_graph_serve::from_node_link(&text).map(Some)
+    }
+}
+
+fn load_private_state(path: &Path) -> Result<Option<Graph>> {
+    if !path.exists() {
+        return Ok(None);
+    }
+    let text = std::fs::read_to_string(path)
+        .map_err(|error| GraphError::Io(format!("read private add state: {error}")))?;
+    let graph = Graph::from_json(&text)?;
+    if graph.schema != SCHEMA_VERSION {
+        return Err(GraphError::Schema(format!(
+            "private add state schema mismatch: stored={:?}, current={SCHEMA_VERSION:?}",
+            graph.schema
+        )));
+    }
+    Ok(Some(graph))
+}
+
+fn select_prior(private: Option<Graph>, public: Option<Graph>) -> Result<Graph> {
+    match (private, public) {
+        (Some(private), Some(public)) => {
+            let private_projection = habitat_graph_export::to_node_link(&private)?;
+            let public_projection = habitat_graph_export::to_node_link(&public)?;
+            if private_projection == public_projection {
+                Ok(private)
+            } else {
+                Ok(public)
+            }
+        }
+        (Some(private), None) => Ok(private),
+        (None, Some(public)) => Ok(public),
+        (None, None) => Ok(Graph::default()),
+    }
+}
+
+fn public_topology(graph: &Graph) -> Result<String> {
+    let mut topology = graph.clone();
+    for node in &mut topology.nodes {
+        node.source_file.clear();
+    }
+    habitat_graph_export::to_node_link(&topology)
 }
 
 // ── Public API ────────────────────────────────────────────────────────────────
@@ -697,6 +779,28 @@ mod tests {
     }
 
     #[test]
+    fn merge_prefers_a_newer_public_output_over_stale_private_state() {
+        let d = tdir();
+        let out = d.join("g.json");
+        let original = extract_from_bytes(b"fn original_fn() {}", "rs").expect("extract");
+        merge_into_output(original, &out).expect("write original");
+
+        let replacement = extract_from_bytes(b"fn replacement_fn() {}", "rs").expect("extract");
+        fs::write(
+            &out,
+            habitat_graph_export::to_node_link(&replacement).expect("render replacement"),
+        )
+        .unwrap();
+
+        let added = extract_from_bytes(b"fn added_fn() {}", "rs").expect("extract");
+        merge_into_output(added, &out).expect("merge added");
+        let text = fs::read_to_string(&out).unwrap();
+        assert!(!text.contains("original_fn"));
+        assert!(text.contains("replacement_fn"));
+        assert!(text.contains("added_fn"));
+    }
+
+    #[test]
     fn merge_of_redacted_public_json_preserves_ids_and_edges() {
         let d = tdir();
         let out = d.join("g.json");
@@ -725,6 +829,72 @@ mod tests {
             assert!(redacted_ids.contains(&id), "stable id {id} was lost");
         }
         assert_eq!(value["links"].as_array().expect("links").len(), 1);
+    }
+
+    #[test]
+    fn readding_secret_source_keeps_public_topology_stable() {
+        let d = tdir();
+        let out = d.join("g.json");
+        let source = b"fn api_key_alpha() { api_key_beta(); } fn api_key_beta() {}";
+
+        let first = extract_from_bytes(source, "rs").expect("extract first");
+        merge_into_output(first, &out).expect("first merge");
+        let first_value: serde_json::Value =
+            serde_json::from_str(&fs::read_to_string(&out).expect("read first")).expect("parse");
+
+        let replay = extract_from_bytes(source, "rs").expect("extract replay");
+        merge_into_output(replay, &out).expect("replay merge");
+        let replay_text = fs::read_to_string(&out).expect("read replay");
+        let replay_value: serde_json::Value = serde_json::from_str(&replay_text).expect("parse");
+
+        let public_nodes = |value: &serde_json::Value| {
+            value["nodes"]
+                .as_array()
+                .expect("nodes")
+                .iter()
+                .map(|node| (node["id"].clone(), node["label"].clone()))
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(public_nodes(&replay_value), public_nodes(&first_value));
+        assert_eq!(replay_value["links"], first_value["links"]);
+        assert_eq!(replay_value["nodes"].as_array().expect("nodes").len(), 2);
+        assert_eq!(replay_value["links"].as_array().expect("links").len(), 1);
+        assert!(!replay_text.contains("api_key_alpha"));
+
+        let state = super::private_state_path(&out).expect("state path");
+        let state_text = fs::read_to_string(&state).expect("private state");
+        assert!(state_text.contains("api_key_alpha"));
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt as _;
+            assert_eq!(
+                fs::metadata(state).unwrap().permissions().mode() & 0o777,
+                0o600
+            );
+        }
+    }
+
+    #[test]
+    fn readding_legacy_secret_projection_migrates_without_inflation() {
+        let d = tdir();
+        let out = d.join("g.json");
+        let source = b"fn api_key_alpha() { api_key_beta(); } fn api_key_beta() {}";
+        let legacy_raw = extract_from_bytes(source, "rs").expect("extract legacy");
+        fs::write(
+            &out,
+            habitat_graph_export::to_node_link(&legacy_raw).expect("render legacy"),
+        )
+        .unwrap();
+
+        let replay = extract_from_bytes(source, "rs").expect("extract replay");
+        merge_into_output(replay, &out).expect("migrate replay");
+        let value: serde_json::Value =
+            serde_json::from_str(&fs::read_to_string(&out).unwrap()).unwrap();
+        assert_eq!(value["nodes"].as_array().unwrap().len(), 2);
+        assert_eq!(value["links"].as_array().unwrap().len(), 1);
+
+        let state = super::private_state_path(&out).unwrap();
+        assert!(fs::read_to_string(state).unwrap().contains("api_key_alpha"));
     }
 
     #[test]

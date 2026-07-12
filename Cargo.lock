@@ -790,6 +790,7 @@ dependencies = [
  "habitat-graph-analyze",
  "habitat-graph-core",
  "serde_json",
+ "unicode-normalization",
 ]
 
 [[package]]

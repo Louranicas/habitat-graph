@@ -9,6 +9,8 @@ use habitat_graph_core::{Graph, GraphError, Result};
 /// the conservative legacy signature during first migration) may be removed on a later sync.
 const VAULT_MANIFEST: &str = ".habitat-graph-generated.json";
 const VAULT_MANIFEST_SCHEMA: &str = "habitat-graph.vault-manifest.v1";
+const WIKI_MANIFEST: &str = ".habitat-graph-generated.json";
+const WIKI_MANIFEST_SCHEMA: &str = "habitat-graph.wiki-manifest.v1";
 
 /// Optional PB exporter artifacts to emit alongside the always-written core artifacts.
 ///
@@ -248,33 +250,140 @@ fn generated_wiki_filename(filename: &str) -> bool {
         && id.parse::<u32>().is_ok()
 }
 
-pub(super) fn sync_generated_wiki(wiki_dir: &Path, rendered: &[(String, String)]) -> Result<()> {
+fn generated_wiki_ownership(wiki_dir: &Path, claim_unowned: bool) -> Result<HashSet<String>> {
+    let manifest_path = wiki_dir.join(WIKI_MANIFEST);
+    if manifest_path.exists() {
+        let text = std::fs::read_to_string(&manifest_path)
+            .map_err(|error| GraphError::Io(format!("wiki manifest read: {error}")))?;
+        let value: serde_json::Value = serde_json::from_str(&text)
+            .map_err(|error| GraphError::Schema(format!("wiki manifest parse: {error}")))?;
+        if value["schema"] != WIKI_MANIFEST_SCHEMA {
+            return Err(GraphError::Schema(format!(
+                "unsupported wiki manifest schema: {:?}",
+                value["schema"]
+            )));
+        }
+        let files = value["files"].as_array().ok_or_else(|| {
+            GraphError::Schema("wiki manifest `files` must be an array".to_owned())
+        })?;
+        return files
+            .iter()
+            .map(|entry| {
+                let filename = entry.as_str().ok_or_else(|| {
+                    GraphError::Schema("wiki manifest filename must be a string".to_owned())
+                })?;
+                if !generated_wiki_filename(filename) {
+                    return Err(GraphError::Guard(format!(
+                        "invalid generated wiki filename in manifest: {filename:?}"
+                    )));
+                }
+                Ok(filename.to_owned())
+            })
+            .collect();
+    }
+
+    if !claim_unowned {
+        return Ok(HashSet::new());
+    }
+
+    let mut owned = HashSet::new();
+    for entry in std::fs::read_dir(wiki_dir)
+        .map_err(|error| GraphError::Io(format!("wiki inventory: {error}")))?
+    {
+        let entry = entry.map_err(|error| GraphError::Io(format!("wiki entry: {error}")))?;
+        if !entry
+            .file_type()
+            .map_err(|error| GraphError::Io(format!("wiki file type: {error}")))?
+            .is_file()
+        {
+            continue;
+        }
+        let filename = entry.file_name().to_string_lossy().into_owned();
+        if generated_wiki_filename(&filename) {
+            owned.insert(filename);
+        }
+    }
+    Ok(owned)
+}
+
+fn write_wiki_manifest(wiki_dir: &Path, names: &HashSet<String>) -> Result<()> {
+    let mut files: Vec<&str> = names.iter().map(String::as_str).collect();
+    files.sort_unstable();
+    let manifest = serde_json::to_string_pretty(&serde_json::json!({
+        "schema": WIKI_MANIFEST_SCHEMA,
+        "files": files,
+    }))
+    .map_err(|error| GraphError::Schema(format!("wiki manifest serialize: {error}")))?;
+    let temporary = wiki_dir.join(format!(".{WIKI_MANIFEST}.tmp.{}", std::process::id()));
+    std::fs::write(&temporary, manifest.as_bytes())
+        .map_err(|error| GraphError::Io(format!("wiki manifest temp write: {error}")))?;
+    std::fs::rename(&temporary, wiki_dir.join(WIKI_MANIFEST))
+        .map_err(|error| GraphError::Io(format!("wiki manifest rename: {error}")))
+}
+
+fn wiki_manifest_exists(wiki_dir: &Path) -> Result<bool> {
+    let path = wiki_dir.join(WIKI_MANIFEST);
+    let metadata = match std::fs::symlink_metadata(&path) {
+        Ok(metadata) => metadata,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(false),
+        Err(error) => return Err(GraphError::Io(format!("inspect wiki manifest: {error}"))),
+    };
+    if !metadata.file_type().is_file() {
+        return Err(GraphError::Guard(format!(
+            "wiki manifest is not a regular file: {}",
+            path.display()
+        )));
+    }
+    Ok(true)
+}
+
+pub(super) fn sync_generated_wiki(
+    wiki_dir: &Path,
+    rendered: &[(String, String)],
+    claim_unowned: bool,
+) -> Result<()> {
     std::fs::create_dir_all(wiki_dir).map_err(|error| GraphError::Io(error.to_string()))?;
-    let mut current_names = HashSet::with_capacity(rendered.len());
+    let prior_owned = generated_wiki_ownership(wiki_dir, claim_unowned)?;
+    let mut current_names: HashSet<String> = HashSet::with_capacity(rendered.len());
     for (filename, _) in rendered {
-        if !generated_wiki_filename(filename) || !current_names.insert(filename.as_str()) {
+        if !generated_wiki_filename(filename) || !current_names.insert(filename.clone()) {
             return Err(GraphError::Guard(format!(
                 "exporter produced invalid wiki filename: {filename:?}"
             )));
         }
     }
 
-    for entry in std::fs::read_dir(wiki_dir)
-        .map_err(|error| GraphError::Io(format!("wiki inventory: {error}")))?
-    {
-        let entry = entry.map_err(|error| GraphError::Io(format!("wiki entry: {error}")))?;
-        let filename = entry.file_name().to_string_lossy().into_owned();
-        if generated_wiki_filename(&filename) && !current_names.contains(filename.as_str()) {
-            if let Err(error) = std::fs::remove_file(entry.path()) {
-                if error.kind() != std::io::ErrorKind::NotFound {
-                    return Err(GraphError::Io(format!(
-                        "remove stale wiki page {filename}: {error}"
-                    )));
-                }
+    for filename in &current_names {
+        let destination = wiki_dir.join(filename);
+        match std::fs::symlink_metadata(&destination) {
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => {
+                return Err(GraphError::Io(format!(
+                    "inspect wiki page {}: {error}",
+                    destination.display()
+                )))
+            }
+            Ok(metadata) if prior_owned.contains(filename) && metadata.file_type().is_file() => {}
+            Ok(_) => {
+                return Err(GraphError::Guard(format!(
+                    "refusing to overwrite unowned wiki file: {}",
+                    destination.display()
+                )))
             }
         }
     }
 
+    for stale in prior_owned.difference(&current_names) {
+        if let Err(error) = std::fs::remove_file(wiki_dir.join(stale)) {
+            if error.kind() != std::io::ErrorKind::NotFound {
+                return Err(GraphError::Io(format!(
+                    "remove stale wiki page {stale}: {error}"
+                )));
+            }
+        }
+    }
+
+    write_wiki_manifest(wiki_dir, &current_names)?;
     for (filename, content) in rendered {
         std::fs::write(wiki_dir.join(filename), content.as_bytes())
             .map_err(|error| GraphError::Io(format!("{filename}: {error}")))?;
@@ -354,9 +463,14 @@ pub(super) fn write_public_artifacts(out: &Path, graph: &Graph, opts: ExtractOpt
 
     let wiki_dir = out.join("wiki");
     let wiki_exists = existing_public_artifact(&wiki_dir, true)?;
-    if opts.wiki || wiki_exists {
+    let wiki_owned = wiki_exists && wiki_manifest_exists(&wiki_dir)?;
+    if opts.wiki || wiki_owned {
         let rendered = habitat_graph_export::render_wiki(graph);
-        sync_generated_wiki(&wiki_dir, &rendered)?;
+        sync_generated_wiki(&wiki_dir, &rendered, opts.wiki)?;
+    } else if wiki_exists {
+        eprintln!(
+            "warning: existing wiki has no habitat-graph ownership manifest; skipping automatic refresh"
+        );
     }
 
     Ok(())
@@ -1059,6 +1173,52 @@ mod tests {
     }
 
     #[test]
+    fn default_run_preserves_unowned_wiki_pages() {
+        let src = TempDir::new().unwrap();
+        let out = TempDir::new().unwrap();
+        mk_file(src.path(), "lib.rs", "fn generated() {}");
+        let wiki = out.path().join("wiki");
+        fs::create_dir(&wiki).unwrap();
+        fs::write(wiki.join("index.md"), "user index").unwrap();
+        fs::write(wiki.join("node-1.md"), "user node").unwrap();
+
+        assert_eq!(run(src.path(), out.path(), None), 0);
+        assert_eq!(
+            fs::read_to_string(wiki.join("index.md")).unwrap(),
+            "user index"
+        );
+        assert_eq!(
+            fs::read_to_string(wiki.join("node-1.md")).unwrap(),
+            "user node"
+        );
+        assert!(!wiki.join(super::WIKI_MANIFEST).exists());
+    }
+
+    #[test]
+    fn wiki_flag_claims_generated_names_and_records_ownership() {
+        let src = TempDir::new().unwrap();
+        let out = TempDir::new().unwrap();
+        mk_file(src.path(), "lib.rs", "fn generated() {}");
+        let wiki = out.path().join("wiki");
+        fs::create_dir(&wiki).unwrap();
+        fs::write(wiki.join("index.md"), "legacy index").unwrap();
+        fs::write(wiki.join("node-1.md"), "legacy node").unwrap();
+        let opts = ExtractOpts {
+            wiki: true,
+            ..ExtractOpts::default()
+        };
+
+        assert_eq!(run_artifacts(src.path(), out.path(), None, opts), 0);
+        assert_ne!(
+            fs::read_to_string(wiki.join("index.md")).unwrap(),
+            "legacy index"
+        );
+        assert!(!wiki.join("node-1.md").exists());
+        let manifest = fs::read_to_string(wiki.join(super::WIKI_MANIFEST)).unwrap();
+        assert!(manifest.contains(super::WIKI_MANIFEST_SCHEMA));
+    }
+
+    #[test]
     fn default_run_refreshes_existing_optional_public_artifacts() {
         let src = TempDir::new().unwrap();
         let out = TempDir::new().unwrap();
@@ -1084,6 +1244,9 @@ mod tests {
             node_id + 1
         };
         fs::write(wiki.join(format!("node-{stale_id}.md")), raw_label).unwrap();
+        let mut owned = super::generated_wiki_ownership(&wiki, false).unwrap();
+        owned.insert(format!("node-{stale_id}.md"));
+        super::write_wiki_manifest(&wiki, &owned).unwrap();
         fs::write(wiki.join("user.md"), "keep me").unwrap();
 
         assert_eq!(run(src.path(), out.path(), None), 0);

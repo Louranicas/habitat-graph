@@ -6,6 +6,7 @@ use std::fmt::Write as FmtWrite;
 use habitat_graph_core::{
     display_safe, is_canonical_redaction_marker, sanitize_label, CommunityId, Graph, Node, NodeId,
 };
+use unicode_normalization::UnicodeNormalization as _;
 
 use crate::escape::{project_relation, redact_public_text, PublicRelationProjector};
 
@@ -21,7 +22,8 @@ use crate::escape::{project_relation, redact_public_text, PublicRelationProjecto
 /// appending `.md`. Secret-bearing labels use a filesystem-safe `REDACTED_<tags>_<NodeId>` stem so
 /// their filenames remain stable as other redacted nodes are added. When two or more clean nodes
 /// produce the same stem both are disambiguated by appending the [`NodeId`] before the extension
-/// (e.g. `foo_n1.md`, `foo_n2.md`).
+/// (e.g. `foo_n1.md`, `foo_n2.md`). Portable filename equivalence includes case folding and
+/// Unicode compatibility normalization; Windows-reserved stems are always qualified.
 ///
 /// # Note content
 ///
@@ -124,25 +126,30 @@ fn collect_labels(graph: &Graph) -> HashMap<NodeId, String> {
 }
 
 /// Assigns each node (in `graph.nodes` order) a `.md` filename based on the sanitized label,
-/// disambiguating stem collisions by appending the [`NodeId`].
+/// disambiguating portable stem collisions by appending the [`NodeId`].
 #[must_use]
 fn assign_filenames(graph: &Graph) -> Vec<String> {
     let stems: Vec<String> = graph.nodes.iter().map(|n| make_stem(&n.label)).collect();
+    let stem_keys: Vec<String> = stems
+        .iter()
+        .map(|stem| portable_filename_key(&format!("{stem}.md")))
+        .collect();
 
-    // Count occurrences so collisions can be detected in a single pass.
     let mut stem_count: HashMap<&str, usize> = HashMap::new();
-    for s in &stems {
-        *stem_count.entry(s.as_str()).or_default() += 1;
+    for key in &stem_keys {
+        *stem_count.entry(key.as_str()).or_default() += 1;
     }
 
     let qualified: Vec<bool> = graph
         .nodes
         .iter()
         .zip(stems.iter())
-        .map(|(node, stem)| {
+        .zip(stem_keys.iter())
+        .map(|((node, stem), stem_key)| {
             let projected = redact_public_text(&node.label);
             is_canonical_redaction_marker(&projected)
-                || stem_count.get(stem.as_str()).copied().unwrap_or(0) > 1
+                || stem_count.get(stem_key.as_str()).copied().unwrap_or(0) > 1
+                || windows_reserved_stem(stem)
         })
         .collect();
     let preferred: Vec<String> = graph
@@ -158,25 +165,31 @@ fn assign_filenames(graph: &Graph) -> Vec<String> {
             }
         })
         .collect();
+    let preferred_keys: Vec<String> = preferred
+        .iter()
+        .map(|filename| portable_filename_key(filename))
+        .collect();
 
     let mut preferred_count: HashMap<&str, usize> = HashMap::new();
-    preferred_count.insert("_MOC.md", 1);
-    for filename in &preferred {
-        *preferred_count.entry(filename).or_default() += 1;
+    let moc_key = portable_filename_key("_MOC.md");
+    preferred_count.insert(moc_key.as_str(), 1);
+    for key in &preferred_keys {
+        *preferred_count.entry(key.as_str()).or_default() += 1;
     }
     let reserved: HashSet<&str> = preferred_count.keys().copied().collect();
     let mut assigned = vec![String::new(); graph.nodes.len()];
-    let mut used = HashSet::from(["_MOC.md".to_owned()]);
+    let mut used = HashSet::from([moc_key.clone()]);
     let mut order: Vec<usize> = (0..graph.nodes.len()).collect();
     order.sort_unstable_by_key(|index| (!qualified[*index], graph.nodes[*index].id, *index));
 
     for index in order {
         let candidate = &preferred[index];
-        if !used.contains(candidate)
-            && (qualified[index] || preferred_count.get(candidate.as_str()) == Some(&1))
+        let candidate_key = &preferred_keys[index];
+        if !used.contains(candidate_key)
+            && (qualified[index] || preferred_count.get(candidate_key.as_str()) == Some(&1))
         {
             assigned[index].clone_from(candidate);
-            used.insert(candidate.clone());
+            used.insert(candidate_key.clone());
             continue;
         }
 
@@ -188,8 +201,9 @@ fn assign_filenames(graph: &Graph) -> Vec<String> {
             } else {
                 format!("{base}_{attempt}.md")
             };
-            if !used.contains(&fallback) && !reserved.contains(fallback.as_str()) {
-                used.insert(fallback.clone());
+            let fallback_key = portable_filename_key(&fallback);
+            if !used.contains(&fallback_key) && !reserved.contains(fallback_key.as_str()) {
+                used.insert(fallback_key);
                 assigned[index] = fallback;
                 break;
             }
@@ -198,6 +212,26 @@ fn assign_filenames(graph: &Graph) -> Vec<String> {
     }
 
     assigned
+}
+
+fn portable_filename_key(filename: &str) -> String {
+    filename.nfkd().flat_map(char::to_lowercase).collect()
+}
+
+fn windows_reserved_stem(stem: &str) -> bool {
+    let basename = stem
+        .split('.')
+        .next()
+        .unwrap_or_default()
+        .trim_end_matches([' ', '.'])
+        .to_ascii_uppercase();
+    matches!(basename.as_str(), "CON" | "PRN" | "AUX" | "NUL" | "CLOCK$")
+        || basename
+            .strip_prefix("COM")
+            .or_else(|| basename.strip_prefix("LPT"))
+            .is_some_and(|suffix| {
+                matches!(suffix, "1" | "2" | "3" | "4" | "5" | "6" | "7" | "8" | "9")
+            })
 }
 
 /// Builds a per-node sorted adjacency list: `NodeId → [(relation, neighbour_id)]`.
@@ -440,6 +474,8 @@ fn make_stem(label: &str) -> String {
 
 #[cfg(test)]
 mod tests {
+    use std::collections::HashSet;
+
     use habitat_graph_core::{
         Community, CommunityId, Confidence, Edge, Graph, Manifest, Node, NodeId, Span,
     };
@@ -736,6 +772,70 @@ mod tests {
             fnames.contains(&"foo_bar_n2.md"),
             "expected foo_bar_n2.md in {fnames:?}"
         );
+    }
+
+    #[test]
+    fn filenames_are_unique_on_case_insensitive_filesystems() {
+        let g = graph_with_nodes(vec![
+            make_node(1, "Foo", "a.rs"),
+            make_node(2, "foo", "b.rs"),
+            make_node(3, "_moc", "c.rs"),
+            make_node(4, "CON", "d.rs"),
+        ]);
+        let pairs = render_vault(&g);
+        let filenames: Vec<&str> = pairs
+            .iter()
+            .map(|(filename, _)| filename.as_str())
+            .collect();
+        assert!(filenames.contains(&"Foo_n1.md"));
+        assert!(filenames.contains(&"foo_n2.md"));
+        assert!(filenames.contains(&"_moc_n3.md"));
+        assert!(filenames.contains(&"CON_n4.md"));
+
+        let keys: HashSet<String> = filenames
+            .iter()
+            .map(|filename| super::portable_filename_key(filename))
+            .collect();
+        assert_eq!(keys.len(), filenames.len());
+    }
+
+    #[test]
+    fn filenames_are_unique_across_unicode_normalization_forms() {
+        let g = graph_with_nodes(vec![
+            make_node(1, "Caf\u{e9}", "a.rs"),
+            make_node(2, "Cafe\u{301}", "b.rs"),
+        ]);
+        let pairs = render_vault(&g);
+        let filenames: Vec<&str> = pairs
+            .iter()
+            .map(|(filename, _)| filename.as_str())
+            .collect();
+        let keys: HashSet<String> = filenames
+            .iter()
+            .map(|filename| super::portable_filename_key(filename))
+            .collect();
+        assert_eq!(keys.len(), filenames.len());
+        assert!(filenames.iter().all(|filename| {
+            *filename == "_MOC.md" || filename.contains("_n1") || filename.contains("_n2")
+        }));
+    }
+
+    #[test]
+    fn filenames_are_unique_across_unicode_compatibility_forms() {
+        let g = graph_with_nodes(vec![
+            make_node(1, "\u{fb00}oo", "a.rs"),
+            make_node(2, "ffoo", "b.rs"),
+        ]);
+        let pairs = render_vault(&g);
+        let filenames: Vec<&str> = pairs
+            .iter()
+            .map(|(filename, _)| filename.as_str())
+            .collect();
+        let keys: HashSet<String> = filenames
+            .iter()
+            .map(|filename| super::portable_filename_key(filename))
+            .collect();
+        assert_eq!(keys.len(), filenames.len());
     }
 
     /// T16: output is sorted lexicographically by filename.

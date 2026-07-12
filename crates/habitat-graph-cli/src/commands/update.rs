@@ -27,23 +27,12 @@
 //! would corrupt the graph by mixing incompatible node/edge semantics.
 
 use std::collections::{HashMap, HashSet};
-#[cfg(unix)]
-use std::fs::OpenOptions;
-#[cfg(unix)]
-use std::io::Write as _;
-#[cfg(unix)]
-use std::os::unix::fs::{OpenOptionsExt as _, PermissionsExt as _};
 use std::path::{Path, PathBuf};
-#[cfg(unix)]
-use std::sync::atomic::{AtomicU64, Ordering};
 
 use habitat_graph_core::{Graph, GraphError, Manifest, NodeId, Result, SCHEMA_VERSION};
 
 /// Sidecar filename storing the full internal [`Graph`] JSON (relative to the output directory).
 const SIDECAR: &str = ".habitat-graph-state.json";
-/// Monotonic suffix for collision-free private sidecar temporary files.
-#[cfg(unix)]
-static SIDECAR_TEMP_SEQUENCE: AtomicU64 = AtomicU64::new(0);
 
 /// Runs an incremental update over `dir`, writing refreshed artifacts into `out`.
 ///
@@ -86,7 +75,7 @@ pub fn run(dir: &Path, out: &Path) -> u8 {
 /// failures, [`GraphError::Schema`] on serialization failures, or [`GraphError::Guard`] when
 /// private sidecar permissions cannot be enforced.
 fn run_inner(dir: &Path, out: &Path) -> Result<()> {
-    ensure_private_sidecar_support(out)?;
+    super::private_state::ensure(&out.join(SIDECAR))?;
 
     // ── Detect all source files (sorted for R4 determinism) ─────────────────────
     let files = habitat_graph_source::detect(dir, &["rs"])?;
@@ -213,39 +202,6 @@ fn run_inner(dir: &Path, out: &Path) -> Result<()> {
     Ok(())
 }
 
-#[cfg(unix)]
-fn ensure_private_sidecar_support(out: &Path) -> Result<()> {
-    let sidecar = out.join(SIDECAR);
-    let metadata = match std::fs::symlink_metadata(&sidecar) {
-        Ok(metadata) => metadata,
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
-        Err(error) => return Err(GraphError::Io(format!("inspect private sidecar: {error}"))),
-    };
-    if !metadata.file_type().is_file() {
-        return Err(GraphError::Guard(format!(
-            "private sidecar is not a regular file: {}",
-            sidecar.display()
-        )));
-    }
-    std::fs::set_permissions(&sidecar, std::fs::Permissions::from_mode(0o600))
-        .map_err(|error| GraphError::Io(format!("harden private sidecar: {error}")))
-}
-
-#[cfg(not(unix))]
-fn ensure_private_sidecar_support(out: &Path) -> Result<()> {
-    let sidecar = out.join(SIDECAR);
-    if let Err(error) = std::fs::remove_file(&sidecar) {
-        if error.kind() != std::io::ErrorKind::NotFound {
-            return Err(GraphError::Io(format!(
-                "remove unsupported private sidecar: {error}"
-            )));
-        }
-    }
-    Err(GraphError::Guard(
-        "private incremental sidecars require owner-only file permissions".to_owned(),
-    ))
-}
-
 /// Attempts to load the prior graph from the sidecar file.
 ///
 /// Returns `Ok(None)` when:
@@ -344,70 +300,9 @@ fn write_artifacts(out: &Path, graph: &Graph, current_manifest: Manifest) -> Res
     let mut sidecar = graph.clone();
     sidecar.manifest = current_manifest;
     let sidecar_json = sidecar.to_json()?;
-    write_private_sidecar(&out.join(SIDECAR), sidecar_json.as_bytes())?;
+    super::private_state::write(&out.join(SIDECAR), sidecar_json.as_bytes())?;
 
     Ok(())
-}
-
-/// Atomically writes the internal incremental cache with owner-only permissions.
-///
-/// The sidecar intentionally retains pre-projection labels needed for stable content ids and
-/// incremental merge behavior. It is not a public artifact, so bytes are first written and synced
-/// to a same-directory `0600` temporary file, then atomically renamed over the destination. This
-/// prevents both a truncate-before-chmod exposure window and a partially written live sidecar.
-#[cfg(unix)]
-fn write_private_sidecar(path: &Path, bytes: &[u8]) -> Result<()> {
-    let parent = path
-        .parent()
-        .ok_or_else(|| GraphError::Io("sidecar path has no parent".to_owned()))?;
-    let filename = path
-        .file_name()
-        .and_then(|name| name.to_str())
-        .ok_or_else(|| GraphError::Io("sidecar filename is not valid UTF-8".to_owned()))?;
-    let sequence = SIDECAR_TEMP_SEQUENCE.fetch_add(1, Ordering::Relaxed);
-    let temporary = parent.join(format!(
-        ".{filename}.tmp.{}.{}",
-        std::process::id(),
-        sequence
-    ));
-
-    let mut options = OpenOptions::new();
-    options.create_new(true).write(true);
-    options.mode(0o600);
-
-    let write_result = (|| -> Result<()> {
-        let mut file = options
-            .open(&temporary)
-            .map_err(|error| GraphError::Io(format!("sidecar temp open: {error}")))?;
-        file.write_all(bytes)
-            .map_err(|error| GraphError::Io(format!("sidecar temp write: {error}")))?;
-        file.sync_all()
-            .map_err(|error| GraphError::Io(format!("sidecar temp sync: {error}")))?;
-        drop(file);
-        std::fs::rename(&temporary, path)
-            .map_err(|error| GraphError::Io(format!("sidecar atomic rename: {error}")))?;
-        std::fs::File::open(parent)
-            .and_then(|directory| directory.sync_all())
-            .map_err(|error| GraphError::Io(format!("sidecar directory sync: {error}")))?;
-        Ok(())
-    })();
-
-    if write_result.is_err() && temporary.exists() {
-        if let Err(cleanup_error) = std::fs::remove_file(&temporary) {
-            eprintln!(
-                "warning: failed to remove sidecar temporary file {}: {cleanup_error}",
-                temporary.display()
-            );
-        }
-    }
-    write_result
-}
-
-#[cfg(not(unix))]
-fn write_private_sidecar(_path: &Path, _bytes: &[u8]) -> Result<()> {
-    Err(GraphError::Guard(
-        "private incremental sidecars require owner-only file permissions".to_owned(),
-    ))
 }
 
 /// Returns `graph` with all nodes whose [`habitat_graph_core::Node::source_file`] appears in
@@ -632,6 +527,15 @@ mod tests {
         fs::create_dir(&wiki).unwrap();
         fs::write(wiki.join("index.md"), raw_label).unwrap();
         fs::write(wiki.join(format!("node-{stale_id}.md")), raw_label).unwrap();
+        fs::write(
+            wiki.join(".habitat-graph-generated.json"),
+            serde_json::to_vec_pretty(&serde_json::json!({
+                "schema": "habitat-graph.wiki-manifest.v1",
+                "files": ["index.md", format!("node-{stale_id}.md")],
+            }))
+            .unwrap(),
+        )
+        .unwrap();
         fs::write(wiki.join("user.md"), "keep me").unwrap();
         #[cfg(unix)]
         {

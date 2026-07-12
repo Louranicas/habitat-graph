@@ -484,6 +484,15 @@ mod tests {
         fs::create_dir(&wiki).unwrap();
         fs::write(wiki.join("index.md"), raw_label).unwrap();
         fs::write(wiki.join("node-4294967295.md"), raw_label).unwrap();
+        fs::write(
+            wiki.join(".habitat-graph-generated.json"),
+            serde_json::to_vec_pretty(&serde_json::json!({
+                "schema": "habitat-graph.wiki-manifest.v1",
+                "files": ["index.md", "node-4294967295.md"],
+            }))
+            .unwrap(),
+        )
+        .unwrap();
 
         rebuild(&src, &out).expect("rebuild");
 
