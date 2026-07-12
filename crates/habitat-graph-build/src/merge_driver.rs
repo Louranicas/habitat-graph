@@ -184,26 +184,33 @@ fn ambiguous_projected_node_ids(
     ours: &Graph,
     theirs: &Graph,
 ) -> [HashSet<NodeId>; 2] {
-    let mut occupied: Vec<(NodeId, bool)> = base
+    let projected_ids = |graph: &Graph| {
+        graph
+            .nodes
+            .iter()
+            .filter(|node| habitat_graph_core::is_canonical_redaction_marker(&node.label))
+            .map(|node| node.id)
+            .collect::<HashSet<_>>()
+    };
+    let base_projected = projected_ids(base);
+    let side_projected = [projected_ids(ours), projected_ids(theirs)];
+    let mut occupied: Vec<NodeId> = base
         .nodes
         .iter()
-        .map(|node| {
-            (
-                node.id,
-                habitat_graph_core::is_canonical_redaction_marker(&node.label),
-            )
-        })
+        .chain(&ours.nodes)
+        .chain(&theirs.nodes)
+        .map(|node| node.id)
         .collect();
-    occupied.sort_unstable_by_key(|(id, _)| *id);
-    let mut groups: Vec<Vec<(NodeId, bool)>> = Vec::new();
+    occupied.sort_unstable();
+    occupied.dedup();
+    let mut groups: Vec<Vec<NodeId>> = Vec::new();
     for candidate in occupied {
-        let extends_group =
-            groups
-                .last()
-                .and_then(|group| group.last())
-                .is_some_and(|(last, _)| {
-                    last.get() != u32::MAX && last.get().saturating_add(1) == candidate.0.get()
-                });
+        let extends_group = groups
+            .last()
+            .and_then(|group| group.last())
+            .is_some_and(|last| {
+                last.get() != u32::MAX && last.get().saturating_add(1) == candidate.get()
+            });
         if extends_group {
             if let Some(group) = groups.last_mut() {
                 group.push(candidate);
@@ -216,11 +223,11 @@ fn ambiguous_projected_node_ids(
         && groups
             .first()
             .and_then(|group| group.first())
-            .is_some_and(|(id, _)| id.get() == 0)
+            .is_some_and(|id| id.get() == 0)
         && groups
             .last()
             .and_then(|group| group.last())
-            .is_some_and(|(id, _)| id.get() == u32::MAX)
+            .is_some_and(|id| id.get() == u32::MAX)
     {
         let first = groups.remove(0);
         if let Some(last) = groups.last_mut() {
@@ -232,21 +239,17 @@ fn ambiguous_projected_node_ids(
     for group in groups {
         let projected_slots: HashSet<NodeId> = group
             .iter()
-            .filter_map(|(id, projected)| projected.then_some(*id))
+            .filter(|id| base_projected.contains(id))
+            .copied()
             .collect();
-        if group.len() < 2 || projected_slots.is_empty() {
+        if projected_slots.is_empty() {
             continue;
         }
-        let slots: HashSet<NodeId> = group.into_iter().map(|(id, _)| id).collect();
-        let side_ids = [ours, theirs].map(|graph| {
-            graph
-                .nodes
-                .iter()
-                .filter(|node| {
-                    slots.contains(&node.id)
-                        && habitat_graph_core::is_canonical_redaction_marker(&node.label)
-                })
-                .map(|node| node.id)
+        let slots: HashSet<NodeId> = group.into_iter().collect();
+        let side_ids = side_projected.each_ref().map(|ids| {
+            ids.iter()
+                .copied()
+                .filter(|id| slots.contains(id))
                 .collect::<HashSet<_>>()
         });
         if side_ids.iter().any(|ids| ids != &projected_slots) {
@@ -1643,6 +1646,20 @@ mod tests {
 
         let merged = merge3(&base, &ours, &theirs);
         assert_eq!(node_labels(&merged), vec!["Safe"]);
+        assert!(merged.edges.is_empty());
+    }
+
+    #[test]
+    fn adjacent_side_extension_keeps_single_projected_slot_ambiguous() {
+        let marker = "[REDACTED:api_key]";
+        let mut base = nodes_graph(&[(10, marker), (20, "Safe")]);
+        base.edges.push(edge(10, 20, "secret-edge"));
+        let mut ours = nodes_graph(&[(10, "New collision"), (11, marker), (20, "Safe")]);
+        ours.edges.push(edge(11, 20, "secret-edge"));
+        let theirs = ours.clone();
+
+        let merged = merge3(&base, &ours, &theirs);
+        assert_eq!(node_labels(&merged), vec!["New collision", "Safe"]);
         assert!(merged.edges.is_empty());
     }
 

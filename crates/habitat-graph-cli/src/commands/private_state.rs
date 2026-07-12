@@ -1,4 +1,4 @@
-use std::collections::BTreeSet;
+use std::collections::{BTreeSet, HashMap, HashSet};
 use std::ffi::OsString;
 use std::io::{BufRead as _, Read as _};
 use std::path::{Path, PathBuf};
@@ -19,6 +19,8 @@ const EXPIRED_REVISION_SEPARATOR: &str = ".expired-revision-";
 const MIGRATION_CONFLICT_SEPARATOR: &str = ".migration-conflict-";
 const MIGRATION_CONFLICT_DIRECTORY: &str = ".migration-conflicts";
 const ADD_JOURNAL_SUFFIX: &str = ".add-journal";
+const UPDATE_JOURNAL_SUFFIX: &str = ".update-journal";
+const OUTPUT_LOCK_SUFFIX: &str = ".output-lock";
 const MAX_SNAPSHOTS: usize = 16;
 const MAX_CONTEXTS_PER_OUTPUT: usize = 16;
 const MAX_GIT_CONTROL_LINE_BYTES: u64 = 4096;
@@ -60,11 +62,20 @@ pub(super) fn path_for_output(output: &Path, legacy: &Path) -> Result<PathBuf> {
     ensure_private_directory(&state_root)?;
     ensure_private_directory(&state_dir)?;
 
-    let canonical_output = canonical_parent.join(
-        output
-            .file_name()
-            .ok_or_else(|| GraphError::Io("output path has no filename".to_owned()))?,
-    );
+    let canonical_output = match std::fs::canonicalize(output) {
+        Ok(path) => path,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => canonical_parent.join(
+            output
+                .file_name()
+                .ok_or_else(|| GraphError::Io("output path has no filename".to_owned()))?,
+        ),
+        Err(error) => {
+            return Err(GraphError::Io(format!(
+                "resolve output path {}: {error}",
+                output.display()
+            )))
+        }
+    };
     let key = output_key(&canonical_output);
     let unscoped_state_path = state_dir.join(format!("{key}.json"));
     let context = git_context_identity(&git_dir)?;
@@ -103,6 +114,94 @@ pub(super) fn context_identity_for_output(output: &Path) -> Result<Option<Contex
         return Ok(None);
     };
     git_context_identity(&git_dir).map(Some)
+}
+
+#[derive(Debug)]
+pub(super) struct OutputTransactionLock {
+    file: std::fs::File,
+}
+
+impl Drop for OutputTransactionLock {
+    fn drop(&mut self) {
+        let _ = self.file.unlock();
+    }
+}
+
+pub(super) fn acquire_output_lock(state_path: &Path) -> Result<OutputTransactionLock> {
+    let lock_path = output_lock_path(state_path)?;
+    if let Some(parent) = lock_path
+        .parent()
+        .filter(|parent| !parent.as_os_str().is_empty())
+    {
+        std::fs::create_dir_all(parent)
+            .map_err(|error| GraphError::Io(format!("create output lock directory: {error}")))?;
+    }
+    let prior_metadata = match std::fs::symlink_metadata(&lock_path) {
+        Ok(metadata) => {
+            if !metadata.file_type().is_file() {
+                return Err(GraphError::Guard(format!(
+                    "output transaction lock is not a regular file: {}",
+                    lock_path.display()
+                )));
+            }
+            Some(metadata)
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
+        Err(error) => {
+            return Err(GraphError::Io(format!(
+                "inspect output transaction lock: {error}"
+            )))
+        }
+    };
+    let mut options = std::fs::OpenOptions::new();
+    options.create(true).read(true).write(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt as _;
+        options.mode(0o600);
+    }
+    let file = options
+        .open(&lock_path)
+        .map_err(|error| GraphError::Io(format!("open output transaction lock: {error}")))?;
+    let opened_metadata = file
+        .metadata()
+        .map_err(|error| GraphError::Io(format!("inspect output transaction lock: {error}")))?;
+    if !opened_metadata.file_type().is_file()
+        || prior_metadata
+            .as_ref()
+            .is_some_and(|metadata| !same_file(metadata, &opened_metadata))
+    {
+        return Err(GraphError::Guard(
+            "output transaction lock changed while being opened".to_owned(),
+        ));
+    }
+    #[cfg(unix)]
+    std::fs::set_permissions(&lock_path, std::fs::Permissions::from_mode(0o600))
+        .map_err(|error| GraphError::Io(format!("harden output transaction lock: {error}")))?;
+    match file.try_lock() {
+        Ok(()) => Ok(OutputTransactionLock { file }),
+        Err(std::fs::TryLockError::WouldBlock) => Err(GraphError::Guard(
+            "another habitat-graph writer is updating this output".to_owned(),
+        )),
+        Err(std::fs::TryLockError::Error(error)) => {
+            Err(GraphError::Io(format!("lock output transaction: {error}")))
+        }
+    }
+}
+
+fn output_lock_path(state_path: &Path) -> Result<PathBuf> {
+    let filename = state_path
+        .file_name()
+        .and_then(|filename| filename.to_str())
+        .ok_or_else(|| GraphError::Io("private state path has no UTF-8 filename".to_owned()))?;
+    let base = if state_context_key(state_path).is_some() {
+        filename
+            .split_once(CONTEXT_SEPARATOR)
+            .map_or(filename, |(key, _)| key)
+    } else {
+        filename
+    };
+    Ok(state_path.with_file_name(format!("{base}{OUTPUT_LOCK_SUFFIX}")))
 }
 
 pub(super) fn generation(bytes: &[u8]) -> String {
@@ -261,6 +360,152 @@ pub(super) fn read(path: &Path, context: &str) -> Result<Option<StoredGraph>> {
     parse(&text).map(Some)
 }
 
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub(super) struct PrivateChecksumStatus {
+    pub(super) any: bool,
+    pub(super) matched: bool,
+}
+
+pub(super) fn private_checksum_status(
+    path: &Path,
+    expected: &[&str],
+) -> Result<PrivateChecksumStatus> {
+    let mut status = PrivateChecksumStatus::default();
+    let mut candidates = BTreeSet::new();
+    for context_path in state_context_candidates(path)? {
+        candidates.insert(context_path.clone());
+        candidates.extend(snapshot_candidates(&context_path)?);
+    }
+    for candidate in candidates {
+        let Some(stored) = read(&candidate, "private transaction lineage state")? else {
+            continue;
+        };
+        status.any = true;
+        let checksum = generation(stored.graph.to_json()?.as_bytes());
+        if expected.contains(&checksum.as_str()) {
+            status.matched = true;
+        }
+    }
+    Ok(status)
+}
+
+#[derive(Default)]
+struct ContextAncestry {
+    verified: bool,
+    known: HashSet<PathBuf>,
+    ancestors: HashSet<PathBuf>,
+}
+
+impl ContextAncestry {
+    fn status(&self, path: &Path) -> Option<bool> {
+        if !self.verified || !self.known.contains(path) {
+            None
+        } else {
+            Some(self.ancestors.contains(path))
+        }
+    }
+}
+
+fn git_dir_for_state(path: &Path) -> Option<PathBuf> {
+    let state_dir = path.parent()?;
+    if state_dir.file_name()? != "state" {
+        return None;
+    }
+    let private_root = state_dir.parent()?;
+    if private_root.file_name()? != "habitat-graph" {
+        return None;
+    }
+    private_root.parent().map(Path::to_path_buf)
+}
+
+fn context_ancestry(path: &Path, candidates: &[PathBuf]) -> Result<ContextAncestry> {
+    let Some(git_dir) = git_dir_for_state(path) else {
+        return Ok(ContextAncestry::default());
+    };
+    let Some(expected_head) = context_revision(path)? else {
+        return Ok(ContextAncestry::default());
+    };
+    let mut revisions: HashMap<String, Vec<PathBuf>> = HashMap::new();
+    for candidate in candidates {
+        if candidate == path {
+            continue;
+        }
+        if let Some(revision) = context_revision(candidate)? {
+            revisions
+                .entry(revision)
+                .or_default()
+                .push(candidate.clone());
+        }
+    }
+    if revisions.is_empty() {
+        return Ok(ContextAncestry::default());
+    }
+
+    let Ok(mut child) = std::process::Command::new("git")
+        .arg("--git-dir")
+        .arg(&git_dir)
+        .args(["rev-list", "HEAD"])
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::null())
+        .spawn()
+    else {
+        return Ok(ContextAncestry::default());
+    };
+    let stdout = child
+        .stdout
+        .take()
+        .ok_or_else(|| GraphError::Io("read Git ancestry output".to_owned()))?;
+    let mut ancestors = HashSet::new();
+    let mut observed_head = None;
+    let mut line = String::new();
+    let mut reader = std::io::BufReader::new(stdout);
+    loop {
+        line.clear();
+        let read = reader
+            .read_line(&mut line)
+            .map_err(|error| GraphError::Io(format!("read Git ancestry: {error}")))?;
+        if read == 0 {
+            break;
+        }
+        let commit = line.trim();
+        if !is_object_id(commit) || read > 130 {
+            let _ = child.kill();
+            let _ = child.wait();
+            return Ok(ContextAncestry::default());
+        }
+        let revision = generation(format!("commit:{}", commit.to_ascii_lowercase()).as_bytes());
+        observed_head.get_or_insert_with(|| revision.clone());
+        if let Some(paths) = revisions.get(&revision) {
+            ancestors.extend(paths.iter().cloned());
+        }
+    }
+    let status = child
+        .wait()
+        .map_err(|error| GraphError::Io(format!("wait for Git ancestry: {error}")))?;
+    if !status.success() || observed_head.as_deref() != Some(expected_head.as_str()) {
+        return Ok(ContextAncestry::default());
+    }
+    Ok(ContextAncestry {
+        verified: true,
+        known: revisions.into_values().flatten().collect(),
+        ancestors,
+    })
+}
+
+pub(super) fn context_is_verified_ancestor(ancestor: &Path, current: &Path) -> Result<bool> {
+    if ancestor == current {
+        return Ok(true);
+    }
+    let ancestry = context_ancestry(current, &[ancestor.to_path_buf(), current.to_path_buf()])?;
+    match ancestry.status(ancestor) {
+        Some(result) => Ok(result),
+        None => Err(GraphError::Guard(format!(
+            "cannot verify private state Git ancestry: {}",
+            ancestor.display()
+        ))),
+    }
+}
+
 pub(super) fn load_matching(
     path: &Path,
     public_generation: Option<&str>,
@@ -269,6 +514,7 @@ pub(super) fn load_matching(
 ) -> Result<Option<StoredGraph>> {
     ensure_context_not_expired(path)?;
     let current = read(path, context)?;
+    let candidates = state_context_candidates(path)?;
 
     if let Some(generation) = public_generation {
         let mut exact = None;
@@ -290,20 +536,21 @@ pub(super) fn load_matching(
             return Ok(Some(stored));
         }
 
+        let ancestry = context_ancestry(path, &candidates)?;
         let mut inherited = None;
-        for candidate in state_context_candidates(path)? {
-            if candidate == path || context_is_expired(&candidate)? {
+        for candidate in &candidates {
+            if candidate == path || context_is_expired(candidate)? {
                 continue;
             }
-            if let Some(stored) = read(&candidate, context)? {
+            if let Some(stored) = read(candidate, context)? {
                 if stored.public_generation.as_deref() == Some(generation) {
-                    select_unique_state(&mut inherited, stored, path)?;
+                    select_inherited_state(&mut inherited, stored, candidate, &ancestry, path)?;
                 }
             }
-            let snapshot = snapshot_path(&candidate, generation)?;
+            let snapshot = snapshot_path(candidate, generation)?;
             if let Some(stored) = read(&snapshot, context)? {
                 if stored.public_generation.as_deref() == Some(generation) {
-                    select_unique_state(&mut inherited, stored, path)?;
+                    select_inherited_state(&mut inherited, stored, candidate, &ancestry, path)?;
                 }
             }
         }
@@ -315,8 +562,9 @@ pub(super) fn load_matching(
     let Some(semantic_generation) = public_semantic_generation else {
         return Ok(None);
     };
+    let ancestry = context_ancestry(path, &candidates)?;
     let mut selected = None;
-    for candidate in state_context_candidates(path)? {
+    for candidate in candidates {
         if candidate != path && context_is_expired(&candidate)? {
             continue;
         }
@@ -328,7 +576,7 @@ pub(super) fn load_matching(
             }
         } else if let Some(stored) = read(&candidate, context)? {
             if stored.public_semantic_generation.as_deref() == Some(semantic_generation) {
-                select_unique_state(&mut selected, stored, path)?;
+                select_inherited_state(&mut selected, stored, &candidate, &ancestry, path)?;
             }
         }
         let mut snapshots = snapshot_candidates(&candidate)?;
@@ -336,12 +584,33 @@ pub(super) fn load_matching(
         for snapshot in snapshots {
             if let Some(stored) = read(&snapshot, context)? {
                 if stored.public_semantic_generation.as_deref() == Some(semantic_generation) {
-                    select_unique_state(&mut selected, stored, path)?;
+                    if candidate == path {
+                        select_unique_state(&mut selected, stored, path)?;
+                    } else {
+                        select_inherited_state(&mut selected, stored, &candidate, &ancestry, path)?;
+                    }
                 }
             }
         }
     }
     Ok(selected)
+}
+
+fn select_inherited_state(
+    selected: &mut Option<StoredGraph>,
+    candidate: StoredGraph,
+    candidate_path: &Path,
+    ancestry: &ContextAncestry,
+    current_path: &Path,
+) -> Result<()> {
+    match ancestry.status(candidate_path) {
+        Some(true) => select_unique_state(selected, candidate, current_path),
+        Some(false) => Ok(()),
+        None => Err(GraphError::Guard(format!(
+            "cannot verify ancestry for matching private state: {}",
+            candidate_path.display()
+        ))),
+    }
 }
 
 fn select_unique_state(
@@ -506,17 +775,58 @@ pub(super) fn state_context_candidates(path: &Path) -> Result<Vec<PathBuf>> {
 }
 
 pub(super) fn ensure_no_pending_add_journals(path: &Path) -> Result<()> {
+    if let Some(member) = pending_transaction_paths(path, ADD_JOURNAL_SUFFIX)?
+        .into_iter()
+        .next()
+    {
+        return Err(GraphError::Guard(format!(
+            "pending add transaction must be recovered before update: {}",
+            member.display()
+        )));
+    }
+    Ok(())
+}
+
+pub(super) fn ensure_no_pending_update_journals(path: &Path) -> Result<()> {
+    if let Some(member) = pending_transaction_paths(path, UPDATE_JOURNAL_SUFFIX)?
+        .into_iter()
+        .next()
+    {
+        return Err(GraphError::Guard(format!(
+            "pending update transaction must be recovered before writing: {}",
+            member.display()
+        )));
+    }
+    Ok(())
+}
+
+pub(super) fn update_journal_path(path: &Path) -> Result<PathBuf> {
+    transaction_path(path, UPDATE_JOURNAL_SUFFIX)
+}
+
+pub(super) fn pending_update_journals(path: &Path) -> Result<Vec<PathBuf>> {
+    pending_transaction_paths(path, UPDATE_JOURNAL_SUFFIX)
+}
+
+fn transaction_path(path: &Path, suffix: &str) -> Result<PathBuf> {
+    let filename = path
+        .file_name()
+        .ok_or_else(|| GraphError::Io("private state path has no filename".to_owned()))?;
+    let mut name = OsString::from(filename);
+    name.push(suffix);
+    Ok(path.with_file_name(name))
+}
+
+fn pending_transaction_paths(path: &Path, suffix: &str) -> Result<Vec<PathBuf>> {
+    let mut paths = BTreeSet::new();
     for candidate in state_context_candidates(path)? {
-        for (member, suffix) in family_members(&candidate)? {
-            if suffix.starts_with(ADD_JOURNAL_SUFFIX) {
-                return Err(GraphError::Guard(format!(
-                    "pending add transaction must be recovered before update: {}",
-                    member.display()
-                )));
+        for (member, member_suffix) in family_members(&candidate)? {
+            if member_suffix.starts_with(suffix) {
+                paths.insert(member);
             }
         }
     }
-    Ok(())
+    Ok(paths.into_iter().collect())
 }
 
 fn context_filename_prefix(path: &Path) -> Option<String> {
@@ -531,9 +841,9 @@ fn context_filename_prefix(path: &Path) -> Option<String> {
 
 pub(super) fn state_context_key(path: &Path) -> Option<String> {
     let filename = path.file_name()?.to_str()?;
-    let (_, context) = filename.split_once(CONTEXT_SEPARATOR)?;
+    let (key, context) = filename.split_once(CONTEXT_SEPARATOR)?;
     let context = context.strip_suffix(".json")?;
-    is_generation(context).then(|| context.to_owned())
+    (is_generation(key) && is_generation(context)).then(|| context.to_owned())
 }
 
 fn expired_context_path(path: &Path) -> Option<PathBuf> {
@@ -733,6 +1043,7 @@ fn context_member_key<'a>(filename: &'a str, prefix: &str) -> Option<&'a str> {
     (suffix.is_empty()
         || suffix.starts_with(SNAPSHOT_SEPARATOR)
         || suffix.starts_with(ADD_JOURNAL_SUFFIX)
+        || suffix.starts_with(UPDATE_JOURNAL_SUFFIX)
         || suffix.starts_with(MIGRATION_CONFLICT_SEPARATOR))
     .then_some(context)
 }
@@ -750,7 +1061,9 @@ fn prune_contexts(path: &Path) -> Result<()> {
         let keep = candidate == path
             || has_migration_conflicts(candidate)?
             || members.iter().any(|(_, suffix)| {
-                suffix.contains(ADD_JOURNAL_SUFFIX) || suffix.contains(MIGRATION_CONFLICT_SEPARATOR)
+                suffix.contains(ADD_JOURNAL_SUFFIX)
+                    || suffix.contains(UPDATE_JOURNAL_SUFFIX)
+                    || suffix.contains(MIGRATION_CONFLICT_SEPARATOR)
             });
         let mut modified = std::time::SystemTime::UNIX_EPOCH;
         for (member, _) in &members {
@@ -921,6 +1234,7 @@ fn family_members(path: &Path) -> Result<Vec<(PathBuf, String)>> {
         if suffix.is_empty()
             || suffix.starts_with(SNAPSHOT_SEPARATOR)
             || suffix.starts_with(ADD_JOURNAL_SUFFIX)
+            || suffix.starts_with(UPDATE_JOURNAL_SUFFIX)
             || suffix.starts_with(MIGRATION_CONFLICT_SEPARATOR)
         {
             members.push((entry.path(), suffix.to_owned()));
@@ -939,6 +1253,9 @@ fn family_base_path(path: &Path) -> PathBuf {
         .filter(|(_, suffix)| is_generation(suffix))
         .map_or(filename, |(base, _)| base);
     if let Some(base) = without_legacy_conflict.strip_suffix(ADD_JOURNAL_SUFFIX) {
+        return path.with_file_name(base);
+    }
+    if let Some(base) = without_legacy_conflict.strip_suffix(UPDATE_JOURNAL_SUFFIX) {
         return path.with_file_name(base);
     }
     if let Some((base, suffix)) = without_legacy_conflict.rsplit_once(SNAPSHOT_SEPARATOR) {
@@ -1260,16 +1577,41 @@ fn valid_git_dir(path: &Path) -> Result<bool> {
         Err(error) => return Err(GraphError::Io(format!("inspect Git HEAD: {error}"))),
     };
     if !head_metadata.file_type().is_file() {
-        return Ok(false);
+        return Err(GraphError::Guard(format!(
+            "Git HEAD is not a regular file: {}",
+            path.join("HEAD").display()
+        )));
     }
 
-    if std::fs::symlink_metadata(path.join("objects"))
-        .is_ok_and(|metadata| metadata.file_type().is_dir())
-    {
-        return Ok(true);
+    let objects = path.join("objects");
+    match std::fs::metadata(&objects) {
+        Ok(metadata) if metadata.is_dir() => return Ok(true),
+        Ok(_) => {
+            return Err(GraphError::Guard(format!(
+                "Git objects path is not a directory: {}",
+                objects.display()
+            )))
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+        Err(error) => return Err(GraphError::Io(format!("inspect Git objects: {error}"))),
     }
-    Ok(std::fs::symlink_metadata(path.join("commondir"))
-        .is_ok_and(|metadata| metadata.file_type().is_file()))
+    let commondir = path.join("commondir");
+    match std::fs::metadata(&commondir) {
+        Ok(metadata) if metadata.is_file() => Ok(true),
+        Ok(_) => Err(GraphError::Guard(format!(
+            "Git common-directory marker is not a file: {}",
+            commondir.display()
+        ))),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            Err(GraphError::Guard(format!(
+                "Git metadata has HEAD but no objects or commondir: {}",
+                path.display()
+            )))
+        }
+        Err(error) => Err(GraphError::Io(format!(
+            "inspect Git common-directory marker: {error}"
+        ))),
+    }
 }
 
 fn git_context_identity(git_dir: &Path) -> Result<ContextIdentity> {
@@ -1625,6 +1967,28 @@ mod tests {
         fs::write(path, format!("{commit}\n")).unwrap();
     }
 
+    fn git(root: &Path, args: &[&str]) -> String {
+        let output = std::process::Command::new("git")
+            .args(args)
+            .current_dir(root)
+            .output()
+            .unwrap();
+        assert!(output.status.success(), "git {args:?} failed");
+        String::from_utf8(output.stdout).unwrap().trim().to_owned()
+    }
+
+    fn init_real_git(root: &Path) {
+        git(root, &["init", "-q"]);
+        git(root, &["config", "user.name", "Habitat Graph Tests"]);
+        git(root, &["config", "user.email", "tests@example.invalid"]);
+    }
+
+    fn commit_real_git(root: &Path, content: &str) {
+        fs::write(root.join("lineage.txt"), content).unwrap();
+        git(root, &["add", "lineage.txt"]);
+        git(root, &["commit", "-q", "-m", content]);
+    }
+
     #[test]
     fn worktree_git_file_uses_its_private_git_directory() {
         let root = TempDir::new().unwrap();
@@ -1675,6 +2039,78 @@ mod tests {
 
         assert!(!legacy.exists());
         assert_eq!(fs::read_to_string(state).unwrap(), "raw private state");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn existing_output_aliases_share_private_state_identity() {
+        use std::os::unix::fs::symlink;
+
+        let root = TempDir::new().unwrap();
+        create_git(root.path(), "ref: refs/heads/main\n");
+        let output_dir = root.path().join("public");
+        fs::create_dir_all(&output_dir).unwrap();
+        let output = output_dir.join("graph.json");
+        let alias = output_dir.join("Graph.json");
+        fs::write(&output, "{}").unwrap();
+        symlink("graph.json", &alias).unwrap();
+
+        let direct =
+            super::path_for_output(&output, &output_dir.join(".habitat-graph-state.json")).unwrap();
+        let through_alias = super::path_for_output(
+            &alias,
+            &output_dir.join(".Graph.json.habitat-graph-state.json"),
+        )
+        .unwrap();
+        assert_eq!(direct, through_alias);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn git_objects_directory_symlink_is_followed() {
+        use std::os::unix::fs::symlink;
+
+        let root = TempDir::new().unwrap();
+        let git_dir = root.path().join(".git");
+        fs::create_dir_all(git_dir.join("object-store")).unwrap();
+        symlink("object-store", git_dir.join("objects")).unwrap();
+        fs::write(git_dir.join("HEAD"), "ref: refs/heads/main\n").unwrap();
+        let output_dir = root.path().join("public");
+        fs::create_dir_all(&output_dir).unwrap();
+        let legacy = output_dir.join(".habitat-graph-state.json");
+
+        let state = super::path_for_output(&output_dir.join("graph.json"), &legacy).unwrap();
+        assert!(state.starts_with(git_dir.join("habitat-graph/state")));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn broken_git_objects_symlink_fails_closed() {
+        use std::os::unix::fs::symlink;
+
+        let root = TempDir::new().unwrap();
+        let git_dir = root.path().join(".git");
+        fs::create_dir_all(&git_dir).unwrap();
+        symlink("missing-objects", git_dir.join("objects")).unwrap();
+        fs::write(git_dir.join("HEAD"), "ref: refs/heads/main\n").unwrap();
+        let output_dir = root.path().join("public");
+        fs::create_dir_all(&output_dir).unwrap();
+        let legacy = output_dir.join(".habitat-graph-state.json");
+
+        let error = super::path_for_output(&output_dir.join("graph.json"), &legacy).unwrap_err();
+        assert_eq!(error.kind(), "guard");
+        assert!(error.to_string().contains("no objects or commondir"));
+    }
+
+    #[test]
+    fn output_transaction_lock_is_cross_handle_exclusive() {
+        let root = TempDir::new().unwrap();
+        let state = root.path().join("state.json");
+        let first = super::acquire_output_lock(&state).unwrap();
+        let error = super::acquire_output_lock(&state).unwrap_err();
+        assert_eq!(error.kind(), "guard");
+        drop(first);
+        super::acquire_output_lock(&state).unwrap();
     }
 
     #[test]
@@ -1820,7 +2256,7 @@ mod tests {
     }
 
     #[test]
-    fn new_context_inherits_unique_semantic_state_after_reformatting() {
+    fn unverified_context_cannot_inherit_semantic_state() {
         let root = TempDir::new().unwrap();
         let output = super::generation(b"output path");
         let first_context = super::generation(b"first context");
@@ -1844,15 +2280,14 @@ mod tests {
         )
         .unwrap();
 
-        let inherited = super::load_matching(
+        let error = super::load_matching(
             &second_path,
             Some(&new_generation),
             Some(&semantic),
             "test private state",
         )
-        .unwrap()
-        .unwrap();
-        assert_eq!(inherited.graph, private);
+        .unwrap_err();
+        assert_eq!(error.kind(), "guard");
     }
 
     #[test]
@@ -1958,7 +2393,7 @@ mod tests {
     #[test]
     fn new_commit_inherits_only_unique_exact_generation_state() {
         let root = TempDir::new().unwrap();
-        let git_dir = create_git(root.path(), "ref: refs/heads/main\n");
+        init_real_git(root.path());
         let output_dir = root.path().join("public");
         fs::create_dir_all(&output_dir).unwrap();
         let output = output_dir.join("graph.json");
@@ -1970,11 +2405,7 @@ mod tests {
         let mut beta = Graph::new();
         beta.manifest.tool_version = "beta-private-lineage".to_owned();
 
-        write_ref(
-            &git_dir,
-            "refs/heads/main",
-            "1111111111111111111111111111111111111111",
-        );
+        commit_real_git(root.path(), "first");
         let alpha_path = super::path_for_output(&output, &legacy).unwrap();
         super::write_state(
             &alpha_path,
@@ -1982,11 +2413,7 @@ mod tests {
         )
         .unwrap();
 
-        write_ref(
-            &git_dir,
-            "refs/heads/main",
-            "2222222222222222222222222222222222222222",
-        );
+        commit_real_git(root.path(), "second");
         let inherited_path = super::path_for_output(&output, &legacy).unwrap();
         let inherited = super::load_matching(
             &inherited_path,
@@ -1998,11 +2425,7 @@ mod tests {
         .unwrap();
         assert_eq!(inherited.graph, alpha);
 
-        write_ref(
-            &git_dir,
-            "refs/heads/main",
-            "3333333333333333333333333333333333333333",
-        );
+        commit_real_git(root.path(), "third");
         let beta_path = super::path_for_output(&output, &legacy).unwrap();
         super::write_state(
             &beta_path,
@@ -2010,11 +2433,7 @@ mod tests {
         )
         .unwrap();
 
-        write_ref(
-            &git_dir,
-            "refs/heads/main",
-            "4444444444444444444444444444444444444444",
-        );
+        commit_real_git(root.path(), "fourth");
         let ambiguous_path = super::path_for_output(&output, &legacy).unwrap();
         let error = super::load_matching(
             &ambiguous_path,
@@ -2024,6 +2443,40 @@ mod tests {
         )
         .unwrap_err();
         assert_eq!(error.kind(), "guard");
+    }
+
+    #[test]
+    fn unrelated_history_cannot_inherit_matching_private_state() {
+        let root = TempDir::new().unwrap();
+        init_real_git(root.path());
+        commit_real_git(root.path(), "ancestor");
+        let output_dir = root.path().join("public");
+        fs::create_dir_all(&output_dir).unwrap();
+        let output = output_dir.join("graph.json");
+        let legacy = output_dir.join(".habitat-graph-state.json");
+        let generation = super::generation(b"shared public bytes");
+        let semantic = super::semantic_generation(&Graph::new()).unwrap();
+        let mut private = Graph::new();
+        private.manifest.tool_version = "ancestor-private-lineage".to_owned();
+        let ancestor_path = super::path_for_output(&output, &legacy).unwrap();
+        super::write_state(
+            &ancestor_path,
+            &super::serialize(&private, &generation, &semantic).unwrap(),
+        )
+        .unwrap();
+
+        git(root.path(), &["checkout", "-q", "--orphan", "unrelated"]);
+        git(root.path(), &["rm", "-q", "-f", "lineage.txt"]);
+        commit_real_git(root.path(), "unrelated");
+        let unrelated_path = super::path_for_output(&output, &legacy).unwrap();
+        let inherited = super::load_matching(
+            &unrelated_path,
+            Some(&generation),
+            Some(&semantic),
+            "test private state",
+        )
+        .unwrap();
+        assert!(inherited.is_none());
     }
 
     #[test]

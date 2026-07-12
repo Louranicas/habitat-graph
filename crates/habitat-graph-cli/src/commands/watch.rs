@@ -86,6 +86,15 @@ pub fn rebuild(dir: &Path, out: &Path) -> Result<usize> {
 
     let n = graph.nodes.len();
 
+    std::fs::create_dir_all(out).map_err(|error| GraphError::Io(error.to_string()))?;
+    let legacy_state = out.join(".habitat-graph-state.json");
+    #[cfg(unix)]
+    let state_path = super::private_state::path_for_output(&out.join("graph.json"), &legacy_state)?;
+    #[cfg(not(unix))]
+    let state_path = legacy_state;
+    let _output_lock = super::private_state::acquire_output_lock(&state_path)?;
+    super::private_state::ensure_no_pending_add_journals(&state_path)?;
+    super::private_state::ensure_no_pending_update_journals(&state_path)?;
     super::extract::write_public_artifacts(out, &graph, super::extract::ExtractOpts::default())?;
 
     Ok(n)
@@ -794,6 +803,22 @@ mod tests {
             try_rebuild_locked(&src, &out).is_ok(),
             "public try_rebuild_locked must succeed when global lock is free"
         );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn rebuild_respects_the_cross_process_output_lock() {
+        let src = tdir();
+        let out = tdir();
+        mk(&src, "lib.rs", "fn locked() {}");
+        let state = out.join(".habitat-graph-state.json");
+        let lock = super::super::private_state::acquire_output_lock(&state).unwrap();
+
+        let error = rebuild(&src, &out).unwrap_err();
+        assert_eq!(error.kind(), "guard");
+        assert!(!out.join("graph.json").exists());
+        drop(lock);
+        rebuild(&src, &out).unwrap();
     }
 
     // ── run: no-feature one-shot mode ─────────────────────────────────────────

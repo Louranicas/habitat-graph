@@ -10,10 +10,12 @@ use habitat_graph_core::{Graph, GraphError, Result};
 /// the conservative legacy signature during first migration) may be removed on a later sync.
 const VAULT_MANIFEST: &str = ".habitat-graph-generated.json";
 const LEGACY_VAULT_MANIFEST_SCHEMA: &str = "habitat-graph.vault-manifest.v1";
-const VAULT_MANIFEST_SCHEMA: &str = "habitat-graph.vault-manifest.v2";
+const PENDING_VAULT_MANIFEST_SCHEMA: &str = "habitat-graph.vault-manifest.v2";
+const VAULT_MANIFEST_SCHEMA: &str = "habitat-graph.vault-manifest.v3";
 const WIKI_MANIFEST: &str = ".habitat-graph-generated.json";
 const LEGACY_WIKI_MANIFEST_SCHEMA: &str = "habitat-graph.wiki-manifest.v1";
-const WIKI_MANIFEST_SCHEMA: &str = "habitat-graph.wiki-manifest.v2";
+const PENDING_WIKI_MANIFEST_SCHEMA: &str = "habitat-graph.wiki-manifest.v2";
+const WIKI_MANIFEST_SCHEMA: &str = "habitat-graph.wiki-manifest.v3";
 const OPTIONAL_ARTIFACT_MANIFEST: &str = ".habitat-graph-artifacts.json";
 const OPTIONAL_ARTIFACT_MANIFEST_SCHEMA: &str = "habitat-graph.artifact-manifest.v1";
 const OPTIONAL_ARTIFACTS: &[&str] = &["graph.svg", "graph.graphml", "graph.cypher"];
@@ -331,6 +333,7 @@ fn read_generated_manifest(
     directory: &Path,
     manifest_name: &str,
     legacy_schema: &str,
+    pending_schema: &str,
     schema: &str,
     valid_filename: fn(&str) -> bool,
     context: &str,
@@ -356,7 +359,7 @@ fn read_generated_manifest(
     let value: serde_json::Value = serde_json::from_str(&text)
         .map_err(|error| GraphError::Schema(format!("{context} manifest parse: {error}")))?;
     let manifest_schema = value["schema"].as_str();
-    if !matches!(manifest_schema, Some(candidate) if candidate == legacy_schema || candidate == schema)
+    if !matches!(manifest_schema, Some(candidate) if candidate == legacy_schema || candidate == pending_schema || candidate == schema)
     {
         return Err(GraphError::Schema(format!(
             "unsupported {context} manifest schema: {:?}",
@@ -378,43 +381,79 @@ fn read_generated_manifest(
         }
     }
 
-    if manifest_schema == Some(schema) {
+    if matches!(manifest_schema, Some(candidate) if candidate == pending_schema || candidate == schema)
+    {
         let pending = value["pending"].as_object().ok_or_else(|| {
             GraphError::Schema(format!("{context} manifest `pending` must be an object"))
         })?;
-        for (filename, expected) in pending {
-            let expected = expected.as_str().ok_or_else(|| {
-                GraphError::Schema(format!("{context} manifest pending hash must be a string"))
-            })?;
-            if !valid_filename(filename)
-                || !is_content_generation(expected)
-                || owned.contains(filename)
-            {
-                return Err(GraphError::Guard(format!(
-                    "invalid pending generated {context} file: {filename:?}"
-                )));
+        recover_hashed_owned_files(
+            directory,
+            pending,
+            &mut owned,
+            valid_filename,
+            context,
+            "pending",
+        )?;
+        if manifest_schema == Some(pending_schema) && !pending.is_empty() {
+            return Err(GraphError::Guard(format!(
+                "cannot safely resume legacy pending {context} ownership transaction"
+            )));
+        }
+    }
+    if manifest_schema == Some(schema) {
+        let deleting = value["deleting"].as_object().ok_or_else(|| {
+            GraphError::Schema(format!("{context} manifest `deleting` must be an object"))
+        })?;
+        recover_hashed_owned_files(
+            directory,
+            deleting,
+            &mut owned,
+            valid_filename,
+            context,
+            "deleting",
+        )?;
+    }
+    Ok(Some(owned))
+}
+
+fn recover_hashed_owned_files(
+    directory: &Path,
+    entries: &serde_json::Map<String, serde_json::Value>,
+    owned: &mut HashSet<String>,
+    valid_filename: fn(&str) -> bool,
+    context: &str,
+    phase: &str,
+) -> Result<()> {
+    for (filename, expected) in entries {
+        let expected = expected.as_str().ok_or_else(|| {
+            GraphError::Schema(format!("{context} manifest {phase} hash must be a string"))
+        })?;
+        if !valid_filename(filename) || !is_content_generation(expected) || owned.contains(filename)
+        {
+            return Err(GraphError::Guard(format!(
+                "invalid {phase} generated {context} file: {filename:?}"
+            )));
+        }
+        let destination = directory.join(filename);
+        let metadata = match std::fs::symlink_metadata(&destination) {
+            Ok(metadata) => metadata,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
+            Err(error) => {
+                return Err(GraphError::Io(format!(
+                    "inspect {phase} {context} file {filename}: {error}"
+                )))
             }
-            let destination = directory.join(filename);
-            let metadata = match std::fs::symlink_metadata(&destination) {
-                Ok(metadata) => metadata,
-                Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
-                Err(error) => {
-                    return Err(GraphError::Io(format!(
-                        "inspect pending {context} file {filename}: {error}"
-                    )))
-                }
-            };
-            if metadata.file_type().is_file() {
-                let bytes = std::fs::read(&destination).map_err(|error| {
-                    GraphError::Io(format!("read pending {context} file {filename}: {error}"))
-                })?;
-                if content_generation(&bytes) == expected {
-                    owned.insert(filename.clone());
-                }
+        };
+        if metadata.file_type().is_file() {
+            let bytes = std::fs::read(&destination).map_err(|error| {
+                GraphError::Io(format!("read {phase} {context} file {filename}: {error}"))
+            })?;
+            if content_generation(&bytes) == expected {
+                owned.insert(filename.clone());
             }
         }
     }
-    Ok(Some(owned))
+    Ok(())
 }
 
 fn write_generated_manifest(
@@ -423,6 +462,7 @@ fn write_generated_manifest(
     schema: &str,
     names: &HashSet<String>,
     pending: &BTreeMap<String, String>,
+    deleting: &BTreeMap<String, String>,
     context: &str,
 ) -> Result<()> {
     let mut files: Vec<&str> = names.iter().map(String::as_str).collect();
@@ -431,6 +471,7 @@ fn write_generated_manifest(
         "schema": schema,
         "files": files,
         "pending": pending,
+        "deleting": deleting,
     }))
     .map_err(|error| GraphError::Schema(format!("{context} manifest serialize: {error}")))?;
     super::atomic_file::write(
@@ -452,6 +493,37 @@ fn pending_generated_files(
         .collect()
 }
 
+fn pending_deleted_files(
+    directory: &Path,
+    prior_owned: &HashSet<String>,
+    current_names: &HashSet<String>,
+    context: &str,
+) -> Result<BTreeMap<String, String>> {
+    let mut deleting = BTreeMap::new();
+    for filename in prior_owned.difference(current_names) {
+        let destination = directory.join(filename);
+        let metadata = match std::fs::symlink_metadata(&destination) {
+            Ok(metadata) => metadata,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
+            Err(error) => {
+                return Err(GraphError::Io(format!(
+                    "inspect stale {context} file {filename}: {error}"
+                )))
+            }
+        };
+        if !metadata.file_type().is_file() {
+            return Err(GraphError::Guard(format!(
+                "refusing to remove unsafe stale {context} file: {}",
+                destination.display()
+            )));
+        }
+        let bytes = std::fs::read(&destination)
+            .map_err(|error| GraphError::Io(format!("read stale {context} file: {error}")))?;
+        deleting.insert(filename.clone(), content_generation(&bytes));
+    }
+    Ok(deleting)
+}
+
 fn content_generation(bytes: &[u8]) -> String {
     blake3::hash(bytes).to_hex().to_string()
 }
@@ -470,6 +542,7 @@ fn generated_vault_ownership(vault_dir: &Path) -> Result<HashSet<String>> {
         vault_dir,
         VAULT_MANIFEST,
         LEGACY_VAULT_MANIFEST_SCHEMA,
+        PENDING_VAULT_MANIFEST_SCHEMA,
         VAULT_MANIFEST_SCHEMA,
         safe_vault_filename,
         "vault",
@@ -513,13 +586,14 @@ fn generated_vault_ownership(vault_dir: &Path) -> Result<HashSet<String>> {
 }
 
 fn write_vault_manifest(vault_dir: &Path, names: &HashSet<String>) -> Result<()> {
-    write_vault_manifest_state(vault_dir, names, &BTreeMap::new())
+    write_vault_manifest_state(vault_dir, names, &BTreeMap::new(), &BTreeMap::new())
 }
 
 fn write_vault_manifest_state(
     vault_dir: &Path,
     names: &HashSet<String>,
     pending: &BTreeMap<String, String>,
+    deleting: &BTreeMap<String, String>,
 ) -> Result<()> {
     write_generated_manifest(
         vault_dir,
@@ -527,6 +601,7 @@ fn write_vault_manifest_state(
         VAULT_MANIFEST_SCHEMA,
         names,
         pending,
+        deleting,
         "vault",
     )
 }
@@ -562,7 +637,9 @@ fn sync_generated_vault(vault_dir: &Path, rendered: &[(String, String)]) -> Resu
     }
 
     let pending = pending_generated_files(rendered, &prior_owned);
-    write_vault_manifest_state(vault_dir, &prior_owned, &pending)?;
+    let deleting = pending_deleted_files(vault_dir, &prior_owned, &current_names, "vault")?;
+    let retained = prior_owned.intersection(&current_names).cloned().collect();
+    write_vault_manifest_state(vault_dir, &retained, &pending, &deleting)?;
 
     // Remove only files proven to be generated by the prior manifest/signature. This happens
     // before new writes so a legacy raw-label note cannot remain beside its redacted successor.
@@ -803,6 +880,7 @@ fn generated_wiki_ownership(wiki_dir: &Path, claim_unowned: bool) -> Result<Hash
         wiki_dir,
         WIKI_MANIFEST,
         LEGACY_WIKI_MANIFEST_SCHEMA,
+        PENDING_WIKI_MANIFEST_SCHEMA,
         WIKI_MANIFEST_SCHEMA,
         generated_wiki_filename,
         "wiki",
@@ -844,13 +922,14 @@ fn generated_wiki_ownership(wiki_dir: &Path, claim_unowned: bool) -> Result<Hash
 }
 
 fn write_wiki_manifest(wiki_dir: &Path, names: &HashSet<String>) -> Result<()> {
-    write_wiki_manifest_state(wiki_dir, names, &BTreeMap::new())
+    write_wiki_manifest_state(wiki_dir, names, &BTreeMap::new(), &BTreeMap::new())
 }
 
 fn write_wiki_manifest_state(
     wiki_dir: &Path,
     names: &HashSet<String>,
     pending: &BTreeMap<String, String>,
+    deleting: &BTreeMap<String, String>,
 ) -> Result<()> {
     write_generated_manifest(
         wiki_dir,
@@ -858,6 +937,7 @@ fn write_wiki_manifest_state(
         WIKI_MANIFEST_SCHEMA,
         names,
         pending,
+        deleting,
         "wiki",
     )
 }
@@ -922,7 +1002,9 @@ pub(super) fn sync_generated_wiki(
     }
 
     let pending = pending_generated_files(rendered, &prior_owned);
-    write_wiki_manifest_state(wiki_dir, &prior_owned, &pending)?;
+    let deleting = pending_deleted_files(wiki_dir, &prior_owned, &current_names, "wiki")?;
+    let retained = prior_owned.intersection(&current_names).cloned().collect();
+    write_wiki_manifest_state(wiki_dir, &retained, &pending, &deleting)?;
 
     for stale in prior_owned.difference(&current_names) {
         if let Err(error) = std::fs::remove_file(wiki_dir.join(stale)) {
@@ -1100,39 +1182,54 @@ pub(super) fn write_public_artifacts(out: &Path, graph: &Graph, opts: ExtractOpt
     )?;
 
     let json = habitat_graph_export::to_node_link(graph)?;
-    std::fs::write(out.join("graph.json"), json.as_bytes())
-        .map_err(|error| GraphError::Io(error.to_string()))?;
+    super::atomic_file::write(
+        &out.join("graph.json"),
+        json.as_bytes(),
+        false,
+        "graph.json",
+    )?;
 
     let report = habitat_graph_export::render_report(graph);
-    std::fs::write(out.join("GRAPH_REPORT.md"), report.as_bytes())
-        .map_err(|error| GraphError::Io(error.to_string()))?;
+    super::atomic_file::write(
+        &out.join("GRAPH_REPORT.md"),
+        report.as_bytes(),
+        false,
+        "GRAPH_REPORT.md",
+    )?;
 
     let html = habitat_graph_export::render_html(graph)?;
-    std::fs::write(out.join("graph.html"), html.as_bytes())
-        .map_err(|error| GraphError::Io(error.to_string()))?;
+    super::atomic_file::write(
+        &out.join("graph.html"),
+        html.as_bytes(),
+        false,
+        "graph.html",
+    )?;
 
     if svg_selected {
-        std::fs::write(
+        super::atomic_file::write(
             &svg_path,
             habitat_graph_export::render_svg(graph).as_bytes(),
-        )
-        .map_err(|error| GraphError::Io(format!("graph.svg: {error}")))?;
+            false,
+            "graph.svg",
+        )?;
     }
 
     if graphml_selected {
-        std::fs::write(
+        super::atomic_file::write(
             &graphml_path,
             habitat_graph_export::render_graphml(graph).as_bytes(),
-        )
-        .map_err(|error| GraphError::Io(format!("graph.graphml: {error}")))?;
+            false,
+            "graph.graphml",
+        )?;
     }
 
     if cypher_selected {
-        std::fs::write(
+        super::atomic_file::write(
             &cypher_path,
             habitat_graph_export::render_cypher(graph).as_bytes(),
-        )
-        .map_err(|error| GraphError::Io(format!("graph.cypher: {error}")))?;
+            false,
+            "graph.cypher",
+        )?;
     }
 
     if had_optional_manifest || opts.svg || opts.graphml || opts.neo4j {
@@ -1186,6 +1283,15 @@ fn run_inner(
     // Re-sort to canonicalize the community list (idempotent on nodes/edges).
     let graph = graph.sorted();
 
+    std::fs::create_dir_all(out).map_err(|error| GraphError::Io(error.to_string()))?;
+    let legacy_state = out.join(".habitat-graph-state.json");
+    #[cfg(unix)]
+    let state_path = super::private_state::path_for_output(&out.join("graph.json"), &legacy_state)?;
+    #[cfg(not(unix))]
+    let state_path = legacy_state;
+    let _output_lock = super::private_state::acquire_output_lock(&state_path)?;
+    super::private_state::ensure_no_pending_add_journals(&state_path)?;
+    super::private_state::ensure_no_pending_update_journals(&state_path)?;
     write_public_artifacts(out, &graph, opts)?;
 
     // Optionally emit an Obsidian vault — one note per node (`[[wikilinks]]` + frontmatter/tags)
@@ -1527,9 +1633,10 @@ mod tests {
 
         assert!(sync_generated_vault(vault.path(), &rendered).is_err());
         let pending = fs::read_to_string(vault.path().join(super::VAULT_MANIFEST)).unwrap();
-        for filename in ["stale.md", "blocked.md", "current.md"] {
+        for filename in ["stale.md", "blocked.md"] {
             assert!(pending.contains(filename));
         }
+        assert!(!pending.contains("current.md"));
 
         fs::remove_dir(vault.path().join("blocked.md")).unwrap();
         sync_generated_vault(vault.path(), &rendered).unwrap();
@@ -1556,6 +1663,7 @@ mod tests {
             vault.path(),
             &std::collections::HashSet::new(),
             &pending,
+            &std::collections::BTreeMap::new(),
         )
         .unwrap();
         fs::write(vault.path().join("new.md"), "user note").unwrap();
@@ -1569,6 +1677,36 @@ mod tests {
 
         fs::write(vault.path().join("new.md"), expected).unwrap();
         sync_generated_vault(vault.path(), &rendered).unwrap();
+    }
+
+    #[test]
+    fn vault_pending_deletion_requires_the_recorded_content() {
+        let vault = TempDir::new().unwrap();
+        let stale = "generated stale note";
+        fs::write(vault.path().join("stale.md"), stale).unwrap();
+        let deleting = std::collections::BTreeMap::from([(
+            "stale.md".to_owned(),
+            super::content_generation(stale.as_bytes()),
+        )]);
+        super::write_vault_manifest_state(
+            vault.path(),
+            &std::collections::HashSet::new(),
+            &std::collections::BTreeMap::new(),
+            &deleting,
+        )
+        .unwrap();
+        fs::remove_file(vault.path().join("stale.md")).unwrap();
+        fs::write(vault.path().join("stale.md"), "user replacement").unwrap();
+
+        sync_generated_vault(
+            vault.path(),
+            &[("current.md".to_owned(), "current".to_owned())],
+        )
+        .unwrap();
+        assert_eq!(
+            fs::read_to_string(vault.path().join("stale.md")).unwrap(),
+            "user replacement"
+        );
     }
 
     #[test]
@@ -2186,9 +2324,10 @@ mod tests {
 
         assert!(sync_generated_wiki(wiki.path(), &rendered, false).is_err());
         let pending = fs::read_to_string(wiki.path().join(super::WIKI_MANIFEST)).unwrap();
-        for filename in ["node-1.md", "node-2.md", "index.md"] {
+        for filename in ["node-1.md", "node-2.md"] {
             assert!(pending.contains(filename));
         }
+        assert!(!pending.contains("index.md"));
 
         fs::remove_dir(wiki.path().join("node-2.md")).unwrap();
         sync_generated_wiki(wiki.path(), &rendered, false).unwrap();
@@ -2211,8 +2350,13 @@ mod tests {
             "index.md".to_owned(),
             super::content_generation(expected.as_bytes()),
         )]);
-        super::write_wiki_manifest_state(wiki.path(), &std::collections::HashSet::new(), &pending)
-            .unwrap();
+        super::write_wiki_manifest_state(
+            wiki.path(),
+            &std::collections::HashSet::new(),
+            &pending,
+            &std::collections::BTreeMap::new(),
+        )
+        .unwrap();
         fs::write(wiki.path().join("index.md"), "user page").unwrap();
         let rendered = vec![("index.md".to_owned(), expected.to_owned())];
 
@@ -2224,6 +2368,37 @@ mod tests {
 
         fs::write(wiki.path().join("index.md"), expected).unwrap();
         sync_generated_wiki(wiki.path(), &rendered, false).unwrap();
+    }
+
+    #[test]
+    fn wiki_pending_deletion_requires_the_recorded_content() {
+        let wiki = TempDir::new().unwrap();
+        let stale = "generated stale page";
+        fs::write(wiki.path().join("node-1.md"), stale).unwrap();
+        let deleting = std::collections::BTreeMap::from([(
+            "node-1.md".to_owned(),
+            super::content_generation(stale.as_bytes()),
+        )]);
+        super::write_wiki_manifest_state(
+            wiki.path(),
+            &std::collections::HashSet::new(),
+            &std::collections::BTreeMap::new(),
+            &deleting,
+        )
+        .unwrap();
+        fs::remove_file(wiki.path().join("node-1.md")).unwrap();
+        fs::write(wiki.path().join("node-1.md"), "user replacement").unwrap();
+
+        sync_generated_wiki(
+            wiki.path(),
+            &[("index.md".to_owned(), "current".to_owned())],
+            false,
+        )
+        .unwrap();
+        assert_eq!(
+            fs::read_to_string(wiki.path().join("node-1.md")).unwrap(),
+            "user replacement"
+        );
     }
 
     #[test]
