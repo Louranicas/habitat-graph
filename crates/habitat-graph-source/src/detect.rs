@@ -26,8 +26,12 @@ pub fn detect(root: &Path, extensions: &[&str]) -> Result<Vec<PathBuf>> {
     let lowered: Vec<String> = extensions.iter().map(|e| e.to_lowercase()).collect();
 
     let mut paths: Vec<PathBuf> = Vec::new();
+    let mut walker = ignore::WalkBuilder::new(root);
+    // The scan root can be a staged source tree without `.git` metadata. Its explicit
+    // `.gitignore` files still define the extraction boundary and must be honored.
+    walker.require_git(false);
 
-    for entry in ignore::WalkBuilder::new(root).build() {
+    for entry in walker.build() {
         let entry = entry.map_err(|e| GraphError::Io(e.to_string()))?;
 
         // Skip directories, symlinks-to-directories, and special files.
