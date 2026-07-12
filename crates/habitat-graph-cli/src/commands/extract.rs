@@ -689,7 +689,7 @@ fn legacy_generated_wiki_ownership(contents: &BTreeMap<String, String>) -> HashS
         }
     }
 
-    let mut owned: HashSet<String> = nodes.into_keys().collect();
+    let mut owned = indexed;
     owned.insert("index.md".to_owned());
     owned
 }
@@ -2048,6 +2048,13 @@ mod tests {
             ),
         )
         .unwrap();
+        let unindexed_id = if node_id == u32::MAX {
+            node_id - 1
+        } else {
+            node_id + 1
+        };
+        let unindexed = "# User article\n\nSource: `notes.md` line 1\n\n## Outbound\n\n_none_\n\n## Inbound\n\n_none_\n";
+        fs::write(wiki.join(format!("node-{unindexed_id}.md")), unindexed).unwrap();
         let opts = ExtractOpts {
             wiki: true,
             ..ExtractOpts::default()
@@ -2060,6 +2067,10 @@ mod tests {
             assert!(content.contains(habitat_graph_export::wiki::GENERATED_WIKI_SIGNATURE));
             assert!(!content.contains(raw_label));
         }
+        assert_eq!(
+            fs::read_to_string(wiki.join(format!("node-{unindexed_id}.md"))).unwrap(),
+            unindexed
+        );
     }
 
     #[test]

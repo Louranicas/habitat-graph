@@ -224,10 +224,10 @@ pub fn merge_into_output(new_graph: Graph, out: &Path) -> Result<()> {
 
     let legacy_state_path = legacy_private_state_path(out)?;
     let state_path = super::private_state::path_for_output(out, &legacy_state_path)?;
+    let legacy_journal_path = add_journal_path(&legacy_state_path)?;
+    let journal_path = add_journal_path(&state_path)?;
+    super::private_state::migrate(&legacy_journal_path, &journal_path, "legacy add journal")?;
     super::private_state::ensure(&state_path)?;
-    if state_path != legacy_state_path {
-        super::private_state::ensure(&legacy_state_path)?;
-    }
     let mut public_prior = load_public_output(out)?;
     let recovered_add = recover_add_journal(out, &state_path, &mut public_prior)?;
     let private_prior = load_private_state(&state_path, &legacy_state_path)?;
@@ -236,11 +236,15 @@ pub fn merge_into_output(new_graph: Graph, out: &Path) -> Result<()> {
         _ => false,
     };
     let prior = if recovered_add {
-        private_prior.ok_or_else(|| {
+        private_prior.map(|state| state.graph).ok_or_else(|| {
             GraphError::Io("recovered add journal did not restore private state".to_owned())
         })?
     } else {
-        select_prior(private_prior, public_prior.graph.clone())?
+        select_prior(
+            private_prior,
+            public_prior.graph.clone(),
+            public_prior.content_generation.as_deref(),
+        )?
     };
     let merged = if replaying_legacy_projection {
         new_graph.sorted()
@@ -248,11 +252,14 @@ pub fn merge_into_output(new_graph: Graph, out: &Path) -> Result<()> {
         habitat_graph_build::merge(new_graph, prior).sorted()
     };
 
-    let state_json = merged.to_json()?;
     let json = habitat_graph_export::to_node_link(&merged)?;
+    let state_json = super::private_state::serialize(
+        &merged,
+        &super::private_state::generation(json.as_bytes()),
+    )?;
     write_add_journal(&state_path, public_prior.graph.as_ref(), &merged, &json)?;
     super::atomic_file::write(out, json.as_bytes(), false, "public graph")?;
-    super::private_state::write(&state_path, state_json.as_bytes())?;
+    super::private_state::write(&state_path, &state_json)?;
     super::private_state::remove(&add_journal_path(&state_path)?, "add journal")?;
     if state_path != legacy_state_path {
         super::private_state::remove(&legacy_state_path, "legacy private state")?;
@@ -320,7 +327,10 @@ fn load_public_output(out: &Path) -> Result<PublicOutput> {
     })
 }
 
-fn load_private_state(path: &Path, legacy: &Path) -> Result<Option<Graph>> {
+fn load_private_state(
+    path: &Path,
+    legacy: &Path,
+) -> Result<Option<super::private_state::StoredGraph>> {
     let selected = if path.exists() {
         path
     } else if legacy != path && legacy.exists() {
@@ -330,14 +340,14 @@ fn load_private_state(path: &Path, legacy: &Path) -> Result<Option<Graph>> {
     };
     let text = std::fs::read_to_string(selected)
         .map_err(|error| GraphError::Io(format!("read private add state: {error}")))?;
-    let graph = Graph::from_json(&text)?;
-    if graph.schema != SCHEMA_VERSION {
+    let state = super::private_state::parse(&text)?;
+    if state.graph.schema != SCHEMA_VERSION {
         return Err(GraphError::Schema(format!(
             "private add state schema mismatch: stored={:?}, current={SCHEMA_VERSION:?}",
-            graph.schema
+            state.graph.schema
         )));
     }
-    Ok(Some(graph))
+    Ok(Some(state))
 }
 
 struct AddJournal {
@@ -349,7 +359,7 @@ struct AddJournal {
 }
 
 fn content_generation(text: &str) -> String {
-    blake3::hash(text.as_bytes()).to_hex().to_string()
+    super::private_state::generation(text.as_bytes())
 }
 
 fn public_graph_state(graph: &Graph) -> Graph {
@@ -545,8 +555,11 @@ fn recover_add_journal(out: &Path, state_path: &Path, public: &mut PublicOutput)
             "public graph recovery",
         )?;
     }
-    let state_json = journal.graph.to_json()?;
-    super::private_state::write(state_path, state_json.as_bytes())?;
+    let state_json = super::private_state::serialize(
+        &journal.graph,
+        &super::private_state::generation(journal.public_json.as_bytes()),
+    )?;
+    super::private_state::write(state_path, &state_json)?;
     super::private_state::remove(&add_journal_path(state_path)?, "add journal")?;
     *public = PublicOutput {
         graph: Some(intended_graph),
@@ -559,18 +572,29 @@ fn recover_add_journal(out: &Path, state_path: &Path, public: &mut PublicOutput)
     Ok(true)
 }
 
-fn select_prior(private: Option<Graph>, public: Option<Graph>) -> Result<Graph> {
+fn select_prior(
+    private: Option<super::private_state::StoredGraph>,
+    public: Option<Graph>,
+    public_generation: Option<&str>,
+) -> Result<Graph> {
     match (private, public) {
         (Some(private), Some(public)) => {
-            let private_projection = habitat_graph_export::to_node_link(&private)?;
+            if let Some(committed_generation) = private.public_generation.as_deref() {
+                return if Some(committed_generation) == public_generation {
+                    Ok(private.graph)
+                } else {
+                    Ok(public)
+                };
+            }
+            let private_projection = habitat_graph_export::to_node_link(&private.graph)?;
             let public_projection = habitat_graph_export::to_node_link(&public)?;
             if private_projection == public_projection {
-                Ok(private)
+                Ok(private.graph)
             } else {
                 Ok(public)
             }
         }
-        (Some(private), None) => Ok(private),
+        (Some(private), None) => Ok(private.graph),
         (None, Some(public)) => Ok(public),
         (None, None) => Ok(Graph::default()),
     }
@@ -1062,6 +1086,39 @@ mod tests {
     }
 
     #[test]
+    fn committed_generation_preserves_private_lineage_across_policy_changes() {
+        let d = tdir();
+        let out = d.join("g.json");
+        let mut private = extract_from_bytes(b"fn original() {}", "rs").unwrap();
+        private.nodes[0].label = "api_key=x xox(b)-secret".to_owned();
+        let mut old_public: serde_json::Value = serde_json::from_str(
+            &habitat_graph_export::to_node_link(&private).expect("render private graph"),
+        )
+        .unwrap();
+        old_public["nodes"][0]["label"] = serde_json::json!("[REDACTED:api_key]");
+        let old_public = serde_json::to_string_pretty(&old_public).unwrap();
+        fs::write(&out, &old_public).unwrap();
+
+        let state_path = super::private_state_path(&out).unwrap();
+        let state = super::super::private_state::serialize(
+            &private,
+            &super::super::private_state::generation(old_public.as_bytes()),
+        )
+        .unwrap();
+        super::super::private_state::write(&state_path, &state).unwrap();
+
+        let added = extract_from_bytes(b"fn added() {}", "rs").unwrap();
+        merge_into_output(added, &out).unwrap();
+
+        let private_after = fs::read_to_string(&state_path).unwrap();
+        assert!(private_after.contains("api_key=x xox(b)-secret"));
+        let public_after = fs::read_to_string(&out).unwrap();
+        assert!(public_after.contains("api_key,slack_token"));
+        assert!(public_after.contains("added"));
+        assert!(!public_after.contains("xox(b)-secret"));
+    }
+
+    #[test]
     fn merge_recovers_a_pending_public_commit_before_accepting_another_add() {
         let d = tdir();
         let out = d.join("g.json");
@@ -1269,6 +1326,33 @@ mod tests {
                 0o600
             );
         }
+    }
+
+    #[test]
+    fn git_legacy_state_is_migrated_before_public_output_validation() {
+        let d = tdir();
+        fs::create_dir(d.join(".git")).unwrap();
+        fs::create_dir(d.join(".git/objects")).unwrap();
+        fs::write(d.join(".git/HEAD"), "ref: refs/heads/main\n").unwrap();
+        let public = d.join("public");
+        fs::create_dir(&public).unwrap();
+        let out = public.join("graph.json");
+        fs::write(&out, "invalid public graph").unwrap();
+        let mut private = extract_from_bytes(b"fn private_lineage() {}", "rs").unwrap();
+        private.nodes[0].label = "api_key=private-lineage".to_owned();
+        let legacy = public.join(super::SHARED_PRIVATE_STATE);
+        fs::write(&legacy, private.to_json().unwrap()).unwrap();
+
+        assert!(merge_into_output(Graph::new(), &out).is_err());
+        assert!(!legacy.exists());
+        let states: Vec<_> = fs::read_dir(d.join(".git/habitat-graph/state"))
+            .unwrap()
+            .filter_map(std::result::Result::ok)
+            .collect();
+        assert_eq!(states.len(), 1);
+        assert!(fs::read_to_string(states[0].path())
+            .unwrap()
+            .contains("api_key=private-lineage"));
     }
 
     #[test]

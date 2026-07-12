@@ -10,9 +10,9 @@
 //!
 //! ## Sidecar format
 //!
-//! The sidecar stores the complete [`Graph`] in its internal JSON format
-//! (via [`Graph::to_json`] / [`Graph::from_json`]).  On the next incremental run three things
-//! are extracted from it without extra serialization overhead:
+//! The sidecar stores the complete [`Graph`] in graph-compatible JSON together with the generation
+//! of its committed public projection. On the next incremental run three things are extracted from
+//! it without extra serialization overhead:
 //!
 //! - `graph.schema` — the [`SCHEMA_VERSION`] at build time (for the P1-G12 mismatch guard).
 //! - `graph.manifest.inputs` — the `path → content_hash` map used to diff against the current
@@ -251,8 +251,8 @@ fn try_load_prior(sidecar_path: &Path) -> Result<Option<Graph>> {
         std::fs::read(sidecar_path).map_err(|e| GraphError::Io(format!("sidecar read: {e}")))?;
     let text = String::from_utf8_lossy(&bytes);
 
-    let graph = match Graph::from_json(&text) {
-        Ok(g) => g,
+    let graph = match super::private_state::parse(&text) {
+        Ok(state) => state.graph,
         Err(e) => {
             eprintln!("warning: sidecar parse failed ({e}): forcing full rebuild");
             return Ok(None);
@@ -339,8 +339,12 @@ fn write_artifacts(
     // that if it exists, the other artifacts were (at least attempted to be) written first.
     let mut sidecar = graph.clone();
     sidecar.manifest = current_manifest;
-    let sidecar_json = sidecar.to_json()?;
-    super::private_state::write(sidecar_path, sidecar_json.as_bytes())?;
+    let public_json = habitat_graph_export::to_node_link(graph)?;
+    let sidecar_json = super::private_state::serialize(
+        &sidecar,
+        &super::private_state::generation(public_json.as_bytes()),
+    )?;
+    super::private_state::write(sidecar_path, &sidecar_json)?;
     if sidecar_path != legacy_sidecar_path {
         super::private_state::remove(legacy_sidecar_path, "legacy private state")?;
     }

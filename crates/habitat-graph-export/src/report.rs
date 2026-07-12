@@ -6,7 +6,7 @@ use std::fmt::Write as _;
 use habitat_graph_analyze::degree_centrality;
 use habitat_graph_core::{display_safe, Graph, NodeId};
 
-use crate::escape::redact_public_text;
+use crate::escape::{markdown_code_span, markdown_text, redact_public_text};
 
 /// Renders a deterministic Markdown report: node/edge/community counts, the top hubs (by
 /// [`degree_centrality`](habitat_graph_analyze::degree_centrality)), a per-community summary, and a
@@ -62,7 +62,7 @@ pub fn render_report(graph: &Graph) -> String {
     } else {
         for &(label, degree) in &top_hubs {
             let redacted_label = redact_public_text(label);
-            let safe_label = display_safe(&redacted_label);
+            let safe_label = markdown_text(&display_safe(&redacted_label));
             let _ = writeln!(out, "- {safe_label} ({degree})");
         }
     }
@@ -107,22 +107,22 @@ fn push_suggested_queries(out: &mut String, top_hubs: &[(&str, usize)]) {
         (Some(first), None) => {
             // Single hub — two specific queries + a generic path query.
             let redacted = redact_public_text(first);
-            let safe = display_safe(&redacted);
-            let _ = writeln!(out, "- Show all edges connected to `{safe}`");
-            let _ = writeln!(out, "- Which nodes does `{safe}` depend on?");
+            let safe = markdown_code_span(&display_safe(&redacted));
+            let _ = writeln!(out, "- Show all edges connected to {safe}");
+            let _ = writeln!(out, "- Which nodes does {safe} depend on?");
             out.push_str("- Find the shortest path between any two nodes\n");
         }
         (Some(first), Some(second)) => {
             // Two or more hubs — three queries referencing the top two.
             let redacted_first = redact_public_text(first);
             let redacted_second = redact_public_text(second);
-            let safe_first = display_safe(&redacted_first);
-            let safe_second = display_safe(&redacted_second);
-            let _ = writeln!(out, "- Show all edges connected to `{safe_first}`");
-            let _ = writeln!(out, "- Which community contains `{safe_second}`?");
+            let safe_first = markdown_code_span(&display_safe(&redacted_first));
+            let safe_second = markdown_code_span(&display_safe(&redacted_second));
+            let _ = writeln!(out, "- Show all edges connected to {safe_first}");
+            let _ = writeln!(out, "- Which community contains {safe_second}?");
             let _ = writeln!(
                 out,
-                "- Find the path between `{safe_first}` and `{safe_second}`"
+                "- Find the path between {safe_first} and {safe_second}"
             );
         }
     }
@@ -564,6 +564,17 @@ mod tests {
         g.edges.push(make_edge(1, 1));
         let report = render_report(&g);
         assert!(!report.contains("api_key_assignment_refused"));
+        assert!(report.contains("[REDACTED:api_key]"));
+    }
+
+    #[test]
+    fn markdown_entities_cannot_reconstruct_secret_hub_labels() {
+        let mut g = Graph::new();
+        g.nodes.push(make_node(1, "api&#95;key=SECRET"));
+        g.edges.push(make_edge(1, 1));
+
+        let report = render_report(&g);
+        assert!(!report.contains("api&#95;key=SECRET"));
         assert!(report.contains("[REDACTED:api_key]"));
     }
 

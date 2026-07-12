@@ -9,10 +9,10 @@
 //! original label.
 
 pub use habitat_graph_core::redact_public_text;
+use habitat_graph_core::{display_safe, sanitize_label, Edge, Graph};
 pub(crate) use habitat_graph_core::{
     project_public_relation as project_relation, PublicRelationProjector,
 };
-use habitat_graph_core::{Edge, Graph};
 
 pub(crate) struct ProjectedPublicEdge<'a> {
     pub(crate) edge: &'a Edge,
@@ -23,7 +23,10 @@ pub(crate) fn project_public_edges(graph: &Graph) -> Vec<ProjectedPublicEdge<'_>
     let mut edges: Vec<(&Edge, String)> = graph
         .edges
         .iter()
-        .map(|edge| (edge, project_relation(&edge.relation)))
+        .map(|edge| {
+            let projected = project_relation(&edge.relation);
+            (edge, display_safe(&sanitize_label(&projected)))
+        })
         .collect();
     edges.sort_by(|(left, left_relation), (right, right_relation)| {
         (
@@ -48,6 +51,34 @@ pub(crate) fn project_public_edges(graph: &Graph) -> Vec<ProjectedPublicEdge<'_>
             relation: projector.project(edge.source, edge.target, &relation),
         })
         .collect()
+}
+
+pub(crate) fn markdown_text(input: &str) -> String {
+    let mut output = String::with_capacity(input.len());
+    for character in input.chars() {
+        match character {
+            '&' => output.push_str("&amp;"),
+            '<' => output.push_str("&lt;"),
+            '>' => output.push_str("&gt;"),
+            _ => output.push(character),
+        }
+    }
+    output
+}
+
+pub(crate) fn markdown_code_span(input: &str) -> String {
+    let mut longest = 0_usize;
+    let mut current = 0_usize;
+    for character in input.chars() {
+        if character == '`' {
+            current = current.saturating_add(1);
+            longest = longest.max(current);
+        } else {
+            current = 0;
+        }
+    }
+    let fence = "`".repeat(longest.saturating_add(1));
+    format!("{fence} {input} {fence}")
 }
 
 /// Escapes a string for safe embedding inside XML text or a double-quoted XML attribute.
@@ -103,7 +134,12 @@ pub fn cypher_escape(input: &str) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{cypher_escape, redact_public_text, xml_escape};
+    use habitat_graph_core::{Confidence, Edge, Graph, NodeId};
+
+    use super::{
+        cypher_escape, markdown_code_span, markdown_text, project_public_edges, redact_public_text,
+        xml_escape,
+    };
 
     #[test]
     fn redaction_leaves_clean_text_borrowed_and_unchanged() {
@@ -200,6 +236,42 @@ mod tests {
             redact_public_text("[REDACTED:api_key,api_key]"),
             "[REDACTED:api_key]"
         );
+    }
+
+    #[test]
+    fn projected_edges_sort_after_final_relation_normalization() {
+        let mut graph = Graph::new();
+        graph.edges.push(Edge {
+            source: NodeId::new(1),
+            target: NodeId::new(2),
+            relation: "a\u{0001}b".to_owned(),
+            confidence: Confidence::Ambiguous,
+        });
+        graph.edges.push(Edge {
+            source: NodeId::new(1),
+            target: NodeId::new(2),
+            relation: "ab".to_owned(),
+            confidence: Confidence::Extracted,
+        });
+
+        let projected = project_public_edges(&graph);
+        assert_eq!(projected[0].relation, "ab");
+        assert_eq!(projected[0].edge.confidence, Confidence::Extracted);
+        assert_eq!(projected[1].relation, "ab");
+        assert_eq!(projected[1].edge.confidence, Confidence::Ambiguous);
+    }
+
+    #[test]
+    fn markdown_text_neutralizes_html_parsing() {
+        assert_eq!(
+            markdown_text("api&#95;key=<em>secret</em>"),
+            "api&amp;#95;key=&lt;em&gt;secret&lt;/em&gt;"
+        );
+    }
+
+    #[test]
+    fn markdown_code_span_handles_embedded_backticks() {
+        assert_eq!(markdown_code_span("a`b``c"), "``` a`b``c ```");
     }
 
     #[test]

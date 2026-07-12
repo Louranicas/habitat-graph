@@ -1,9 +1,18 @@
+use std::io::Read as _;
 use std::path::{Path, PathBuf};
 
-use habitat_graph_core::{GraphError, Result};
+use habitat_graph_core::{Graph, GraphError, Result};
 
 #[cfg(unix)]
 use std::os::unix::fs::PermissionsExt as _;
+
+const PRIVATE_STATE_METADATA: &str = "_habitat_graph_private_state";
+const PRIVATE_STATE_SCHEMA: &str = "habitat-graph.private-state.v1";
+
+pub(super) struct StoredGraph {
+    pub(super) graph: Graph,
+    pub(super) public_generation: Option<String>,
+}
 
 pub(super) fn path_for_output(output: &Path, legacy: &Path) -> Result<PathBuf> {
     #[cfg(not(unix))]
@@ -34,7 +43,123 @@ pub(super) fn path_for_output(output: &Path, legacy: &Path) -> Result<PathBuf> {
             .ok_or_else(|| GraphError::Io("output path has no filename".to_owned()))?,
     );
     let key = output_key(&canonical_output);
-    Ok(state_dir.join(format!("{key}.json")))
+    let state_path = state_dir.join(format!("{key}.json"));
+    migrate(legacy, &state_path, "legacy private state")?;
+    Ok(state_path)
+}
+
+pub(super) fn generation(bytes: &[u8]) -> String {
+    blake3::hash(bytes).to_hex().to_string()
+}
+
+pub(super) fn serialize(graph: &Graph, public_generation: &str) -> Result<Vec<u8>> {
+    let mut value = serde_json::to_value(graph)
+        .map_err(|error| GraphError::Schema(format!("private state serialize: {error}")))?;
+    let object = value
+        .as_object_mut()
+        .ok_or_else(|| GraphError::Schema("private graph state must be an object".to_owned()))?;
+    object.insert(
+        PRIVATE_STATE_METADATA.to_owned(),
+        serde_json::json!({
+            "schema": PRIVATE_STATE_SCHEMA,
+            "public_generation": public_generation,
+        }),
+    );
+    serde_json::to_vec_pretty(&value)
+        .map_err(|error| GraphError::Schema(format!("private state serialize: {error}")))
+}
+
+pub(super) fn parse(text: &str) -> Result<StoredGraph> {
+    let graph = Graph::from_json(text)?;
+    let value: serde_json::Value = serde_json::from_str(text)
+        .map_err(|error| GraphError::Schema(format!("private state parse: {error}")))?;
+    let public_generation = match value.get(PRIVATE_STATE_METADATA) {
+        None => None,
+        Some(metadata) => {
+            if metadata["schema"] != PRIVATE_STATE_SCHEMA {
+                return Err(GraphError::Schema(format!(
+                    "unsupported private state metadata schema: {:?}",
+                    metadata["schema"]
+                )));
+            }
+            let generation = metadata["public_generation"].as_str().ok_or_else(|| {
+                GraphError::Schema("private state `public_generation` must be a string".to_owned())
+            })?;
+            if generation.len() != 64
+                || !generation
+                    .bytes()
+                    .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+            {
+                return Err(GraphError::Schema(
+                    "private state `public_generation` is invalid".to_owned(),
+                ));
+            }
+            Some(generation.to_owned())
+        }
+    };
+    Ok(StoredGraph {
+        graph,
+        public_generation,
+    })
+}
+
+pub(super) fn migrate(legacy: &Path, current: &Path, context: &str) -> Result<()> {
+    if legacy == current {
+        return Ok(());
+    }
+    ensure(current)?;
+    let metadata = match std::fs::symlink_metadata(legacy) {
+        Ok(metadata) => metadata,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(error) => {
+            return Err(GraphError::Io(format!(
+                "inspect {context} {}: {error}",
+                legacy.display()
+            )))
+        }
+    };
+    if !metadata.file_type().is_file() {
+        return Err(GraphError::Guard(format!(
+            "{context} is not a regular file: {}",
+            legacy.display()
+        )));
+    }
+    ensure(legacy)?;
+    if !current.exists() {
+        let bytes = read_regular(legacy, &metadata, context)?;
+        write(current, &bytes)?;
+    }
+    remove(legacy, context)
+}
+
+fn read_regular(path: &Path, expected: &std::fs::Metadata, context: &str) -> Result<Vec<u8>> {
+    let mut file = std::fs::File::open(path)
+        .map_err(|error| GraphError::Io(format!("read {context}: {error}")))?;
+    let opened = file
+        .metadata()
+        .map_err(|error| GraphError::Io(format!("inspect opened {context}: {error}")))?;
+    if !opened.file_type().is_file() || !same_file(expected, &opened) {
+        return Err(GraphError::Guard(format!(
+            "{context} changed while being migrated: {}",
+            path.display()
+        )));
+    }
+    let mut bytes = Vec::new();
+    file.read_to_end(&mut bytes)
+        .map_err(|error| GraphError::Io(format!("read {context}: {error}")))?;
+    Ok(bytes)
+}
+
+#[cfg(unix)]
+fn same_file(left: &std::fs::Metadata, right: &std::fs::Metadata) -> bool {
+    use std::os::unix::fs::MetadataExt as _;
+
+    left.dev() == right.dev() && left.ino() == right.ino()
+}
+
+#[cfg(not(unix))]
+fn same_file(_left: &std::fs::Metadata, _right: &std::fs::Metadata) -> bool {
+    true
 }
 
 fn find_git_dir(start: &Path) -> Result<Option<PathBuf>> {
@@ -235,6 +360,7 @@ pub(super) fn remove(path: &Path, context: &str) -> Result<()> {
 mod tests {
     use std::fs;
 
+    use habitat_graph_core::Graph;
     use tempfile::TempDir;
 
     #[test]
@@ -254,6 +380,37 @@ mod tests {
         let state = super::path_for_output(&output_dir.join("graph.json"), &legacy).unwrap();
         assert!(state.starts_with(git_dir.join("habitat-graph/state")));
         assert_ne!(state, legacy);
+    }
+
+    #[test]
+    fn git_private_path_migrates_legacy_state_immediately() {
+        let root = TempDir::new().unwrap();
+        let git_dir = root.path().join(".git");
+        fs::create_dir_all(git_dir.join("objects")).unwrap();
+        fs::write(git_dir.join("HEAD"), "ref: refs/heads/main\n").unwrap();
+        let output_dir = root.path().join("public");
+        fs::create_dir_all(&output_dir).unwrap();
+        let legacy = output_dir.join(".habitat-graph-state.json");
+        fs::write(&legacy, "raw private state").unwrap();
+
+        let state = super::path_for_output(&output_dir.join("graph.json"), &legacy).unwrap();
+
+        assert!(!legacy.exists());
+        assert_eq!(fs::read_to_string(state).unwrap(), "raw private state");
+    }
+
+    #[test]
+    fn private_state_records_its_public_generation() {
+        let graph = Graph::new();
+        let generation = super::generation(b"public graph");
+        let bytes = super::serialize(&graph, &generation).unwrap();
+        let stored = super::parse(std::str::from_utf8(&bytes).unwrap()).unwrap();
+
+        assert_eq!(stored.graph, graph);
+        assert_eq!(
+            stored.public_generation.as_deref(),
+            Some(generation.as_str())
+        );
     }
 
     #[cfg(not(unix))]

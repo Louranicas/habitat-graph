@@ -8,7 +8,7 @@ use habitat_graph_core::{
 };
 use unicode_normalization::UnicodeNormalization as _;
 
-use crate::escape::{project_public_edges, redact_public_text};
+use crate::escape::{markdown_code_span, markdown_text, project_public_edges, redact_public_text};
 
 /// Renders `graph` as an Obsidian vault: a deterministic list of `(filename, markdown)` pairs —
 /// one note per node (its `source_file` + `[[wikilinks]]` to connected nodes) plus a
@@ -150,6 +150,7 @@ fn assign_filenames(graph: &Graph) -> Vec<String> {
             is_canonical_redaction_marker(&projected)
                 || stem_count.get(stem_key.as_str()).copied().unwrap_or(0) > 1
                 || windows_reserved_stem(stem)
+                || !stem.is_ascii()
         })
         .collect();
     let preferred: Vec<String> = graph
@@ -295,10 +296,11 @@ fn yaml_dq(s: &str) -> String {
 /// (`[`, `]`, `:`) (STRIDE-T hardening — closes the raw-`relation` boundary that `node.label`
 /// already guards).
 fn field_key(relation: &str) -> String {
-    display_safe(relation)
+    let key: String = display_safe(relation)
         .chars()
         .filter(|c| !matches!(c, '[' | ']' | ':'))
-        .collect()
+        .collect();
+    markdown_text(&key)
 }
 
 /// Renders the Markdown content for one node note — YAML frontmatter (for Dataview / Juggl / the
@@ -344,10 +346,11 @@ fn render_node_note(
     content.push_str("]\n---\n\n");
 
     let _ = writeln!(content, "# {safe_label}\n");
+    let location = markdown_code_span(&format!("{}:{line}", display_safe(&redacted_file)));
+    let crate_name = markdown_code_span(&krate);
     let _ = writeln!(
         content,
-        "> `{}:{line}` · crate `{krate}` · degree {degree}\n",
-        display_safe(&redacted_file)
+        "> {location} · crate {crate_name} · degree {degree}\n"
     );
     content.push_str("## Links\n");
     if let Some(neighbours) = adj.get(&node.id) {
@@ -433,7 +436,7 @@ fn render_wikilink(
 }
 
 fn wikilink_alias(label: &str) -> String {
-    let display = display_safe(label);
+    let display = markdown_text(&display_safe(label));
     let mut escaped = String::with_capacity(display.len());
     for character in display.chars() {
         if matches!(character, '\\' | '[' | ']' | '|') {
@@ -871,6 +874,18 @@ mod tests {
         assert_eq!(keys.len(), filenames.len());
     }
 
+    #[test]
+    fn non_ascii_filenames_are_qualified_for_casefold_safety() {
+        let g = graph_with_nodes(vec![make_node(1, "σ", "a.rs"), make_node(2, "ς", "b.rs")]);
+        let filenames: Vec<String> = render_vault(&g)
+            .into_iter()
+            .map(|(filename, _)| filename)
+            .collect();
+
+        assert!(filenames.contains(&"σ_n1.md".to_owned()));
+        assert!(filenames.contains(&"ς_n2.md".to_owned()));
+    }
+
     /// T16: output is sorted lexicographically by filename.
     #[test]
     fn output_is_sorted_by_filename() {
@@ -1214,6 +1229,23 @@ mod tests {
         // Dataview field keys cannot contain `[`/`]`/`:`, so the shared marker is reduced to a
         // safe key while retaining its redaction tag.
         assert!(joined.contains("REDACTEDbearer_token"));
+    }
+
+    #[test]
+    fn markdown_entities_cannot_reconstruct_secret_vault_text() {
+        let g = graph_with_nodes(vec![make_node(
+            1,
+            "api&#95;key=SECRET",
+            "safe<em>path</em>.rs",
+        )]);
+        let joined = render_vault(&g)
+            .into_iter()
+            .map(|(_, content)| content)
+            .collect::<String>();
+
+        assert!(!joined.contains("api&#95;key=SECRET"));
+        assert!(joined.contains(r"\[REDACTED:api_key\]"));
+        assert!(joined.contains("safe<em>path</em>.rs"));
     }
 
     #[test]

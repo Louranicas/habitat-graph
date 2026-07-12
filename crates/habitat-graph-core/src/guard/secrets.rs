@@ -137,9 +137,73 @@ fn screen_candidate(text: &str, hits: &mut HashSet<&'static str>) {
     }
 }
 
-/// Screens `text` for obvious secret patterns, returning the kind tags matched (empty = clean).
-#[must_use]
-pub fn screen_for_secrets(text: &str) -> Vec<&'static str> {
+fn named_html_character_reference(name: &str) -> Option<char> {
+    match name {
+        "amp" => Some('&'),
+        "apos" => Some('\''),
+        "bsol" => Some('\\'),
+        "colon" => Some(':'),
+        "comma" => Some(','),
+        "equals" => Some('='),
+        "gt" => Some('>'),
+        "lbrack" | "lsqb" => Some('['),
+        "lowbar" | "UnderBar" => Some('_'),
+        "lpar" => Some('('),
+        "lt" => Some('<'),
+        "num" => Some('#'),
+        "period" => Some('.'),
+        "quot" => Some('"'),
+        "rbrack" | "rsqb" => Some(']'),
+        "rpar" => Some(')'),
+        "semi" => Some(';'),
+        "sol" => Some('/'),
+        _ => None,
+    }
+}
+
+fn html_character_reference(body: &str) -> Option<char> {
+    if let Some(hex) = body.strip_prefix("#x").or_else(|| body.strip_prefix("#X")) {
+        return u32::from_str_radix(hex, 16).ok().and_then(char::from_u32);
+    }
+    if let Some(decimal) = body.strip_prefix('#') {
+        return decimal.parse::<u32>().ok().and_then(char::from_u32);
+    }
+    named_html_character_reference(body)
+}
+
+fn decode_html_character_references(input: &str) -> Option<String> {
+    let mut output = String::with_capacity(input.len());
+    let mut copied_until = 0_usize;
+    let mut search_from = 0_usize;
+    let mut changed = false;
+    while let Some(relative_start) = input[search_from..].find('&') {
+        let start = search_from + relative_start;
+        let body_start = start.saturating_add(1);
+        let Some(relative_end) = input[body_start..].find(';') else {
+            break;
+        };
+        let end = body_start + relative_end;
+        let body = &input[body_start..end];
+        if body.len() <= 32 {
+            if let Some(character) = html_character_reference(body) {
+                output.push_str(&input[copied_until..start]);
+                output.push(character);
+                copied_until = end.saturating_add(1);
+                search_from = copied_until;
+                changed = true;
+                continue;
+            }
+        }
+        search_from = body_start;
+    }
+    if !changed {
+        return None;
+    }
+    output.push_str(&input[copied_until..]);
+    Some(output)
+}
+
+fn screen_variants(text: &str, encountered: &mut HashSet<&'static str>) {
     let stripped = normalize_for_screening(text, false);
     let separated = normalize_for_screening(text, true);
     let filename_like: String = stripped
@@ -162,7 +226,6 @@ pub fn screen_for_secrets(text: &str) -> Vec<&'static str> {
         .collect();
     let label_like = sanitize_label(text);
 
-    let mut encountered = HashSet::new();
     for candidate in [
         text,
         stripped.as_str(),
@@ -172,7 +235,7 @@ pub fn screen_for_secrets(text: &str) -> Vec<&'static str> {
         field_key_like.as_str(),
         label_like.as_str(),
     ] {
-        screen_candidate(candidate, &mut encountered);
+        screen_candidate(candidate, encountered);
     }
     for segment in text.split('/') {
         let yaml_token_like: String = segment
@@ -181,7 +244,17 @@ pub fn screen_for_secrets(text: &str) -> Vec<&'static str> {
                 character.is_ascii_alphanumeric() || matches!(character, '.' | '_' | '-')
             })
             .collect();
-        screen_candidate(&yaml_token_like, &mut encountered);
+        screen_candidate(&yaml_token_like, encountered);
+    }
+}
+
+/// Screens `text` for obvious secret patterns, returning the kind tags matched (empty = clean).
+#[must_use]
+pub fn screen_for_secrets(text: &str) -> Vec<&'static str> {
+    let mut encountered = HashSet::new();
+    screen_variants(text, &mut encountered);
+    if let Some(decoded) = decode_html_character_references(text) {
+        screen_variants(&decoded, &mut encountered);
     }
     SECRET_TAG_ORDER
         .iter()
@@ -384,6 +457,26 @@ mod tests {
         assert_eq!(
             redact_public_text("-----BEG\nIN OPENSSH PRIVATE KEY-----"),
             "[REDACTED:private_key]"
+        );
+    }
+
+    #[test]
+    fn detects_secrets_reconstructed_by_html_character_references() {
+        for value in [
+            "api&#95;key=SECRET",
+            "api&#x5f;key=SECRET",
+            "api&lowbar;key=SECRET",
+            "xox&#98;-123-secret",
+        ] {
+            assert!(!screen_for_secrets(value).is_empty());
+        }
+        assert_eq!(
+            redact_public_text("api&#95;key=SECRET"),
+            "[REDACTED:api_key]"
+        );
+        assert_eq!(
+            redact_public_text("xox&#98;-123-secret"),
+            "[REDACTED:slack_token]"
         );
     }
 

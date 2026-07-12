@@ -29,7 +29,7 @@ use std::fmt::Write as FmtWrite;
 
 use habitat_graph_core::{display_safe, sanitize_label, Graph, NodeId};
 
-use crate::escape::{project_public_edges, redact_public_text};
+use crate::escape::{markdown_code_span, markdown_text, project_public_edges, redact_public_text};
 
 /// Ownership marker embedded near the top of every generated wiki page.
 pub const GENERATED_WIKI_SIGNATURE: &str = "<!-- habitat-graph-generated:wiki:v1 -->";
@@ -136,7 +136,7 @@ fn node_filename(id: NodeId) -> String {
 #[must_use]
 fn md_link_text(label: &str) -> String {
     let redacted = redact_public_text(label);
-    let safe = display_safe(&redacted);
+    let safe = markdown_text(&display_safe(&redacted));
     // Capacity hint: add a small margin for potential escapes.
     let mut out = String::with_capacity(safe.len().saturating_add(8));
     for ch in safe.chars() {
@@ -184,15 +184,16 @@ fn render_node_article(
 ) -> String {
     let redacted_label = redact_public_text(label);
     let redacted_file = redact_public_text(source_file);
-    let safe_label = display_safe(&sanitize_label(&redacted_label));
+    let safe_label = markdown_text(&display_safe(&sanitize_label(&redacted_label)));
     let safe_file = display_safe(&redacted_file);
+    let safe_file = markdown_code_span(&safe_file);
 
     let mut out = String::new();
     // H1 title.
     let _ = writeln!(out, "# {safe_label}\n");
     let _ = writeln!(out, "{GENERATED_WIKI_SIGNATURE}\n");
     // Source location.
-    let _ = writeln!(out, "Source: `{safe_file}` line {start_line}\n");
+    let _ = writeln!(out, "Source: {safe_file} line {start_line}\n");
 
     // Outbound section.
     out.push_str("## Outbound\n\n");
@@ -205,7 +206,7 @@ fn render_node_article(
         for (relation, target_id) in ob_edges {
             let target_label = label_map.get(target_id).copied().unwrap_or("");
             let link_text = md_link_text(&sanitize_label(target_label));
-            let safe_rel = display_safe(&sanitize_label(relation));
+            let safe_rel = markdown_text(&display_safe(&sanitize_label(relation)));
             let _ = writeln!(
                 out,
                 "- [{link_text}](node-{}.md) ({safe_rel})",
@@ -227,7 +228,7 @@ fn render_node_article(
         for (relation, source_id) in ib_edges {
             let source_label = label_map.get(source_id).copied().unwrap_or("");
             let link_text = md_link_text(&sanitize_label(source_label));
-            let safe_rel = display_safe(&sanitize_label(relation));
+            let safe_rel = markdown_text(&display_safe(&sanitize_label(relation)));
             let _ = writeln!(
                 out,
                 "- [{link_text}](node-{}.md) ({safe_rel})",
@@ -1336,6 +1337,23 @@ mod tests {
         assert!(!joined.contains("Authorization: Bearer token"));
         assert!(joined.contains("[REDACTED:api_key]"));
         assert!(joined.contains("[REDACTED:bearer_token]"));
+    }
+
+    #[test]
+    fn markdown_entities_cannot_reconstruct_secret_wiki_text() {
+        let g = graph_nodes(vec![make_node(
+            1,
+            "api&#95;key=SECRET",
+            "safe<em>path</em>.rs",
+        )]);
+        let joined = render_wiki(&g)
+            .into_iter()
+            .map(|(_, content)| content)
+            .collect::<String>();
+
+        assert!(!joined.contains("api&#95;key=SECRET"));
+        assert!(joined.contains("[REDACTED:api_key]"));
+        assert!(joined.contains("safe<em>path</em>.rs"));
     }
 
     #[test]
