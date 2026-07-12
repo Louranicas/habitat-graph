@@ -1,9 +1,76 @@
-//! Output-escaping helpers shared by the structured exporters (`svg`/`graphml`/`cypher`).
+//! Public-output safety helpers shared by every exporter.
 //!
 //! Knowledge-graph node labels and source paths are attacker-influenced data (they come from
-//! arbitrary parsed source). Embedding them unescaped into XML or Cypher is an injection/tampering
-//! vector (STRIDE-T): a label like `</text><script>` or `' DETACH DELETE n //` must be neutralised.
-//! These helpers are the single, tested escaping surface every structured exporter routes through.
+//! arbitrary parsed source). Before a value is escaped for its destination format, obvious secret
+//! patterns are replaced with one deterministic marker by [`redact_public_text`]. Structured
+//! exporters then use [`xml_escape`] or [`cypher_escape`] to prevent injection/tampering (STRIDE-T).
+//! Keeping redaction and escaping in this single tested surface prevents format drift such as JSON
+//! being redacted while SVG or generated Markdown still exposes the original label.
+
+use std::borrow::Cow;
+
+use habitat_graph_core::screen_for_secrets;
+
+/// Secret tags in the canonical order returned by [`screen_for_secrets`].
+const SECRET_TAG_ORDER: &[&str] = &[
+    "private_key",
+    "aws_access_key_id",
+    "cargo_registry_token",
+    "bearer_token",
+    "api_key",
+    "slack_token",
+];
+
+/// Returns whether `input` is already an exact canonical redaction marker.
+fn is_canonical_redaction_marker(input: &str) -> bool {
+    let Some(tags) = input
+        .strip_prefix("[REDACTED:")
+        .and_then(|rest| rest.strip_suffix(']'))
+    else {
+        return false;
+    };
+    if tags.is_empty() {
+        return false;
+    }
+
+    let mut previous_index: Option<usize> = None;
+    for tag in tags.split(',') {
+        let Some(index) = SECRET_TAG_ORDER
+            .iter()
+            .position(|candidate| *candidate == tag)
+        else {
+            return false;
+        };
+        if previous_index.is_some_and(|previous| index <= previous) {
+            return false;
+        }
+        previous_index = Some(index);
+    }
+    true
+}
+
+/// Replaces obvious secret-bearing public text with a deterministic marker.
+///
+/// Clean values are borrowed unchanged. A matched value is replaced in full with
+/// `[REDACTED:<tags>]`, where tags retain the stable order from [`screen_for_secrets`]. Exact
+/// canonical markers pass through unchanged, including multi-tag markers, making the transform
+/// idempotent when HTML reuses the JSON exporter or a generated artifact is rendered twice.
+///
+/// This function is intentionally an **export boundary**, not an extraction transform: callers
+/// retain original labels and content-addressed node ids for graph assembly, edge resolution, and
+/// analysis while every public projection receives the same safe display value.
+#[must_use]
+pub fn redact_public_text(input: &str) -> Cow<'_, str> {
+    if is_canonical_redaction_marker(input) {
+        return Cow::Borrowed(input);
+    }
+    let hits = screen_for_secrets(input);
+    if hits.is_empty() {
+        Cow::Borrowed(input)
+    } else {
+        Cow::Owned(format!("[REDACTED:{}]", hits.join(",")))
+    }
+}
 
 /// Escapes a string for safe embedding inside XML text or a double-quoted XML attribute.
 ///
@@ -58,7 +125,78 @@ pub fn cypher_escape(input: &str) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{cypher_escape, xml_escape};
+    use super::{cypher_escape, redact_public_text, xml_escape};
+
+    #[test]
+    fn redaction_leaves_clean_text_borrowed_and_unchanged() {
+        let input = "normal_function_name";
+        let output = redact_public_text(input);
+        assert!(matches!(output, std::borrow::Cow::Borrowed(_)));
+        assert_eq!(output, input);
+    }
+
+    #[test]
+    fn redaction_replaces_api_key_identifier() {
+        assert_eq!(
+            redact_public_text("api_key_assignment_refused"),
+            "[REDACTED:api_key]"
+        );
+    }
+
+    #[test]
+    fn redaction_replaces_high_confidence_secret_forms() {
+        assert_eq!(
+            redact_public_text("AKIAIOSFODNN7EXAMPLE"),
+            "[REDACTED:aws_access_key_id]"
+        );
+        assert_eq!(
+            redact_public_text("Authorization: Bearer token"),
+            "[REDACTED:bearer_token]"
+        );
+        assert_eq!(
+            redact_public_text("xoxb-123-secret"),
+            "[REDACTED:slack_token]"
+        );
+    }
+
+    #[test]
+    fn redaction_uses_stable_multi_tag_order() {
+        assert_eq!(
+            redact_public_text("AKIAIOSFODNN7EXAMPLE api_key=x xoxb-123"),
+            "[REDACTED:aws_access_key_id,api_key,slack_token]"
+        );
+    }
+
+    #[test]
+    fn canonical_single_tag_marker_is_idempotent() {
+        let once = redact_public_text("api_key=x");
+        let twice = redact_public_text(&once);
+        assert_eq!(once, twice);
+    }
+
+    #[test]
+    fn canonical_multi_tag_marker_is_idempotent() {
+        let marker = "[REDACTED:aws_access_key_id,api_key,slack_token]";
+        assert_eq!(redact_public_text(marker), marker);
+    }
+
+    #[test]
+    fn noncanonical_marker_does_not_hide_trailing_secret() {
+        let input = "[REDACTED:unknown] api_key=still-present";
+        assert_eq!(redact_public_text(input), "[REDACTED:api_key]");
+    }
+
+    #[test]
+    fn duplicate_or_out_of_order_marker_is_recanonicalized_when_screened() {
+        assert_eq!(
+            redact_public_text("[REDACTED:slack_token,api_key]"),
+            "[REDACTED:api_key]"
+        );
+        assert_eq!(
+            redact_public_text("[REDACTED:api_key,api_key]"),
+            "[REDACTED:api_key]"
+        );
+    }
 
     #[test]
     fn xml_escapes_all_five_metacharacters() {

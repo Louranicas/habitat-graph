@@ -11,7 +11,7 @@ use std::fmt::Write as FmtWrite;
 
 use habitat_graph_core::Graph;
 
-use crate::escape::cypher_escape;
+use crate::escape::{cypher_escape, redact_public_text};
 
 /// Renders `graph` as a Neo4j Cypher import script (deterministic, infallible).
 ///
@@ -59,8 +59,10 @@ pub fn render_cypher(graph: &Graph) -> String {
 
     for node in &graph.nodes {
         let id = node.id.get();
-        let label = cypher_escape(&node.label);
-        let source_file = cypher_escape(&node.source_file);
+        let redacted_label = redact_public_text(&node.label);
+        let redacted_source_file = redact_public_text(&node.source_file);
+        let label = cypher_escape(&redacted_label);
+        let source_file = cypher_escape(&redacted_source_file);
         let line = node.source_location.start_line;
         // STRIDE-T: both `label` and `source_file` are attacker-influenced; cypher_escape
         // neutralises single-quote termination, backslash injection, and control characters.
@@ -75,7 +77,8 @@ pub fn render_cypher(graph: &Graph) -> String {
         let tgt = edge.target.get();
         // `relation` is attacker-influenced — escaped AND stored as a property, never as the
         // relationship-type identifier (which is always the fixed literal :REL).
-        let relation = cypher_escape(&edge.relation);
+        let redacted_relation = redact_public_text(&edge.relation);
+        let relation = cypher_escape(&redacted_relation);
         // `confidence` is a bounded enum string from this library's own code; cypher_escape
         // is applied for uniformity (the canonical strings contain no escapable characters).
         let confidence = cypher_escape(edge.confidence.as_str());
@@ -258,7 +261,10 @@ mod tests {
             g.nodes.push(node(i, "N", "f.rs", 1));
         }
         let cy = render_cypher(&g);
-        assert!(cy.contains("7 nodes"), "7 nodes missing from header: {cy:?}");
+        assert!(
+            cy.contains("7 nodes"),
+            "7 nodes missing from header: {cy:?}"
+        );
     }
 
     // ── 14: header reports correct edge count ────────────────────────────────
@@ -270,7 +276,10 @@ mod tests {
         g.edges.push(edge(2, 3, "imports", Confidence::Inferred));
         g.edges.push(edge(3, 1, "uses", Confidence::Ambiguous));
         let cy = render_cypher(&g);
-        assert!(cy.contains("3 edges"), "3 edges missing from header: {cy:?}");
+        assert!(
+            cy.contains("3 edges"),
+            "3 edges missing from header: {cy:?}"
+        );
     }
 
     // ── 15: N nodes → exactly N MERGE statements ─────────────────────────────
@@ -341,10 +350,7 @@ mod tests {
             !cy.contains("[:calls"),
             "relation appeared as type identifier: {cy:?}"
         );
-        assert!(
-            cy.contains("[:REL"),
-            "fixed :REL type missing: {cy:?}"
-        );
+        assert!(cy.contains("[:REL"), "fixed :REL type missing: {cy:?}");
     }
 
     // ── 20: EXTRACTED confidence in edge property ─────────────────────────────
@@ -462,10 +468,7 @@ mod tests {
         let g = one_node(1, r"a\b", "f.rs", 1);
         let cy = render_cypher(&g);
         // "a\\\\b" in a Rust regular literal is the 4-char string a\\b.
-        assert!(
-            cy.contains("a\\\\b"),
-            "backslash not doubled: {cy:?}"
-        );
+        assert!(cy.contains("a\\\\b"), "backslash not doubled: {cy:?}");
     }
 
     // ── 28: label newline is escaped as \n ───────────────────────────────────
@@ -537,10 +540,7 @@ mod tests {
         // "x'y" → x\'y → the property looks like: label: 'x\'y'
         let g = one_node(1, "x'y", "f.rs", 1);
         let cy = render_cypher(&g);
-        assert!(
-            cy.contains(r"x\'y"),
-            "escaped x\\'y form missing: {cy:?}"
-        );
+        assert!(cy.contains(r"x\'y"), "escaped x\\'y form missing: {cy:?}");
     }
 
     // ── 33: source_file single quote is escaped ───────────────────────────────
@@ -596,7 +596,8 @@ mod tests {
     #[test]
     fn relation_single_quote_is_escaped() {
         let mut g = Graph::new();
-        g.edges.push(edge(1, 2, "it's-related", Confidence::Extracted));
+        g.edges
+            .push(edge(1, 2, "it's-related", Confidence::Extracted));
         let cy = render_cypher(&g);
         assert!(
             cy.contains(r"it\'s-related"),
@@ -609,7 +610,8 @@ mod tests {
     #[test]
     fn relation_backslash_is_doubled() {
         let mut g = Graph::new();
-        g.edges.push(edge(1, 2, r"call\back", Confidence::Extracted));
+        g.edges
+            .push(edge(1, 2, r"call\back", Confidence::Extracted));
         let cy = render_cypher(&g);
         assert!(
             cy.contains("call\\\\back"),
@@ -712,9 +714,21 @@ mod tests {
         let cy = render_cypher(&g);
         let merges: Vec<&str> = cy.lines().filter(|l| l.starts_with("MERGE")).collect();
         assert_eq!(merges.len(), 3, "expected 3 MERGE lines");
-        assert!(merges[0].contains("n3"), "first MERGE should be n3: {:?}", merges[0]);
-        assert!(merges[1].contains("n1"), "second MERGE should be n1: {:?}", merges[1]);
-        assert!(merges[2].contains("n2"), "third MERGE should be n2: {:?}", merges[2]);
+        assert!(
+            merges[0].contains("n3"),
+            "first MERGE should be n3: {:?}",
+            merges[0]
+        );
+        assert!(
+            merges[1].contains("n1"),
+            "second MERGE should be n1: {:?}",
+            merges[1]
+        );
+        assert!(
+            merges[2].contains("n2"),
+            "third MERGE should be n2: {:?}",
+            merges[2]
+        );
     }
 
     // ── 43: edge output order follows graph.edges order ──────────────────────
@@ -729,11 +743,13 @@ mod tests {
         assert_eq!(matches.len(), 2, "expected 2 MATCH lines");
         assert!(
             matches[0].contains("id: 1") && matches[0].contains("id: 2"),
-            "first MATCH should have ids 1,2: {:?}", matches[0]
+            "first MATCH should have ids 1,2: {:?}",
+            matches[0]
         );
         assert!(
             matches[1].contains("id: 3") && matches[1].contains("id: 4"),
-            "second MATCH should have ids 3,4: {:?}", matches[1]
+            "second MATCH should have ids 3,4: {:?}",
+            matches[1]
         );
     }
 
@@ -770,7 +786,10 @@ mod tests {
     fn large_line_number_renders_correctly() {
         let g = one_node(1, "X", "f.rs", 999_999);
         let cy = render_cypher(&g);
-        assert!(cy.contains("line: 999999"), "large line number missing: {cy:?}");
+        assert!(
+            cy.contains("line: 999999"),
+            "large line number missing: {cy:?}"
+        );
     }
 
     // ── 47: empty label renders as empty string literal ───────────────────────
@@ -929,13 +948,29 @@ mod tests {
             "C0 control char leaked into output: {stmt:?}"
         );
         // The remaining chars a and b must still be present in the label.
-        assert!(
-            cy.contains("label: 'ab'"),
-            "surrounding chars lost: {cy:?}"
-        );
+        assert!(cy.contains("label: 'ab'"), "surrounding chars lost: {cy:?}");
     }
 
     // ── 59: nodes-only graph has no MATCH lines ──────────────────────────────
+
+    #[test]
+    fn secret_patterns_are_redacted_before_cypher_escaping() {
+        let mut g = Graph::new();
+        g.nodes
+            .push(node(1, "api_key_assignment_refused", "src/api_key.rs", 1));
+        g.edges.push(edge(
+            1,
+            1,
+            "Authorization: Bearer token",
+            Confidence::Extracted,
+        ));
+        let cypher = render_cypher(&g);
+        assert!(!cypher.contains("api_key_assignment_refused"));
+        assert!(!cypher.contains("src/api_key.rs"));
+        assert!(!cypher.contains("Authorization: Bearer token"));
+        assert!(cypher.contains("[REDACTED:api_key]"));
+        assert!(cypher.contains("[REDACTED:bearer_token]"));
+    }
 
     #[test]
     fn nodes_only_graph_has_no_match_lines() {
@@ -944,7 +979,10 @@ mod tests {
         g.nodes.push(node(2, "B", "b.rs", 2));
         let cy = render_cypher(&g);
         let match_count = cy.lines().filter(|l| l.starts_with("MATCH")).count();
-        assert_eq!(match_count, 0, "nodes-only graph must have 0 MATCH lines: {cy}");
+        assert_eq!(
+            match_count, 0,
+            "nodes-only graph must have 0 MATCH lines: {cy}"
+        );
     }
 
     // ── 60: edges-only graph has no node MERGE lines ─────────────────────────

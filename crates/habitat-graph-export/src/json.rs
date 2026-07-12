@@ -7,6 +7,8 @@ use habitat_graph_core::{
 };
 use serde_json::Value;
 
+use crate::escape::redact_public_text;
+
 /// Renders `graph` as `NetworkX` node-link JSON.
 ///
 /// Envelope:
@@ -33,7 +35,9 @@ use serde_json::Value;
 /// Output is fully deterministic: node and link arrays follow the order of `graph.nodes` /
 /// `graph.edges` as given — call [`Graph::sorted`](habitat_graph_core::Graph::sorted) first to
 /// obtain the canonical R4 ordering.  String fields are sanitised with
-/// [`sanitize_label`] and render-escaped with [`display_safe`] before embedding.
+/// [`sanitize_label`], redacted with the shared public-output policy, and render-escaped with
+/// [`display_safe`] before embedding. Redaction changes display fields only; node ids and topology
+/// remain untouched.
 ///
 /// # Errors
 ///
@@ -62,10 +66,12 @@ pub fn to_node_link(graph: &Graph) -> Result<String> {
                 .get(&node.id)
                 .copied()
                 .map_or(Value::Null, Value::from);
+            let redacted_label = redact_public_text(&node.label);
+            let redacted_source_file = redact_public_text(&node.source_file);
             serde_json::json!({
                 "id": node.id.get(),
-                "label": display_safe(&sanitize_label(&node.label)),
-                "source_file": display_safe(&node.source_file),
+                "label": display_safe(&sanitize_label(&redacted_label)),
+                "source_file": display_safe(&redacted_source_file),
                 "source_location": format!("L{}", node.source_location.start_line),
                 "community": community,
             })
@@ -83,10 +89,11 @@ pub fn to_node_link(graph: &Graph) -> Result<String> {
             } else {
                 0.8
             };
+            let redacted_relation = redact_public_text(&edge.relation);
             serde_json::json!({
                 "source": edge.source.get(),
                 "target": edge.target.get(),
-                "relation": display_safe(&sanitize_label(&edge.relation)),
+                "relation": display_safe(&sanitize_label(&redacted_relation)),
                 "confidence": edge.confidence.as_str(),
                 "weight": weight,
             })
@@ -523,6 +530,34 @@ mod tests {
     }
 
     // ── security: edge relation passes through display_safe (judge gap) ──────────
+
+    #[test]
+    fn node_label_secret_pattern_is_redacted_without_changing_id() {
+        let mut g = Graph::new();
+        g.nodes
+            .push(node(41, "api_key_assignment_refused", "src/privacy.rs", 1));
+        let v = parse(&to_node_link(&g).unwrap());
+        assert_eq!(v["nodes"][0]["id"], 41);
+        assert_eq!(v["nodes"][0]["label"], "[REDACTED:api_key]");
+        assert!(!to_node_link(&g)
+            .unwrap()
+            .contains("api_key_assignment_refused"));
+    }
+
+    #[test]
+    fn source_file_and_relation_secret_patterns_are_redacted() {
+        let mut g = Graph::new();
+        g.nodes.push(node(1, "A", "src/api_key/private.rs", 1));
+        g.edges.push(edge(
+            1,
+            1,
+            "Authorization: Bearer token",
+            Confidence::Extracted,
+        ));
+        let v = parse(&to_node_link(&g).unwrap());
+        assert_eq!(v["nodes"][0]["source_file"], "[REDACTED:api_key]");
+        assert_eq!(v["links"][0]["relation"], "[REDACTED:bearer_token]");
+    }
 
     #[test]
     fn edge_relation_bidi_override_is_render_safe() {

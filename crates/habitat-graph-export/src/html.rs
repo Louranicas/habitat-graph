@@ -158,7 +158,11 @@ mod tests {
     #[test]
     fn title_reflects_counts() {
         let h = render_html(&sample()).expect("ok");
-        assert!(h.contains("2 nodes / 1 edges / 0 communities"), "{}", &h[..200]);
+        assert!(
+            h.contains("2 nodes / 1 edges / 0 communities"),
+            "{}",
+            &h[..200]
+        );
     }
 
     #[test]
@@ -196,10 +200,25 @@ mod tests {
             let e = h[s..].find("</script>").expect("close") + s;
             &h[s..e]
         };
-        assert!(!data_region.contains("</script>"), "raw </script> leaked into data island");
+        assert!(
+            !data_region.contains("</script>"),
+            "raw </script> leaked into data island"
+        );
         // …but it still round-trips to the original label after un-escaping.
         let v: serde_json::Value = serde_json::from_str(&embedded_json(&h)).expect("json");
         assert_eq!(v["nodes"][0]["label"], "evil</script><img src=x>");
+    }
+
+    #[test]
+    fn embedded_json_uses_the_shared_secret_redaction_policy() {
+        let mut g = Graph::new();
+        g.nodes = vec![node(1, "api_key_assignment_refused")];
+        let h = render_html(&g).expect("ok");
+        let data = embedded_json(&h);
+        assert!(!data.contains("api_key_assignment_refused"));
+        let v: serde_json::Value = serde_json::from_str(&data).expect("json");
+        assert_eq!(v["nodes"][0]["id"], 1);
+        assert_eq!(v["nodes"][0]["label"], "[REDACTED:api_key]");
     }
 
     #[test]
@@ -213,7 +232,10 @@ mod tests {
     #[test]
     fn is_self_contained_no_external_urls() {
         let h = render_html(&sample()).expect("ok");
-        assert!(!h.contains("http://") && !h.contains("https://"), "viewer must be offline-self-contained");
+        assert!(
+            !h.contains("http://") && !h.contains("https://"),
+            "viewer must be offline-self-contained"
+        );
         assert!(!h.contains("src=\"http"));
     }
 

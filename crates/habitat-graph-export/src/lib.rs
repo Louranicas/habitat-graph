@@ -5,8 +5,10 @@
 //! self-contained interactive `graph.html` viewer (the graphify `graph.html` analogue). PB adds the
 //! full exporter set: [`render_svg`], [`render_graphml`], [`render_cypher`], and [`render_wiki`].
 //!
-//! All structured exporters route attacker-influenced strings (labels, paths) through [`escape`] —
-//! the single tested escaping surface (STRIDE-T injection guard).
+//! All public exporters route attacker-influenced strings (labels, paths, relations) through
+//! [`escape`] — the single tested redaction and destination-escaping surface (STRIDE-T and
+//! secret-persistence guard). Redaction occurs after graph assembly so node ids and topology remain
+//! stable across every projection.
 #![forbid(unsafe_code)]
 #![warn(missing_docs)]
 

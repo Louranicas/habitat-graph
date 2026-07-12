@@ -5,6 +5,8 @@ use std::fmt::Write as FmtWrite;
 
 use habitat_graph_core::{display_safe, sanitize_label, CommunityId, Graph, Node, NodeId};
 
+use crate::escape::redact_public_text;
+
 /// Renders `graph` as an Obsidian vault: a deterministic list of `(filename, markdown)` pairs —
 /// one note per node (its `source_file` + `[[wikilinks]]` to connected nodes) plus a
 /// Map-of-Content index note (`_MOC.md`). The caller is responsible for writing the files.
@@ -104,7 +106,7 @@ fn collect_labels(graph: &Graph) -> HashMap<NodeId, String> {
     graph
         .nodes
         .iter()
-        .map(|n| (n.id, n.label.clone()))
+        .map(|n| (n.id, redact_public_text(&n.label).into_owned()))
         .collect()
 }
 
@@ -144,11 +146,11 @@ fn build_adjacency(graph: &Graph) -> HashMap<NodeId, Vec<(String, NodeId)>> {
     for edge in &graph.edges {
         adj.entry(edge.source)
             .or_default()
-            .push((edge.relation.clone(), edge.target));
+            .push((redact_public_text(&edge.relation).into_owned(), edge.target));
         if edge.source != edge.target {
             adj.entry(edge.target)
                 .or_default()
-                .push((edge.relation.clone(), edge.source));
+                .push((redact_public_text(&edge.relation).into_owned(), edge.source));
         }
     }
     for neighbours in adj.values_mut() {
@@ -183,7 +185,7 @@ fn yaml_dq(s: &str) -> String {
 /// (`[`, `]`, `:`) (STRIDE-T hardening — closes the raw-`relation` boundary that `node.label`
 /// already guards).
 fn field_key(relation: &str) -> String {
-    display_safe(relation)
+    display_safe(&redact_public_text(relation))
         .chars()
         .filter(|c| !matches!(c, '[' | ']' | ':'))
         .collect()
@@ -199,9 +201,11 @@ fn render_node_note(
     label_map: &HashMap<NodeId, String>,
     node_to_comm: &HashMap<NodeId, CommunityId>,
 ) -> String {
-    let safe_label = display_safe(&node.label);
-    let krate = yaml_token(&crate_of(&node.source_file));
-    let lang = lang_of(&node.source_file);
+    let redacted_label = redact_public_text(&node.label);
+    let redacted_file = redact_public_text(&node.source_file);
+    let safe_label = display_safe(&redacted_label);
+    let krate = yaml_token(&crate_of(&redacted_file));
+    let lang = lang_of(&redacted_file);
     let line = node.source_location.start_line;
     let degree = adj.get(&node.id).map_or(0, Vec::len);
     let community = node_to_comm.get(&node.id).map(|c| c.get());
@@ -216,7 +220,7 @@ fn render_node_note(
     let _ = writeln!(
         content,
         "file: \"{}\"",
-        yaml_dq(&display_safe(&node.source_file))
+        yaml_dq(&display_safe(&redacted_file))
     );
     let _ = writeln!(content, "line: {line}");
     let _ = writeln!(content, "degree: {degree}");
@@ -232,7 +236,7 @@ fn render_node_note(
     let _ = writeln!(
         content,
         "> `{}:{line}` · crate `{krate}` · degree {degree}\n",
-        display_safe(&node.source_file)
+        display_safe(&redacted_file)
     );
     content.push_str("## Links\n");
     if let Some(neighbours) = adj.get(&node.id) {
@@ -302,7 +306,8 @@ fn render_moc(graph: &Graph, label_map: &HashMap<NodeId, String>) -> String {
 /// whitespace with `_`. Returns `"_"` if the resulting stem would be empty (all-control label).
 #[must_use]
 fn make_stem(label: &str) -> String {
-    let sanitized = sanitize_label(label);
+    let redacted = redact_public_text(label);
+    let sanitized = sanitize_label(&redacted);
     let stem: String = sanitized
         .chars()
         .map(|c| {
@@ -491,7 +496,10 @@ mod tests {
         let (_, content) = pairs.iter().find(|(f, _)| f == "beta.md").unwrap();
         assert!(content.contains("lang: python"), "{content}");
         assert!(content.contains("crate: pkg"), "{content}");
-        assert!(!content.contains("community:"), "should omit community: {content}");
+        assert!(
+            !content.contains("community:"),
+            "should omit community: {content}"
+        );
     }
 
     /// T08: the target node of an edge also sees a link back to the source node.
@@ -866,6 +874,39 @@ mod tests {
     }
 
     #[test]
+    fn render_vault_redacts_secret_patterns_in_names_content_and_relations() {
+        let mut g = Graph::new();
+        g.nodes
+            .push(make_node(1, "api_key_assignment_refused", "src/api_key.rs"));
+        g.nodes.push(make_node(2, "safe", "safe.rs"));
+        g.edges.push(habitat_graph_core::Edge {
+            source: habitat_graph_core::NodeId::new(1),
+            target: habitat_graph_core::NodeId::new(2),
+            relation: "Authorization: Bearer token".to_owned(),
+            confidence: habitat_graph_core::Confidence::Extracted,
+        });
+        let rendered = render_vault(&g.sorted());
+        let filenames = rendered
+            .iter()
+            .map(|(filename, _)| filename.as_str())
+            .collect::<Vec<_>>();
+        let joined = rendered
+            .iter()
+            .map(|(_, content)| content.as_str())
+            .collect::<String>();
+        assert!(filenames
+            .iter()
+            .any(|name| name.contains("[REDACTED:api_key]")));
+        assert!(!joined.contains("api_key_assignment_refused"));
+        assert!(!joined.contains("src/api_key.rs"));
+        assert!(!joined.contains("Authorization: Bearer token"));
+        assert!(joined.contains("[REDACTED:api_key]"));
+        // Dataview field keys cannot contain `[`/`]`/`:`, so the shared marker is reduced to a
+        // safe key while retaining its redaction tag.
+        assert!(joined.contains("REDACTEDbearer_token"));
+    }
+
+    #[test]
     fn render_vault_neutralises_hostile_relation_in_node_note() {
         let mut g = Graph::new();
         g.nodes.push(make_node(1, "alpha", "src/a.rs"));
@@ -889,8 +930,7 @@ mod tests {
     #[test]
     fn render_vault_escapes_quote_in_source_file_frontmatter() {
         let mut g = Graph::new();
-        g.nodes
-            .push(make_node(1, "n", "src/a\"evil: true.rs"));
+        g.nodes.push(make_node(1, "n", "src/a\"evil: true.rs"));
         let joined: String = render_vault(&g.sorted())
             .iter()
             .map(|(_, c)| c.as_str())

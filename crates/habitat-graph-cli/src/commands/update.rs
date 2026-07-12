@@ -27,6 +27,10 @@
 //! would corrupt the graph by mixing incompatible node/edge semantics.
 
 use std::collections::{HashMap, HashSet};
+use std::fs::OpenOptions;
+use std::io::Write as _;
+#[cfg(unix)]
+use std::os::unix::fs::{OpenOptionsExt as _, PermissionsExt as _};
 use std::path::{Path, PathBuf};
 
 use habitat_graph_core::{Graph, GraphError, Manifest, NodeId, Result, SCHEMA_VERSION};
@@ -304,9 +308,34 @@ fn write_artifacts(out: &Path, graph: &Graph, current_manifest: Manifest) -> Res
     let mut sidecar = graph.clone();
     sidecar.manifest = current_manifest;
     let sidecar_json = sidecar.to_json()?;
-    std::fs::write(out.join(SIDECAR), sidecar_json.as_bytes())
-        .map_err(|e| GraphError::Io(e.to_string()))?;
+    write_private_sidecar(&out.join(SIDECAR), sidecar_json.as_bytes())?;
 
+    Ok(())
+}
+
+/// Writes the internal incremental cache with owner-only permissions.
+///
+/// The sidecar intentionally retains pre-projection labels needed for stable content ids and
+/// incremental merge behavior. It is not a public artifact, so it is written as a private local
+/// cache and excluded from generated receipt manifests. Existing files are explicitly re-chmodded
+/// because `OpenOptionsExt::mode` only controls permissions at creation time.
+fn write_private_sidecar(path: &Path, bytes: &[u8]) -> Result<()> {
+    let mut options = OpenOptions::new();
+    options.create(true).truncate(true).write(true);
+    #[cfg(unix)]
+    options.mode(0o600);
+
+    let mut file = options
+        .open(path)
+        .map_err(|error| GraphError::Io(format!("sidecar open: {error}")))?;
+    file.write_all(bytes)
+        .map_err(|error| GraphError::Io(format!("sidecar write: {error}")))?;
+    file.sync_all()
+        .map_err(|error| GraphError::Io(format!("sidecar sync: {error}")))?;
+
+    #[cfg(unix)]
+    std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600))
+        .map_err(|error| GraphError::Io(format!("sidecar permissions: {error}")))?;
     Ok(())
 }
 
@@ -418,6 +447,22 @@ mod tests {
     }
 
     // T3: first build writes the sidecar.
+    #[test]
+    fn fresh_dir_writes_sidecar_with_owner_only_permissions() {
+        let src = TempDir::new().unwrap();
+        let out = TempDir::new().unwrap();
+        mk_file(src.path(), "lib.rs", "fn private_cache() {}");
+        let _ = run(src.path(), out.path());
+        let sidecar = out.path().join(SIDECAR);
+        assert!(sidecar.exists(), "sidecar must be written on first build");
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt as _;
+            let mode = fs::metadata(sidecar).unwrap().permissions().mode() & 0o777;
+            assert_eq!(mode, 0o600, "sidecar must be owner-readable/writable only");
+        }
+    }
+
     #[test]
     fn fresh_dir_writes_sidecar() {
         let src = TempDir::new().unwrap();
