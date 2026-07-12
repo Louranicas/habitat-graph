@@ -490,7 +490,13 @@ mod tests {
             "# User-authored note\n",
             "unowned user note must remain byte-identical"
         );
-        assert!(vault.path().join("REDACTED_api_key.md").exists());
+        assert!(vault
+            .path()
+            .join(format!(
+                "REDACTED_api_key_n{}.md",
+                habitat_graph_core::content_id(raw_label)
+            ))
+            .exists());
         assert!(vault.path().join(super::VAULT_MANIFEST).exists());
     }
 

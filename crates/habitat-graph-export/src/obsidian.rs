@@ -3,7 +3,9 @@
 use std::collections::{BTreeMap, HashMap};
 use std::fmt::Write as FmtWrite;
 
-use habitat_graph_core::{display_safe, sanitize_label, CommunityId, Graph, Node, NodeId};
+use habitat_graph_core::{
+    display_safe, is_canonical_redaction_marker, sanitize_label, CommunityId, Graph, Node, NodeId,
+};
 
 use crate::escape::redact_public_text;
 
@@ -16,9 +18,10 @@ use crate::escape::redact_public_text;
 ///
 /// Each node filename is derived from its label via [`sanitize_label`] (strips control chars,
 /// caps at 256), then replacing path/Obsidian-link metacharacters and whitespace with `_`, then
-/// appending `.md`. Canonical redaction markers use a filesystem-safe `REDACTED_<tags>` stem.
-/// When two or more nodes produce the same stem both are disambiguated by
-/// appending the [`NodeId`] before the extension (e.g. `foo_n1.md`, `foo_n2.md`).
+/// appending `.md`. Secret-bearing labels use a filesystem-safe `REDACTED_<tags>_<NodeId>` stem so
+/// their filenames remain stable as other redacted nodes are added. When two or more clean nodes
+/// produce the same stem both are disambiguated by appending the [`NodeId`] before the extension
+/// (e.g. `foo_n1.md`, `foo_n2.md`).
 ///
 /// # Note content
 ///
@@ -137,7 +140,10 @@ fn assign_filenames(graph: &Graph) -> Vec<String> {
         .iter()
         .zip(stems.iter())
         .map(|(node, stem)| {
-            if stem_count.get(stem.as_str()).copied().unwrap_or(0) > 1 {
+            let projected = redact_public_text(&node.label);
+            if is_canonical_redaction_marker(&projected)
+                || stem_count.get(stem.as_str()).copied().unwrap_or(0) > 1
+            {
                 format!("{}_{}.md", stem, node.id)
             } else {
                 format!("{stem}.md")
@@ -995,6 +1001,28 @@ mod tests {
         assert!(first.contains(r"[[REDACTED_api_key_n2|\[REDACTED:api_key\]]]"));
         assert!(moc.contains(r"[[REDACTED_api_key_n1|\[REDACTED:api_key\]]]"));
         assert!(moc.contains(r"[[REDACTED_api_key_n2|\[REDACTED:api_key\]]]"));
+    }
+
+    #[test]
+    fn redacted_filename_is_stable_when_another_marker_is_added() {
+        let one = graph_with_nodes(vec![make_node(1, "api_key_alpha", "a.rs")]);
+        let one_name = render_vault(&one)
+            .into_iter()
+            .find(|(filename, _)| filename != "_MOC.md")
+            .map(|(filename, _)| filename)
+            .unwrap();
+
+        let two = graph_with_nodes(vec![
+            make_node(1, "api_key_alpha", "a.rs"),
+            make_node(2, "api_key_beta", "b.rs"),
+        ]);
+        let two_names: Vec<String> = render_vault(&two)
+            .into_iter()
+            .map(|(filename, _)| filename)
+            .collect();
+
+        assert_eq!(one_name, "REDACTED_api_key_n1.md");
+        assert!(two_names.contains(&one_name));
     }
 
     #[test]

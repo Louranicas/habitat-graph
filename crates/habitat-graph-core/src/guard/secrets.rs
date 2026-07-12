@@ -4,8 +4,7 @@
 //! cloud tokens, bearer headers) so they never land in a `graph.json`, receipt, or vault note.
 
 use std::borrow::Cow;
-
-use crate::content_id;
+use std::collections::HashSet;
 
 /// Secret tags in the canonical order used by public redaction markers.
 pub const SECRET_TAG_ORDER: &[&str] = &[
@@ -48,48 +47,93 @@ pub fn is_canonical_redaction_marker(input: &str) -> bool {
 
 fn contains_bearer_authorization(lower: &str) -> bool {
     lower.match_indices("authorization:").any(|(index, _)| {
-        let credential = lower[index + "authorization:".len()..].trim_start_matches([' ', '\t']);
+        let credential =
+            lower[index + "authorization:".len()..].trim_start_matches(char::is_whitespace);
         credential
             .strip_prefix("bearer")
-            .is_some_and(|rest| rest.starts_with(' ') || rest.starts_with('\t'))
+            .is_some_and(|rest| rest.chars().next().is_some_and(char::is_whitespace))
     })
+}
+
+fn is_format_character(character: char) -> bool {
+    matches!(
+        u32::from(character),
+        0x00AD
+            | 0x0600..=0x0605
+            | 0x061C
+            | 0x06DD
+            | 0x070F
+            | 0x0890..=0x0891
+            | 0x08E2
+            | 0x180E
+            | 0x200B..=0x200F
+            | 0x202A..=0x202E
+            | 0x2060..=0x2064
+            | 0x2066..=0x206F
+            | 0xFEFF
+            | 0xFFF9..=0xFFFB
+            | 0x110BD
+            | 0x110CD
+            | 0x13430..=0x1343F
+            | 0x1BCA0..=0x1BCA3
+            | 0x1D173..=0x1D17A
+            | 0xE0001
+            | 0xE0020..=0xE007F
+    )
+}
+
+fn is_noncharacter(character: char) -> bool {
+    let value = u32::from(character);
+    (0xFDD0..=0xFDEF).contains(&value) || value & 0xFFFE == 0xFFFE
+}
+
+fn normalize_for_screening(input: &str, formats_as_space: bool) -> String {
+    let mut normalized = String::with_capacity(input.len());
+    for character in input.chars() {
+        if character.is_whitespace() {
+            normalized.push(' ');
+        } else if character.is_control()
+            || is_format_character(character)
+            || is_noncharacter(character)
+        {
+            if formats_as_space {
+                normalized.push(' ');
+            }
+        } else {
+            normalized.push(character);
+        }
+    }
+    normalized
+}
+
+fn screen_candidate(text: &str, hits: &mut HashSet<&'static str>) {
+    let lower = text.to_ascii_lowercase();
+
+    if text.contains("-----BEGIN") && text.contains("PRIVATE KEY-----") {
+        hits.insert("private_key");
+    }
+    if text.contains("AKIA") || text.contains("ASIA") {
+        hits.insert("aws_access_key_id");
+    }
+    if lower.contains("cargo_registry_token") {
+        hits.insert("cargo_registry_token");
+    }
+    if contains_bearer_authorization(&lower) {
+        hits.insert("bearer_token");
+    }
+    if lower.contains("api_key") || lower.contains("apikey") || lower.contains("api-key") {
+        hits.insert("api_key");
+    }
+    if lower.contains("xoxb-") || lower.contains("xoxp-") {
+        hits.insert("slack_token");
+    }
 }
 
 /// Screens `text` for obvious secret patterns, returning the kind tags matched (empty = clean).
 #[must_use]
 pub fn screen_for_secrets(text: &str) -> Vec<&'static str> {
-    let mut hits = Vec::new();
-    let lower = text.to_ascii_lowercase();
-
-    if text.contains("-----BEGIN") && text.contains("PRIVATE KEY-----") {
-        hits.push("private_key");
-    }
-    if text.contains("AKIA") || text.contains("ASIA") {
-        hits.push("aws_access_key_id");
-    }
-    if lower.contains("cargo_registry_token") {
-        hits.push("cargo_registry_token");
-    }
-    if contains_bearer_authorization(&lower) {
-        hits.push("bearer_token");
-    }
-    if lower.contains("api_key") || lower.contains("apikey") || lower.contains("api-key") {
-        hits.push("api_key");
-    }
-    if lower.contains("xoxb-") || lower.contains("xoxp-") {
-        hits.push("slack_token");
-    }
-
-    hits
-}
-
-fn normalized_secret_tags(input: &str) -> Vec<&'static str> {
-    let stripped: String = input
-        .chars()
-        .filter(|character| {
-            !character.is_control() && !matches!(*character, '\u{FFFE}' | '\u{FFFF}')
-        })
-        .collect();
+    let stripped = normalize_for_screening(text, false);
+    let separated = normalize_for_screening(text, true);
     let filename_like: String = stripped
         .chars()
         .map(|character| {
@@ -105,20 +149,25 @@ fn normalized_secret_tags(input: &str) -> Vec<&'static str> {
         .filter(|character| character.is_alphanumeric())
         .collect();
 
-    let mut encountered = std::collections::HashSet::new();
+    let mut encountered = HashSet::new();
     for candidate in [
-        input,
+        text,
         stripped.as_str(),
+        separated.as_str(),
         filename_like.as_str(),
         compact.as_str(),
     ] {
-        encountered.extend(screen_for_secrets(candidate));
+        screen_candidate(candidate, &mut encountered);
     }
     SECRET_TAG_ORDER
         .iter()
         .copied()
         .filter(|tag| encountered.contains(tag))
         .collect()
+}
+
+fn normalized_secret_tags(input: &str) -> Vec<&'static str> {
+    screen_for_secrets(input)
 }
 
 /// Replaces obvious secret-bearing public text with a deterministic canonical marker.
@@ -141,14 +190,14 @@ pub fn redact_public_text(input: &str) -> Cow<'_, str> {
 
 /// Returns the deterministic public identity for an edge relation.
 ///
-/// Secret-bearing relations receive a non-secret content-id suffix so distinct relations between
-/// the same endpoints remain distinct after redaction. Existing projected relations pass through
-/// unchanged.
+/// Secret-bearing relations receive a non-secret full content-digest suffix so distinct relations
+/// between the same endpoints remain distinct after redaction. Existing projected relations pass
+/// through unchanged.
 #[must_use]
 pub fn project_public_relation(relation: &str) -> String {
     if let Some((marker, suffix)) = relation.rsplit_once("#r") {
         if is_canonical_redaction_marker(marker)
-            && suffix.len() == 8
+            && suffix.len() == 64
             && suffix
                 .chars()
                 .all(|character| character.is_ascii_hexdigit())
@@ -161,7 +210,7 @@ pub fn project_public_relation(relation: &str) -> String {
     if redacted.as_ref() == relation {
         relation.to_owned()
     } else {
-        format!("{redacted}#r{:08x}", content_id(relation))
+        format!("{redacted}#r{}", blake3::hash(relation.as_bytes()).to_hex())
     }
 }
 
@@ -214,6 +263,19 @@ mod tests {
     }
 
     #[test]
+    fn detects_bearer_header_with_unicode_whitespace_and_format_characters() {
+        for header in [
+            "Authorization:\u{00a0}Bearer eyJhbGci",
+            "Authorization:\u{200b}Bearer eyJhbGci",
+            "Author\u{2060}ization: Bearer eyJhbGci",
+            "Authorization: Bearer\u{200b}eyJhbGci",
+        ] {
+            assert!(screen_for_secrets(header).contains(&"bearer_token"));
+            assert_eq!(redact_public_text(header), "[REDACTED:bearer_token]");
+        }
+    }
+
+    #[test]
     fn bearer_match_requires_scheme_separator() {
         assert!(!screen_for_secrets("Authorization: Bearerish token").contains(&"bearer_token"));
     }
@@ -262,5 +324,7 @@ mod tests {
         let beta = project_public_relation("api_key=beta");
         assert_ne!(alpha, beta);
         assert_eq!(project_public_relation(&alpha), alpha);
+        assert_eq!(alpha.rsplit_once("#r").unwrap().1.len(), 64);
+        assert!(alpha.ends_with(blake3::hash("api_key=alpha".as_bytes()).to_hex().as_str()));
     }
 }

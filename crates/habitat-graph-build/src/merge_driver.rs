@@ -6,9 +6,9 @@
 //!
 //! ## Semantics
 //!
-//! Clean-node merge identity is by **label**, while publicly redacted nodes retain stable-id
-//! identity — the same mechanism as the 2-way [`crate::merge::merge`]. For each identity `L` the
-//! outcome is:
+//! Clean-node merge identity is by **label**, while publicly redacted nodes retain stable
+//! `(id, marker)` identity — the same mechanism as the 2-way [`crate::merge::merge`]. For each
+//! identity `L` the outcome is:
 //!
 //! | `L ∈ base` | `L ∈ ours` | `L ∈ theirs` | outcome |
 //! |---|---|---|---|
@@ -31,23 +31,22 @@
 use std::collections::{HashMap, HashSet};
 
 use habitat_graph_core::{
-    content_id, project_public_relation, Community, CommunityId, Edge, Graph, Manifest, Node,
-    NodeId,
+    project_public_relation, Community, CommunityId, Edge, Graph, Manifest, Node, NodeId,
 };
 
 use crate::merge_identity::{
-    node_id_to_identity_map, node_identity, node_identity_set, redacted_node_markers, NodeIdentity,
-    RedactedNodeMarkers,
+    allocate_node_id, node_id_to_identity_map, node_identity, node_identity_set,
+    redacted_node_markers, NodeIdentity, RedactedNodeMarkers,
 };
 
 type EdgeKey = (NodeIdentity, NodeIdentity, String);
 
 /// Deterministically 3-way-merges `ours` and `theirs` against their common ancestor `base`.
 ///
-/// Merge identity is by label for clean nodes and stable id for publicly redacted nodes; see the
-/// module documentation for the full deletion/addition semantics table. Node data (`source_file`,
-/// `source_location`) from `ours` wins when the same identity appears in both branches. The same
-/// preference applies to edge `confidence` and to community member lists.
+/// Merge identity is by label for clean nodes and stable `(id, marker)` for publicly redacted
+/// nodes; see the module documentation for the full deletion/addition semantics table. Node data
+/// (`source_file`, `source_location`) from `ours` wins when the same identity appears in both
+/// branches. The same preference applies to edge `confidence` and to community member lists.
 ///
 /// The result is passed through [`crate::dedup`] and [`Graph::sorted`] so it is deduplicated
 /// and canonically ordered (R4).
@@ -190,26 +189,16 @@ fn select_winning_nodes<'a>(
 #[must_use]
 fn assign_node_ids(nodes: Vec<(NodeIdentity, Node)>) -> (Vec<Node>, HashMap<NodeIdentity, NodeId>) {
     let mut identity_to_new_id = HashMap::with_capacity(nodes.len());
-    let mut used_ids: HashSet<u32> = nodes
+    let reserved_projected_ids: HashSet<u32> = nodes
         .iter()
-        .filter_map(|(identity, _)| match identity {
-            NodeIdentity::Stable(id) => Some(id.get()),
-            NodeIdentity::Label(_) => None,
-        })
+        .filter_map(|(identity, _)| identity.projected_id())
+        .map(NodeId::get)
         .collect();
+    let mut used_ids = HashSet::with_capacity(nodes.len());
     let updated: Vec<Node> = nodes
         .into_iter()
         .map(|(identity, mut node)| {
-            let new_id = match &identity {
-                NodeIdentity::Stable(id) => *id,
-                NodeIdentity::Label(label) => {
-                    let mut raw = content_id(label);
-                    while !used_ids.insert(raw) {
-                        raw = raw.wrapping_add(1);
-                    }
-                    NodeId::new(raw)
-                }
-            };
+            let new_id = allocate_node_id(&identity, &mut used_ids, &reserved_projected_ids);
             identity_to_new_id.insert(identity, new_id);
             node.id = new_id;
             node
@@ -1353,5 +1342,46 @@ mod tests {
         let merged = merge3(&Graph::new(), &ours, &theirs);
         assert_eq!(merged.edges.len(), 1);
         assert_eq!(merged.edges[0].relation, "api_key=alpha");
+    }
+
+    #[test]
+    fn different_redaction_markers_sharing_an_input_id_survive_merge3() {
+        let mut ours = nodes_graph(&[(7, "[REDACTED:api_key]"), (8, "ATarget")]);
+        ours.edges.push(edge(7, 8, "a-edge"));
+        let mut theirs = nodes_graph(&[(7, "[REDACTED:bearer_token]"), (8, "BTarget")]);
+        theirs.edges.push(edge(7, 8, "b-edge"));
+
+        let merged = merge3(&Graph::new(), &ours, &theirs);
+        let api = merged
+            .nodes
+            .iter()
+            .find(|node| node.label == "[REDACTED:api_key]")
+            .unwrap();
+        let bearer = merged
+            .nodes
+            .iter()
+            .find(|node| node.label == "[REDACTED:bearer_token]")
+            .unwrap();
+        let a_target = merged
+            .nodes
+            .iter()
+            .find(|node| node.label == "ATarget")
+            .unwrap();
+        let b_target = merged
+            .nodes
+            .iter()
+            .find(|node| node.label == "BTarget")
+            .unwrap();
+
+        assert_eq!(merged.nodes.len(), 4);
+        assert_ne!(api.id, bearer.id);
+        assert!(merged
+            .edges
+            .iter()
+            .any(|edge| edge.source == api.id && edge.target == a_target.id));
+        assert!(merged
+            .edges
+            .iter()
+            .any(|edge| edge.source == bearer.id && edge.target == b_target.id));
     }
 }

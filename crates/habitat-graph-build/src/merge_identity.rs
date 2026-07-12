@@ -1,11 +1,22 @@
 use std::collections::{HashMap, HashSet};
 
-use habitat_graph_core::{is_canonical_redaction_marker, redact_public_text, Graph, Node, NodeId};
+use habitat_graph_core::{
+    content_id, is_canonical_redaction_marker, redact_public_text, Graph, Node, NodeId,
+};
 
 #[derive(Clone, Debug, Eq, Hash, PartialEq)]
 pub(crate) enum NodeIdentity {
-    Stable(NodeId),
+    Projected(NodeId, String),
     Label(String),
+}
+
+impl NodeIdentity {
+    pub(crate) const fn projected_id(&self) -> Option<NodeId> {
+        match self {
+            Self::Projected(id, _) => Some(*id),
+            Self::Label(_) => None,
+        }
+    }
 }
 
 pub(crate) type RedactedNodeMarkers = HashMap<NodeId, HashSet<String>>;
@@ -26,14 +37,39 @@ pub(crate) fn redacted_node_markers(graphs: &[&Graph]) -> RedactedNodeMarkers {
 }
 
 pub(crate) fn node_identity(node: &Node, redacted_markers: &RedactedNodeMarkers) -> NodeIdentity {
-    let matches_public_projection = redacted_markers.get(&node.id).is_some_and(|markers| {
-        let projected = redact_public_text(&node.label);
-        projected.as_ref() != node.label && markers.contains(projected.as_ref())
-    });
-    if is_canonical_redaction_marker(&node.label) || matches_public_projection {
-        NodeIdentity::Stable(node.id)
+    if is_canonical_redaction_marker(&node.label) {
+        return NodeIdentity::Projected(node.id, node.label.clone());
+    }
+
+    let projected = redact_public_text(&node.label);
+    if projected.as_ref() != node.label
+        && redacted_markers
+            .get(&node.id)
+            .is_some_and(|markers| markers.contains(projected.as_ref()))
+    {
+        NodeIdentity::Projected(node.id, projected.into_owned())
     } else {
         NodeIdentity::Label(node.label.clone())
+    }
+}
+
+pub(crate) fn allocate_node_id(
+    identity: &NodeIdentity,
+    used_ids: &mut HashSet<u32>,
+    reserved_projected_ids: &HashSet<u32>,
+) -> NodeId {
+    let (preferred, projected) = match identity {
+        NodeIdentity::Projected(id, _) => (id.get(), true),
+        NodeIdentity::Label(label) => (content_id(label), false),
+    };
+    let mut raw = preferred;
+    loop {
+        let reserved_for_other =
+            reserved_projected_ids.contains(&raw) && !(projected && raw == preferred);
+        if !reserved_for_other && used_ids.insert(raw) {
+            return NodeId::new(raw);
+        }
+        raw = raw.wrapping_add(1);
     }
 }
 

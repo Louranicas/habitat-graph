@@ -13,9 +13,9 @@ use habitat_graph_core::{GraphError, Result};
 /// Matching is case-insensitive: a file with extension `".RS"` matches the key `"rs"`, and a key
 /// of `"MD"` matches a file named `"readme.md"`.
 ///
-/// Repository roots containing `.git` use the standard gitignore sources, including nested
-/// `.gitignore` files, `.ignore` files, global excludes, and `.git/info/exclude`. Roots without
-/// local git metadata honor only ignore files within the scan root, so staged trees do not depend
+/// Roots within a Git worktree use the standard gitignore sources, including nested `.gitignore`
+/// files, `.ignore` files, global excludes, and `.git/info/exclude`. Roots without Git metadata in
+/// their ancestor chain honor only ignore files within the scan root, so staged trees do not depend
 /// on ambient parent or user configuration.
 ///
 /// # Errors
@@ -28,7 +28,7 @@ pub fn detect(root: &Path, extensions: &[&str]) -> Result<Vec<PathBuf>> {
 
     let mut paths: Vec<PathBuf> = Vec::new();
     let mut walker = ignore::WalkBuilder::new(root);
-    if !root.join(".git").exists() {
+    if !has_git_ancestor(root) {
         walker
             .require_git(false)
             .parents(false)
@@ -53,6 +53,28 @@ pub fn detect(root: &Path, extensions: &[&str]) -> Result<Vec<PathBuf>> {
 
     paths.sort();
     Ok(paths)
+}
+
+fn has_git_ancestor(root: &Path) -> bool {
+    let absolute = std::path::absolute(root).unwrap_or_else(|_| root.to_path_buf());
+    absolute
+        .ancestors()
+        .any(|ancestor| is_git_metadata(&ancestor.join(".git")))
+}
+
+fn is_git_metadata(path: &Path) -> bool {
+    if path.is_dir() {
+        path.join("HEAD").is_file()
+    } else if path.is_file() {
+        std::fs::read_to_string(path).ok().is_some_and(|contents| {
+            contents
+                .lines()
+                .next()
+                .is_some_and(|line| line.trim().starts_with("gitdir:"))
+        })
+    } else {
+        false
+    }
 }
 
 #[cfg(test)]
@@ -347,11 +369,45 @@ mod tests {
     fn git_scan_still_inherits_repository_gitignore() {
         let repository = TempDir::new().unwrap();
         fs::create_dir_all(repository.path().join(".git")).unwrap();
+        fs::write(
+            repository.path().join(".git/HEAD"),
+            "ref: refs/heads/main\n",
+        )
+        .unwrap();
         fs::create_dir_all(repository.path().join("src")).unwrap();
         fs::write(repository.path().join("src/ignored.rs"), b"").unwrap();
         fs::write(repository.path().join(".gitignore"), "ignored.rs\n").unwrap();
 
         let got = detect(repository.path(), &["rs"]).unwrap();
+        assert!(got.is_empty());
+    }
+
+    #[test]
+    fn git_subdirectory_scan_inherits_repository_gitignore() {
+        let repository = TempDir::new().unwrap();
+        fs::create_dir_all(repository.path().join(".git")).unwrap();
+        fs::write(
+            repository.path().join(".git/HEAD"),
+            "ref: refs/heads/main\n",
+        )
+        .unwrap();
+        fs::create_dir_all(repository.path().join("src")).unwrap();
+        fs::write(repository.path().join("src/ignored.rs"), b"").unwrap();
+        fs::write(repository.path().join(".gitignore"), "ignored.rs\n").unwrap();
+
+        let got = detect(&repository.path().join("src"), &["rs"]).unwrap();
+        assert!(got.is_empty());
+    }
+
+    #[test]
+    fn worktree_subdirectory_scan_inherits_repository_gitignore() {
+        let repository = TempDir::new().unwrap();
+        fs::write(repository.path().join(".git"), "gitdir: /unused\n").unwrap();
+        fs::create_dir_all(repository.path().join("src")).unwrap();
+        fs::write(repository.path().join("src/ignored.rs"), b"").unwrap();
+        fs::write(repository.path().join(".gitignore"), "ignored.rs\n").unwrap();
+
+        let got = detect(&repository.path().join("src"), &["rs"]).unwrap();
         assert!(got.is_empty());
     }
 
