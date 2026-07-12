@@ -1147,6 +1147,23 @@ mod tests {
     }
 
     #[test]
+    fn export_normalization_cannot_reconstruct_slack_tokens() {
+        let g = graph_with_nodes(vec![make_node(
+            1,
+            "xox\nb-123-secret",
+            "crates/xox(b)-123-secret/lib.rs",
+        )]);
+
+        let rendered = render_vault(&g);
+        let joined = rendered
+            .iter()
+            .flat_map(|(filename, content)| [filename.as_str(), content.as_str()])
+            .collect::<String>();
+        assert!(!joined.contains("xoxb-123-secret"));
+        assert!(joined.contains("slack_token"));
+    }
+
+    #[test]
     fn wikilink_alias_escapes_delimiters_and_backslashes() {
         assert_eq!(
             super::wikilink_alias(r"a\b|c]] [[injected"),

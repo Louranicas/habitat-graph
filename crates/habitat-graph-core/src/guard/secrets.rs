@@ -8,6 +8,8 @@ use std::collections::{HashMap, HashSet};
 
 use crate::NodeId;
 
+use super::sanitize::sanitize_label;
+
 /// Secret tags in the canonical order used by public redaction markers.
 pub const SECRET_TAG_ORDER: &[&str] = &[
     "private_key",
@@ -158,6 +160,7 @@ pub fn screen_for_secrets(text: &str) -> Vec<&'static str> {
         .chars()
         .filter(|character| !matches!(character, '[' | ']' | ':'))
         .collect();
+    let label_like = sanitize_label(text);
 
     let mut encountered = HashSet::new();
     for candidate in [
@@ -167,8 +170,18 @@ pub fn screen_for_secrets(text: &str) -> Vec<&'static str> {
         filename_like.as_str(),
         compact.as_str(),
         field_key_like.as_str(),
+        label_like.as_str(),
     ] {
         screen_candidate(candidate, &mut encountered);
+    }
+    for segment in text.split('/') {
+        let yaml_token_like: String = segment
+            .chars()
+            .filter(|character| {
+                character.is_ascii_alphanumeric() || matches!(character, '.' | '_' | '-')
+            })
+            .collect();
+        screen_candidate(&yaml_token_like, &mut encountered);
     }
     SECRET_TAG_ORDER
         .iter()
@@ -355,6 +368,23 @@ mod tests {
             assert!(redact_public_text(value).contains(tag));
         }
         assert!(is_clean("begin_private_key_rotation"));
+    }
+
+    #[test]
+    fn detects_secrets_reconstructed_by_export_normalization() {
+        for value in [
+            "xox\nb-123-secret",
+            "xox\u{0007}p-123-secret",
+            "xox(b)-123-secret",
+            "crates/xox[p]-123-secret/lib.rs",
+        ] {
+            assert!(screen_for_secrets(value).contains(&"slack_token"));
+            assert_eq!(redact_public_text(value), "[REDACTED:slack_token]");
+        }
+        assert_eq!(
+            redact_public_text("-----BEG\nIN OPENSSH PRIVATE KEY-----"),
+            "[REDACTED:private_key]"
+        );
     }
 
     #[test]

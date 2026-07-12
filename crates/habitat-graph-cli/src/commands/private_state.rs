@@ -6,6 +6,9 @@ use habitat_graph_core::{GraphError, Result};
 use std::os::unix::fs::PermissionsExt as _;
 
 pub(super) fn path_for_output(output: &Path, legacy: &Path) -> Result<PathBuf> {
+    #[cfg(not(unix))]
+    remove(legacy, "unsupported legacy private state")?;
+
     let parent = output
         .parent()
         .filter(|parent| !parent.as_os_str().is_empty())
@@ -251,5 +254,17 @@ mod tests {
         let state = super::path_for_output(&output_dir.join("graph.json"), &legacy).unwrap();
         assert!(state.starts_with(git_dir.join("habitat-graph/state")));
         assert_ne!(state, legacy);
+    }
+
+    #[cfg(not(unix))]
+    #[test]
+    fn unsupported_platform_removes_legacy_state_before_path_resolution() {
+        let root = TempDir::new().unwrap();
+        let output_dir = root.path().join("missing");
+        let legacy = root.path().join(".habitat-graph-state.json");
+        fs::write(&legacy, "raw state").unwrap();
+
+        assert!(super::path_for_output(&output_dir.join("graph.json"), &legacy).is_err());
+        assert!(!legacy.exists());
     }
 }
