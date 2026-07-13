@@ -80,7 +80,8 @@ pub fn run(dir: &Path, out: &Path) -> u8 {
 fn run_inner(dir: &Path, out: &Path) -> Result<()> {
     std::fs::create_dir_all(out).map_err(|error| GraphError::Io(error.to_string()))?;
     let out = super::private_state::resolve_output_directory(out)?;
-    let (sidecar_path, legacy_sidecar_path, _output_lock) = prepare_update_transaction(&out)?;
+    let (sidecar_path, legacy_sidecar_path, _identity_lock, _output_lock) =
+        prepare_update_transaction(&out)?;
     let public_output = load_public_output(&out.join("graph.json"))?;
 
     // ── Detect all source files (sorted for R4 determinism) ─────────────────────
@@ -101,51 +102,7 @@ fn run_inner(dir: &Path, out: &Path) -> Result<()> {
     let current_manifest =
         habitat_graph_source::build_manifest(&current_inputs, env!("CARGO_PKG_VERSION"));
 
-    // ── Clone prior manifest into owned strings to release prior_graph borrow ───
-    // `prior_map` must not borrow from `prior_graph.manifest` (we move prior_graph later).
-    let prior_entries: Vec<(String, String)> = prior_graph
-        .manifest
-        .inputs
-        .iter()
-        .map(|r| (r.path.clone(), r.content_hash.clone()))
-        .collect();
-    // `prior_graph.manifest.inputs` borrow ends here (iter consumed, collect done).
-
-    let current_map: HashMap<&str, &str> = current_manifest
-        .inputs
-        .iter()
-        .map(|r| (r.path.as_str(), r.content_hash.as_str()))
-        .collect();
-    let prior_map: HashMap<&str, &str> = prior_entries
-        .iter()
-        .map(|(p, h)| (p.as_str(), h.as_str()))
-        .collect();
-
-    let current_paths: HashSet<&str> = current_map.keys().copied().collect();
-    let prior_paths: HashSet<&str> = prior_map.keys().copied().collect();
-
-    // Build diff lists as owned `String`s so they do not borrow from `prior_graph`.
-    let mut added: Vec<String> = current_paths
-        .difference(&prior_paths)
-        .copied()
-        .map(str::to_owned)
-        .collect();
-    let mut removed: Vec<String> = prior_paths
-        .difference(&current_paths)
-        .copied()
-        .map(str::to_owned)
-        .collect();
-    let mut changed: Vec<String> = current_paths
-        .intersection(&prior_paths)
-        .copied()
-        .filter(|&p| current_map.get(p) != prior_map.get(p))
-        .map(str::to_owned)
-        .collect();
-
-    // Deterministic ordering of the three diff lists (R4 compliance).
-    added.sort_unstable();
-    removed.sort_unstable();
-    changed.sort_unstable();
+    let (added, removed, changed) = diff_manifest(&current_manifest, &prior_graph);
 
     let need_reextract = added.len() + changed.len();
 
@@ -215,6 +172,49 @@ fn run_inner(dir: &Path, out: &Path) -> Result<()> {
     )?;
     println!("update: {need_reextract} changed, {n} nodes (analyze re-run globally)");
     Ok(())
+}
+
+fn diff_manifest(
+    current_manifest: &Manifest,
+    prior_graph: &Graph,
+) -> (Vec<String>, Vec<String>, Vec<String>) {
+    let prior_entries: Vec<(String, String)> = prior_graph
+        .manifest
+        .inputs
+        .iter()
+        .map(|record| (record.path.clone(), record.content_hash.clone()))
+        .collect();
+    let current_map: HashMap<&str, &str> = current_manifest
+        .inputs
+        .iter()
+        .map(|record| (record.path.as_str(), record.content_hash.as_str()))
+        .collect();
+    let prior_map: HashMap<&str, &str> = prior_entries
+        .iter()
+        .map(|(path, hash)| (path.as_str(), hash.as_str()))
+        .collect();
+    let current_paths: HashSet<&str> = current_map.keys().copied().collect();
+    let prior_paths: HashSet<&str> = prior_map.keys().copied().collect();
+    let mut added: Vec<String> = current_paths
+        .difference(&prior_paths)
+        .copied()
+        .map(str::to_owned)
+        .collect();
+    let mut removed: Vec<String> = prior_paths
+        .difference(&current_paths)
+        .copied()
+        .map(str::to_owned)
+        .collect();
+    let mut changed: Vec<String> = current_paths
+        .intersection(&prior_paths)
+        .copied()
+        .filter(|&path| current_map.get(path) != prior_map.get(path))
+        .map(str::to_owned)
+        .collect();
+    added.sort_unstable();
+    removed.sort_unstable();
+    changed.sort_unstable();
+    (added, removed, changed)
 }
 
 fn load_available_prior(
@@ -299,12 +299,17 @@ fn prepare_update_transaction(
     PathBuf,
     PathBuf,
     super::private_state::OutputTransactionLock,
+    super::private_state::OutputTransactionLock,
 )> {
+    std::fs::create_dir_all(out).map_err(|error| GraphError::Io(error.to_string()))?;
+    let identity_lock =
+        super::private_state::acquire_output_identity_lock(&out.join("graph.json"))?;
     let (state, legacy) = prepare_private_state(out)?;
     let lock = super::private_state::acquire_output_lock(&state)?;
+    super::private_state::ensure_no_pending_full_build_journal(&state)?;
     super::private_state::ensure_no_pending_add_journals(&state)?;
     recover_update_journal(out, &state, &legacy)?;
-    Ok((state, legacy, lock))
+    Ok((state, legacy, identity_lock, lock))
 }
 
 const UPDATE_JOURNAL_SCHEMA: &str = "habitat-graph.update-journal.v1";
@@ -601,7 +606,12 @@ fn commit_update_journal(
     if state_path != legacy_state_path {
         super::private_state::remove(legacy_state_path, "legacy private state")?;
     }
-    super::private_state::remove(journal_path, "update journal")
+    super::private_state::finalize_context_journal(
+        &out.join("graph.json"),
+        state_path,
+        journal_path,
+        "update transaction commit",
+    )
 }
 
 fn recover_update_journal(out: &Path, state_path: &Path, legacy_state_path: &Path) -> Result<bool> {

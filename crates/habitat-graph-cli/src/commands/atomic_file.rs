@@ -3,6 +3,7 @@
 //! Writes use a newly created temporary file, flush it, atomically rename it over the destination,
 //! and sync the containing directory. Failed writes remove their temporary file when possible.
 
+use std::ffi::OsString;
 use std::fs::OpenOptions;
 use std::io::Write as _;
 use std::path::Path;
@@ -16,6 +17,42 @@ use std::os::unix::fs::OpenOptionsExt as _;
 
 static TEMP_SEQUENCE: AtomicU64 = AtomicU64::new(0);
 
+pub(super) const PRIVATE_TEMP_SEPARATOR: &str = ".hgtp.";
+
+pub(super) fn is_private_temporary_suffix(suffix: &str) -> bool {
+    let Some(nonce) = suffix.strip_prefix(PRIVATE_TEMP_SEPARATOR) else {
+        return false;
+    };
+    let mut parts = nonce.split('.');
+    let values = [parts.next(), parts.next(), parts.next()];
+    values.into_iter().all(|part| {
+        part.is_some_and(|part| {
+            !part.is_empty()
+                && part
+                    .bytes()
+                    .all(|byte| byte.is_ascii_digit() || byte.is_ascii_lowercase())
+        })
+    }) && parts.next().is_none()
+}
+
+fn radix36(mut value: u64) -> String {
+    if value == 0 {
+        return "0".to_owned();
+    }
+    let mut encoded = Vec::new();
+    while value != 0 {
+        let digit = u8::try_from(value % 36).expect("base-36 digit fits in u8");
+        encoded.push(if digit < 10 {
+            b'0' + digit
+        } else {
+            b'a' + digit - 10
+        });
+        value /= 36;
+    }
+    encoded.reverse();
+    String::from_utf8(encoded).expect("base-36 encoding is ASCII")
+}
+
 /// Atomically replaces `path` with `bytes`, optionally creating the temporary file owner-only.
 ///
 /// # Errors
@@ -27,16 +64,33 @@ pub(super) fn write(path: &Path, bytes: &[u8], owner_only: bool, context: &str) 
         .parent()
         .filter(|parent| !parent.as_os_str().is_empty())
         .unwrap_or_else(|| Path::new("."));
-    path.file_name()
+    let filename = path
+        .file_name()
         .ok_or_else(|| GraphError::Io(format!("{context} path has no filename")))?;
     let sequence = TEMP_SEQUENCE.fetch_add(1, Ordering::Relaxed);
     let timestamp = SystemTime::now()
         .duration_since(UNIX_EPOCH)
-        .map_or(0, |duration| duration.as_nanos());
-    let temporary_name = format!(
-        ".habitat-graph.tmp.{}.{timestamp}.{sequence}",
-        std::process::id()
+        .map_or(0, |duration| {
+            u64::try_from(duration.as_nanos())
+                .unwrap_or_else(|_| duration.as_secs() ^ u64::from(duration.subsec_nanos()))
+        });
+    let nonce = format!(
+        "{}.{}.{}",
+        radix36(u64::from(std::process::id())),
+        radix36(timestamp),
+        radix36(sequence)
     );
+    debug_assert!(is_private_temporary_suffix(&format!(
+        "{PRIVATE_TEMP_SEPARATOR}{nonce}"
+    )));
+    let temporary_name = if owner_only {
+        let mut name = OsString::from(filename);
+        name.push(PRIVATE_TEMP_SEPARATOR);
+        name.push(nonce);
+        name
+    } else {
+        OsString::from(format!(".habitat-graph.tmp.{nonce}"))
+    };
     let temporary = parent.join(temporary_name);
 
     let mut options = OpenOptions::new();

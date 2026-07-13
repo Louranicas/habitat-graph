@@ -29,14 +29,21 @@ const CONTEXT_REVISION_SEPARATOR: &str = ".context-revision-";
 const EXPIRED_CONTEXT_SEPARATOR: &str = ".expired-context-";
 const EXPIRED_REVISION_SEPARATOR: &str = ".expired-revision-";
 const EXPIRATION_INDEX_SUFFIX: &str = ".expirations";
-const EXPIRATION_INDEX_SCHEMA: &str = "habitat-graph.expirations.v1";
+const LEGACY_EXPIRATION_INDEX_SCHEMA: &str = "habitat-graph.expirations.v1";
+const EXPIRATION_INDEX_SCHEMA: &str = "habitat-graph.expirations.v2";
 const MIGRATION_CONFLICT_SEPARATOR: &str = ".migration-conflict-";
 const MIGRATION_CONFLICT_DIRECTORY: &str = ".migration-conflicts";
 const ADD_JOURNAL_SUFFIX: &str = ".add-journal";
 const UPDATE_JOURNAL_SUFFIX: &str = ".update-journal";
+const FULL_BUILD_JOURNAL_SUFFIX: &str = ".full-build-journal";
+const FULL_BUILD_JOURNAL_SCHEMA: &str = "habitat-graph.full-build-journal.v1";
 const OUTPUT_LOCK_SUFFIX: &str = ".output-lock";
+const OUTPUT_IDENTITY_LOCK: &str = ".habitat-graph.output-identity-lock";
 const MAX_SNAPSHOTS: usize = 16;
 const MAX_CONTEXTS_PER_OUTPUT: usize = 16;
+const MAX_EXPIRATION_PREFIXES: usize = 128;
+const MAX_EXPIRATION_ADMISSIONS: usize = MAX_CONTEXTS_PER_OUTPUT * 2;
+const MAX_LEGACY_REVISION_SCAN: usize = 4096;
 const MAX_GIT_CONTROL_LINE_BYTES: u64 = 4096;
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -131,7 +138,13 @@ fn path_for_output_with_expiration(
     write_context_revision(&state_path, &context.revision, context.commit.as_deref())?;
     let mut first_error = None;
     for result in [
+        migrate_full_build_journal(
+            &unscoped_state_path,
+            &state_path,
+            "unscoped full-build journal",
+        ),
         migrate_family(&unscoped_state_path, &state_path, "unscoped private state"),
+        migrate_full_build_journal(legacy, &state_path, "legacy full-build journal"),
         migrate_family(legacy, &state_path, "legacy private state"),
         ensure_no_family_conflicts(&state_path),
     ] {
@@ -266,6 +279,19 @@ impl Drop for OutputTransactionLock {
 
 pub(super) fn acquire_output_lock(state_path: &Path) -> Result<OutputTransactionLock> {
     let lock_path = output_lock_path(state_path)?;
+    acquire_lock_path(&lock_path)
+}
+
+pub(super) fn acquire_output_identity_lock(output: &Path) -> Result<OutputTransactionLock> {
+    let parent = output
+        .parent()
+        .filter(|parent| !parent.as_os_str().is_empty())
+        .unwrap_or_else(|| Path::new("."));
+    let parent = resolve_output_directory(parent)?;
+    acquire_lock_path(&parent.join(OUTPUT_IDENTITY_LOCK))
+}
+
+fn acquire_lock_path(lock_path: &Path) -> Result<OutputTransactionLock> {
     if let Some(parent) = lock_path
         .parent()
         .filter(|parent| !parent.as_os_str().is_empty())
@@ -274,7 +300,7 @@ pub(super) fn acquire_output_lock(state_path: &Path) -> Result<OutputTransaction
             .map_err(|error| GraphError::Io(format!("create output lock directory: {error}")))?;
     }
     for _ in 0..4 {
-        let prior_metadata = match std::fs::symlink_metadata(&lock_path) {
+        let prior_metadata = match std::fs::symlink_metadata(lock_path) {
             Ok(metadata) => {
                 if !metadata.file_type().is_file() {
                     return Err(GraphError::Guard(format!(
@@ -303,7 +329,7 @@ pub(super) fn acquire_output_lock(state_path: &Path) -> Result<OutputTransaction
             use std::os::unix::fs::OpenOptionsExt as _;
             options.mode(0o600).custom_flags(libc::O_NOFOLLOW);
         }
-        let file = match options.open(&lock_path) {
+        let file = match options.open(lock_path) {
             Ok(file) => file,
             Err(error)
                 if matches!(
@@ -345,7 +371,7 @@ pub(super) fn acquire_output_lock(state_path: &Path) -> Result<OutputTransaction
                 return Err(GraphError::Io(format!("lock output transaction: {error}")))
             }
         }
-        let current_metadata = std::fs::symlink_metadata(&lock_path).map_err(|error| {
+        let current_metadata = std::fs::symlink_metadata(lock_path).map_err(|error| {
             GraphError::Guard(format!(
                 "output transaction lock changed while being opened: {error}"
             ))
@@ -612,57 +638,120 @@ fn context_ancestry(path: &Path, candidates: &[PathBuf]) -> Result<ContextAncest
     {
         return Ok(ContextAncestry::default());
     }
-    let mut ancestry = ContextAncestry::default();
+    let mut revisions = Vec::new();
     for candidate in candidates {
-        if candidate == path {
+        if candidate != path {
+            if let Some(revision) = context_revision(candidate)? {
+                revisions.push((candidate.clone(), revision));
+            }
+        }
+    }
+    if let Some(current_commit) = current_identity.commit.as_deref() {
+        migrate_legacy_revision_markers(&git_dir, current_commit, &mut revisions)?;
+    }
+    let mut ancestry = ContextAncestry::default();
+    for (candidate, revision) in revisions {
+        if current_identity.unborn_predecessor.as_ref().is_some_and(
+            |(context, predecessor_revision)| {
+                state_context_key(&candidate).as_deref() == Some(context.as_str())
+                    && revision.key == *predecessor_revision
+            },
+        ) {
+            ancestry.statuses.insert(candidate, true);
             continue;
         }
-        if let Some(revision) = context_revision(candidate)? {
-            if current_identity.unborn_predecessor.as_ref().is_some_and(
-                |(context, predecessor_revision)| {
-                    state_context_key(candidate).as_deref() == Some(context.as_str())
-                        && revision.key == *predecessor_revision
-                },
-            ) {
-                ancestry.statuses.insert(candidate.clone(), true);
-                continue;
+        let (Some(candidate_commit), Some(current_commit)) = (
+            revision.commit.as_deref(),
+            current_identity.commit.as_deref(),
+        ) else {
+            continue;
+        };
+        let Ok(status) = std::process::Command::new("git")
+            .arg("--git-dir")
+            .arg(&git_dir)
+            .args([
+                "merge-base",
+                "--is-ancestor",
+                candidate_commit,
+                current_commit,
+            ])
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .status()
+        else {
+            continue;
+        };
+        match status.code() {
+            Some(0) => {
+                ancestry.statuses.insert(candidate, true);
             }
-            let (Some(candidate_commit), Some(current_commit)) = (
-                revision.commit.as_deref(),
-                current_identity.commit.as_deref(),
-            ) else {
-                continue;
-            };
-            let Ok(status) = std::process::Command::new("git")
-                .arg("--git-dir")
-                .arg(&git_dir)
-                .args([
-                    "merge-base",
-                    "--is-ancestor",
-                    candidate_commit,
-                    current_commit,
-                ])
-                .stdout(std::process::Stdio::null())
-                .stderr(std::process::Stdio::null())
-                .status()
-            else {
-                continue;
-            };
-            match status.code() {
-                Some(0) => {
-                    ancestry.statuses.insert(candidate.clone(), true);
-                }
-                Some(1) => {
-                    ancestry.statuses.insert(candidate.clone(), false);
-                }
-                _ => {}
+            Some(1) => {
+                ancestry.statuses.insert(candidate, false);
             }
+            _ => {}
         }
     }
     if git_context_identity(&git_dir)? != current_identity {
         return Ok(ContextAncestry::default());
     }
     Ok(ancestry)
+}
+
+fn migrate_legacy_revision_markers(
+    git_dir: &Path,
+    current_commit: &str,
+    revisions: &mut [(PathBuf, ContextRevision)],
+) -> Result<()> {
+    let mut unresolved: HashMap<String, Vec<usize>> = HashMap::new();
+    for (index, (_, revision)) in revisions.iter().enumerate() {
+        if revision.commit.is_none() {
+            unresolved
+                .entry(revision.key.clone())
+                .or_default()
+                .push(index);
+        }
+    }
+    if unresolved.is_empty() {
+        return Ok(());
+    }
+    let Ok(output) = std::process::Command::new("git")
+        .arg("--git-dir")
+        .arg(git_dir)
+        .arg("rev-list")
+        .arg(format!("--max-count={MAX_LEGACY_REVISION_SCAN}"))
+        .arg(current_commit)
+        .stderr(std::process::Stdio::null())
+        .output()
+    else {
+        return Ok(());
+    };
+    if !output.status.success() {
+        return Ok(());
+    }
+    let commits = std::str::from_utf8(&output.stdout).map_err(|error| {
+        GraphError::Guard(format!("Git revision history is not UTF-8: {error}"))
+    })?;
+    for commit in commits.lines() {
+        if !is_object_id(commit) {
+            return Err(GraphError::Guard(
+                "Git revision history contains an invalid object ID".to_owned(),
+            ));
+        }
+        let commit = commit.to_ascii_lowercase();
+        let revision_key = generation(format!("commit:{commit}").as_bytes());
+        let Some(indices) = unresolved.remove(&revision_key) else {
+            continue;
+        };
+        for index in indices {
+            let (path, revision) = &mut revisions[index];
+            write_context_revision(path, &revision.key, Some(&commit))?;
+            revision.commit = Some(commit.clone());
+        }
+        if unresolved.is_empty() {
+            break;
+        }
+    }
+    Ok(())
 }
 
 pub(super) fn context_is_verified_ancestor(ancestor: &Path, current: &Path) -> Result<bool> {
@@ -809,19 +898,146 @@ pub(super) fn write_state(path: &Path, bytes: &[u8]) -> Result<()> {
     write_state_contents(path, bytes)
 }
 
-#[cfg(unix)]
+#[cfg(all(test, unix))]
 pub(super) fn commit_full_build_state(state: &FullBuildState, bytes: &[u8]) -> Result<()> {
-    commit_full_build_state_with(state, || write_full_build_state(state.path(), bytes))
+    commit_full_build_state_and_publish(state, bytes, || Ok(()))
+}
+
+#[cfg(unix)]
+pub(super) fn commit_full_build_state_and_publish(
+    state: &FullBuildState,
+    bytes: &[u8],
+    publish: impl FnOnce() -> Result<()>,
+) -> Result<()> {
+    commit_full_build_state_with(
+        state,
+        bytes,
+        || write_full_build_state(state.path(), bytes),
+        publish,
+    )
 }
 
 #[cfg(unix)]
 fn commit_full_build_state_with(
     state: &FullBuildState,
+    bytes: &[u8],
     write_state: impl FnOnce() -> Result<()>,
+    publish: impl FnOnce() -> Result<()>,
 ) -> Result<()> {
     state.ensure_current()?;
+    let journal_path = full_build_journal_path(state.path())?;
+    let context_journal_path = transaction_path(state.path(), FULL_BUILD_JOURNAL_SUFFIX)?;
+    let journal = serde_json::to_vec_pretty(&serde_json::json!({
+        "schema": FULL_BUILD_JOURNAL_SCHEMA,
+        "origin_context": state.context.as_ref().map(|identity| identity.key.as_str()),
+        "private_checksum": generation(bytes),
+    }))
+    .map_err(|error| GraphError::Schema(format!("full-build journal serialize: {error}")))?;
+    write(&context_journal_path, &journal)?;
+    state.ensure_current()?;
+    write(&journal_path, &journal)?;
+    state.ensure_current()?;
     write_state()?;
-    state.ensure_current()
+    state.ensure_current()?;
+    publish()?;
+    state.ensure_current()?;
+    if context_journal_path != journal_path {
+        finalize_context_journal(
+            &state.output,
+            state.path(),
+            &context_journal_path,
+            "full-build context transaction",
+        )?;
+    }
+    finalize_context_journal(
+        &state.output,
+        state.path(),
+        &journal_path,
+        "full-build transaction",
+    )
+}
+
+fn full_build_journal_path(path: &Path) -> Result<PathBuf> {
+    if let Some(key) = output_state_key(path) {
+        return Ok(path.with_file_name(format!("{key}{FULL_BUILD_JOURNAL_SUFFIX}")));
+    }
+    transaction_path(path, FULL_BUILD_JOURNAL_SUFFIX)
+}
+
+pub(super) fn ensure_no_pending_full_build_journal(path: &Path) -> Result<()> {
+    let context_journal_path = transaction_path(path, FULL_BUILD_JOURNAL_SUFFIX)?;
+    validate_pending_full_build_journal(path, &context_journal_path)?;
+    let journal_path = full_build_journal_path(path)?;
+    if journal_path != context_journal_path {
+        validate_pending_full_build_journal(path, &journal_path)?;
+    }
+    Ok(())
+}
+
+fn validate_pending_full_build_journal(path: &Path, journal_path: &Path) -> Result<()> {
+    let Some(text) = read_text(journal_path, "full-build journal")? else {
+        return Ok(());
+    };
+    let value: serde_json::Value = serde_json::from_str(&text)
+        .map_err(|error| GraphError::Schema(format!("full-build journal parse: {error}")))?;
+    let origin = match value.get("origin_context") {
+        Some(serde_json::Value::Null) => None,
+        Some(serde_json::Value::String(origin)) if is_generation(origin) => Some(origin.as_str()),
+        _ => {
+            return Err(GraphError::Schema(
+                "full-build journal origin is invalid".to_owned(),
+            ))
+        }
+    };
+    if value["schema"] != FULL_BUILD_JOURNAL_SCHEMA
+        || !value["private_checksum"]
+            .as_str()
+            .is_some_and(is_generation)
+    {
+        return Err(GraphError::Schema(
+            "full-build journal is invalid".to_owned(),
+        ));
+    }
+    let current_context = state_context_key(path);
+    if origin != current_context.as_deref() {
+        return Err(GraphError::Guard(format!(
+            "pending full-build transaction belongs to another Git context: {}",
+            journal_path.display()
+        )));
+    }
+    Err(GraphError::Guard(format!(
+        "pending full-build transaction requires another full build: {}",
+        journal_path.display()
+    )))
+}
+
+pub(super) fn finalize_context_journal(
+    output: &Path,
+    state_path: &Path,
+    journal_path: &Path,
+    operation: &str,
+) -> Result<()> {
+    finalize_context_journal_with(output, state_path, journal_path, operation, || {
+        remove(journal_path, operation)
+    })
+}
+
+fn finalize_context_journal_with(
+    output: &Path,
+    state_path: &Path,
+    journal_path: &Path,
+    operation: &str,
+    remove_journal: impl FnOnce() -> Result<()>,
+) -> Result<()> {
+    let journal = read_text(journal_path, operation)?
+        .ok_or_else(|| GraphError::Io(format!("{operation} journal disappeared")))?;
+    ensure_state_context_current(output, state_path, operation)?;
+    remove_journal()?;
+    if let Err(error) = ensure_state_context_current(output, state_path, operation) {
+        write(journal_path, journal.as_bytes())?;
+        return Err(error);
+    }
+    Ok(())
 }
 
 fn write_full_build_state(path: &Path, bytes: &[u8]) -> Result<()> {
@@ -1269,8 +1485,8 @@ fn remove_expiration_markers(path: &Path, revision: &str) -> Result<()> {
         ))
     })?;
     update_expiration_index(path, |index| {
-        index.contexts.remove(&context);
-        index.revisions.remove(revision);
+        index.contexts.admit(&context);
+        index.revisions.admit(revision);
     })
 }
 
@@ -1311,10 +1527,98 @@ fn context_is_expired(path: &Path) -> Result<bool> {
 }
 
 #[derive(Default)]
+struct ExpirationSet {
+    prefixes: BTreeSet<String>,
+    admitted: BTreeSet<String>,
+}
+
+impl ExpirationSet {
+    fn contains(&self, value: &str) -> bool {
+        self.prefixes.iter().any(|prefix| value.starts_with(prefix))
+            && !self.admitted.contains(value)
+    }
+
+    fn expire(&mut self, value: String) {
+        self.admitted.remove(&value);
+        self.insert_prefix(value);
+    }
+
+    fn admit(&mut self, value: &str) {
+        self.prefixes.remove(value);
+        if self.prefixes.iter().any(|prefix| value.starts_with(prefix)) {
+            self.admitted.insert(value.to_owned());
+            while self.admitted.len() > MAX_EXPIRATION_ADMISSIONS {
+                let removable = self
+                    .admitted
+                    .iter()
+                    .find(|candidate| candidate.as_str() != value)
+                    .cloned();
+                let Some(removable) = removable else {
+                    break;
+                };
+                self.admitted.remove(&removable);
+            }
+        } else {
+            self.admitted.remove(value);
+        }
+    }
+
+    fn merge(&mut self, other: Self) {
+        for prefix in other.prefixes {
+            self.admitted.retain(|value| !value.starts_with(&prefix));
+            self.insert_prefix(prefix);
+        }
+    }
+
+    fn insert_prefix(&mut self, prefix: String) {
+        if self
+            .prefixes
+            .iter()
+            .any(|existing| prefix.starts_with(existing))
+        {
+            return;
+        }
+        self.prefixes
+            .retain(|existing| !existing.starts_with(&prefix));
+        self.admitted.retain(|value| !value.starts_with(&prefix));
+        self.prefixes.insert(prefix);
+        self.compact();
+    }
+
+    fn compact(&mut self) {
+        while self.prefixes.len() > MAX_EXPIRATION_PREFIXES {
+            let prefixes: Vec<_> = self.prefixes.iter().cloned().collect();
+            let mut selected = (0, 1, 0);
+            for left in 0..prefixes.len() {
+                for right in (left + 1)..prefixes.len() {
+                    let length = prefixes[left]
+                        .bytes()
+                        .zip(prefixes[right].bytes())
+                        .take_while(|(left, right)| left == right)
+                        .count();
+                    if length > selected.2 {
+                        selected = (left, right, length);
+                    }
+                }
+            }
+            let parent = prefixes[selected.0][..selected.2].to_owned();
+            self.prefixes.remove(&prefixes[selected.0]);
+            self.prefixes.remove(&prefixes[selected.1]);
+            self.prefixes
+                .retain(|existing| !existing.starts_with(&parent));
+            self.prefixes.insert(parent);
+        }
+    }
+
+    fn is_empty(&self) -> bool {
+        self.prefixes.is_empty() && self.admitted.is_empty()
+    }
+}
+
+#[derive(Default)]
 struct ExpirationIndex {
-    compacted: bool,
-    contexts: BTreeSet<String>,
-    revisions: BTreeSet<String>,
+    contexts: ExpirationSet,
+    revisions: ExpirationSet,
 }
 
 fn expiration_values(value: &serde_json::Value, field: &str) -> Result<BTreeSet<String>> {
@@ -1338,6 +1642,30 @@ fn expiration_values(value: &serde_json::Value, field: &str) -> Result<BTreeSet<
     Ok(generations)
 }
 
+fn expiration_prefixes(value: &serde_json::Value, field: &str) -> Result<BTreeSet<String>> {
+    let values = value[field].as_array().ok_or_else(|| {
+        GraphError::Schema(format!(
+            "private state expiration index `{field}` is invalid"
+        ))
+    })?;
+    let mut prefixes = BTreeSet::new();
+    for value in values {
+        let prefix = value.as_str().filter(|prefix| {
+            prefix.len() <= 64
+                && prefix
+                    .bytes()
+                    .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+        });
+        let Some(prefix) = prefix else {
+            return Err(GraphError::Schema(format!(
+                "private state expiration index `{field}` is invalid"
+            )));
+        };
+        prefixes.insert(prefix.to_owned());
+    }
+    Ok(prefixes)
+}
+
 fn load_expiration_index(path: &Path) -> Result<ExpirationIndex> {
     let Some(index_path) = expiration_index_path(path) else {
         return Ok(ExpirationIndex::default());
@@ -1347,19 +1675,46 @@ fn load_expiration_index(path: &Path) -> Result<ExpirationIndex> {
     };
     let value: serde_json::Value = serde_json::from_str(&text)
         .map_err(|error| GraphError::Schema(format!("private state expiration index: {error}")))?;
-    if value["schema"] != EXPIRATION_INDEX_SCHEMA {
-        return Err(GraphError::Schema(
+    match value["schema"].as_str() {
+        Some(LEGACY_EXPIRATION_INDEX_SCHEMA) => {
+            let mut index = ExpirationIndex::default();
+            for context in expiration_values(&value, "contexts")? {
+                index.contexts.expire(context);
+            }
+            for revision in expiration_values(&value, "revisions")? {
+                index.revisions.expire(revision);
+            }
+            Ok(index)
+        }
+        Some(EXPIRATION_INDEX_SCHEMA) => {
+            let context_admissions = expiration_values(&value, "admitted_contexts")?;
+            let revision_admissions = expiration_values(&value, "admitted_revisions")?;
+            if context_admissions.len() > MAX_EXPIRATION_ADMISSIONS
+                || revision_admissions.len() > MAX_EXPIRATION_ADMISSIONS
+            {
+                return Err(GraphError::Schema(
+                    "private state expiration index has too many admissions".to_owned(),
+                ));
+            }
+            let mut contexts = ExpirationSet {
+                prefixes: expiration_prefixes(&value, "context_prefixes")?,
+                admitted: context_admissions,
+            };
+            let mut revisions = ExpirationSet {
+                prefixes: expiration_prefixes(&value, "revision_prefixes")?,
+                admitted: revision_admissions,
+            };
+            contexts.compact();
+            revisions.compact();
+            Ok(ExpirationIndex {
+                contexts,
+                revisions,
+            })
+        }
+        _ => Err(GraphError::Schema(
             "unsupported private state expiration index schema".to_owned(),
-        ));
+        )),
     }
-    Ok(ExpirationIndex {
-        compacted: value
-            .get("compacted")
-            .and_then(serde_json::Value::as_bool)
-            .unwrap_or(false),
-        contexts: expiration_values(&value, "contexts")?,
-        revisions: expiration_values(&value, "revisions")?,
-    })
 }
 
 fn legacy_expiration_markers(path: &Path) -> Result<(ExpirationIndex, Vec<PathBuf>)> {
@@ -1397,13 +1752,13 @@ fn legacy_expiration_markers(path: &Path) -> Result<(ExpirationIndex, Vec<PathBu
             if !is_generation(context) {
                 continue;
             }
-            index.contexts.insert(context.to_owned());
+            index.contexts.expire(context.to_owned());
             context
         } else if let Some(revision) = filename.strip_prefix(&revision_prefix) {
             if !is_generation(revision) {
                 continue;
             }
-            index.revisions.insert(revision.to_owned());
+            index.revisions.expire(revision.to_owned());
             revision
         } else {
             continue;
@@ -1422,14 +1777,15 @@ fn write_expiration_index(path: &Path, index: &ExpirationIndex) -> Result<()> {
             path.display()
         ))
     })?;
-    if !index.compacted && index.contexts.is_empty() && index.revisions.is_empty() {
+    if index.contexts.is_empty() && index.revisions.is_empty() {
         return remove(&index_path, "private state expiration index");
     }
     let bytes = serde_json::to_vec_pretty(&serde_json::json!({
         "schema": EXPIRATION_INDEX_SCHEMA,
-        "compacted": index.compacted,
-        "contexts": index.contexts,
-        "revisions": index.revisions,
+        "context_prefixes": index.contexts.prefixes,
+        "revision_prefixes": index.revisions.prefixes,
+        "admitted_contexts": index.contexts.admitted,
+        "admitted_revisions": index.revisions.admitted,
     }))
     .map_err(|error| GraphError::Schema(format!("private state expiration index: {error}")))?;
     write(&index_path, &bytes)
@@ -1437,15 +1793,9 @@ fn write_expiration_index(path: &Path, index: &ExpirationIndex) -> Result<()> {
 
 fn update_expiration_index(path: &Path, update: impl FnOnce(&mut ExpirationIndex)) -> Result<()> {
     let mut index = load_expiration_index(path)?;
-    let markers = if index.compacted {
-        Vec::new()
-    } else {
-        let (legacy, markers) = legacy_expiration_markers(path)?;
-        index.contexts.extend(legacy.contexts);
-        index.revisions.extend(legacy.revisions);
-        markers
-    };
-    index.compacted = true;
+    let (legacy, markers) = legacy_expiration_markers(path)?;
+    index.contexts.merge(legacy.contexts);
+    index.revisions.merge(legacy.revisions);
     update(&mut index);
     write_expiration_index(path, &index)?;
     for marker in markers {
@@ -1468,8 +1818,8 @@ fn expire_context(path: &Path) -> Result<()> {
         ))
     })?;
     update_expiration_index(path, |index| {
-        index.contexts.insert(context);
-        index.revisions.insert(revision.key);
+        index.contexts.expire(context);
+        index.revisions.expire(revision.key);
     })
 }
 
@@ -1501,6 +1851,7 @@ fn prune_contexts(path: &Path) -> Result<()> {
             || members.iter().any(|(_, suffix)| {
                 suffix == ADD_JOURNAL_SUFFIX
                     || suffix == UPDATE_JOURNAL_SUFFIX
+                    || suffix == FULL_BUILD_JOURNAL_SUFFIX
                     || is_migration_conflict_suffix(suffix)
             });
         let mut modified = std::time::SystemTime::UNIX_EPOCH;
@@ -1631,6 +1982,14 @@ fn migrate_family(legacy: &Path, current: &Path, context: &str) -> Result<()> {
     Ok(())
 }
 
+fn migrate_full_build_journal(legacy: &Path, current: &Path, context: &str) -> Result<()> {
+    migrate(
+        &full_build_journal_path(legacy)?,
+        &full_build_journal_path(current)?,
+        context,
+    )
+}
+
 fn remove_family(path: &Path, context: &str) -> Result<()> {
     for (member, _) in family_members(path)? {
         remove(&member, context)?;
@@ -1642,8 +2001,61 @@ fn remove_family(path: &Path, context: &str) -> Result<()> {
 }
 
 #[cfg(any(test, not(unix)))]
+fn remove_private_temporaries(path: &Path, context: &str) -> Result<()> {
+    let parent = path
+        .parent()
+        .filter(|parent| !parent.as_os_str().is_empty())
+        .unwrap_or_else(|| Path::new("."));
+    let target = path
+        .file_name()
+        .ok_or_else(|| GraphError::Io("private state path has no filename".to_owned()))?;
+    let entries = match std::fs::read_dir(parent) {
+        Ok(entries) => entries,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(error) => {
+            return Err(GraphError::Io(format!(
+                "list {context} temporary files: {error}"
+            )))
+        }
+    };
+    for entry in entries {
+        let entry = entry
+            .map_err(|error| GraphError::Io(format!("list {context} temporary files: {error}")))?;
+        let filename = entry.file_name();
+        let Some(suffix) = native_filename_suffix(&filename, target) else {
+            continue;
+        };
+        let owned = super::atomic_file::is_private_temporary_suffix(&suffix)
+            || suffix
+                .rfind(super::atomic_file::PRIVATE_TEMP_SEPARATOR)
+                .is_some_and(|index| {
+                    is_family_member_suffix(&suffix[..index])
+                        && super::atomic_file::is_private_temporary_suffix(&suffix[index..])
+                });
+        if !owned {
+            continue;
+        }
+        let metadata = std::fs::symlink_metadata(entry.path()).map_err(|error| {
+            GraphError::Io(format!("inspect {context} temporary file: {error}"))
+        })?;
+        if !metadata.file_type().is_file() {
+            return Err(GraphError::Guard(format!(
+                "{context} temporary path is not a regular file: {}",
+                entry.path().display()
+            )));
+        }
+        remove(&entry.path(), context)?;
+    }
+    Ok(())
+}
+
+#[cfg(any(test, not(unix)))]
 fn remove_unsupported_state_families(output: &Path, legacy: &Path) -> Result<()> {
     remove_family(legacy, "unsupported legacy private state")?;
+    let full_build_journal = full_build_journal_path(legacy)?;
+    remove(&full_build_journal, "unsupported full-build journal")?;
+    remove_private_temporaries(legacy, "unsupported legacy private state")?;
+    remove_private_temporaries(&full_build_journal, "unsupported full-build journal")?;
     let output = resolve_output_file(output)?;
     let parent = output
         .parent()
@@ -1651,8 +2063,10 @@ fn remove_unsupported_state_families(output: &Path, legacy: &Path) -> Result<()>
     let Some(git_dir) = find_git_dir(parent)? else {
         return Ok(());
     };
-    let state_dir = git_dir.join("habitat-graph").join("state");
-    remove_repository_private_state(&state_dir)
+    for state_dir in repository_private_state_directories(&git_dir)? {
+        remove_repository_private_state(&state_dir)?;
+    }
+    Ok(())
 }
 
 #[cfg(not(unix))]
@@ -1662,6 +2076,11 @@ pub(super) fn remove_unsupported_state(output: &Path, legacy: &Path) -> Result<(
 
 #[cfg(any(test, not(unix)))]
 fn repository_state_filename(filename: &str) -> bool {
+    if let Some(index) = filename.rfind(super::atomic_file::PRIVATE_TEMP_SEPARATOR) {
+        let (target, suffix) = filename.split_at(index);
+        return super::atomic_file::is_private_temporary_suffix(suffix)
+            && repository_state_filename(target);
+    }
     let Some(key) = filename.get(..64).filter(|key| is_generation(key)) else {
         return false;
     };
@@ -1695,16 +2114,68 @@ fn repository_state_filename(filename: &str) -> bool {
     if let Some(revision) = rest.strip_prefix(EXPIRED_REVISION_SEPARATOR) {
         return is_generation(revision);
     }
-    rest == EXPIRATION_INDEX_SUFFIX
+    rest == EXPIRATION_INDEX_SUFFIX || rest == FULL_BUILD_JOURNAL_SUFFIX
 }
 
 #[cfg(any(test, not(unix)))]
 fn repository_conflict_filename(filename: &str) -> bool {
+    if let Some(index) = filename.rfind(super::atomic_file::PRIVATE_TEMP_SEPARATOR) {
+        let (target, suffix) = filename.split_at(index);
+        return super::atomic_file::is_private_temporary_suffix(suffix)
+            && repository_conflict_filename(target);
+    }
     let mut parts = filename.split('-');
     parts.next().is_some_and(is_generation)
         && parts.next().is_some_and(is_generation)
         && parts.next().is_some_and(is_generation)
         && parts.next().is_none()
+}
+
+#[cfg(any(test, not(unix)))]
+fn repository_private_state_directories(git_dir: &Path) -> Result<Vec<PathBuf>> {
+    let common_dir = git_common_dir(git_dir)?;
+    let mut git_dirs = BTreeSet::new();
+    git_dirs.insert(git_dir.to_path_buf());
+    git_dirs.insert(common_dir.clone());
+    let worktrees = common_dir.join("worktrees");
+    match std::fs::symlink_metadata(&worktrees) {
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+        Err(error) => {
+            return Err(GraphError::Io(format!(
+                "inspect Git worktree metadata: {error}"
+            )))
+        }
+        Ok(metadata) if metadata.file_type().is_dir() => {
+            let entries = std::fs::read_dir(&worktrees)
+                .map_err(|error| GraphError::Io(format!("list Git worktrees: {error}")))?;
+            for entry in entries {
+                let entry = entry
+                    .map_err(|error| GraphError::Io(format!("list Git worktrees: {error}")))?;
+                let metadata = std::fs::symlink_metadata(entry.path()).map_err(|error| {
+                    GraphError::Io(format!("inspect Git worktree metadata: {error}"))
+                })?;
+                if !metadata.file_type().is_dir() {
+                    return Err(GraphError::Guard(format!(
+                        "Git worktree metadata is not a directory: {}",
+                        entry.path().display()
+                    )));
+                }
+                if valid_git_dir(&entry.path())? {
+                    git_dirs.insert(entry.path());
+                }
+            }
+        }
+        Ok(_) => {
+            return Err(GraphError::Guard(format!(
+                "Git worktrees path is not a directory: {}",
+                worktrees.display()
+            )))
+        }
+    }
+    Ok(git_dirs
+        .into_iter()
+        .map(|git_dir| git_dir.join("habitat-graph").join("state"))
+        .collect())
 }
 
 #[cfg(any(test, not(unix)))]
@@ -1870,6 +2341,7 @@ fn is_primary_family_member_suffix(suffix: &str) -> bool {
     suffix.is_empty()
         || suffix == ADD_JOURNAL_SUFFIX
         || suffix == UPDATE_JOURNAL_SUFFIX
+        || suffix == FULL_BUILD_JOURNAL_SUFFIX
         || suffix
             .strip_prefix(SNAPSHOT_SEPARATOR)
             .is_some_and(is_generation)
@@ -1895,6 +2367,9 @@ fn family_base_path(path: &Path) -> PathBuf {
         return path.with_file_name(base);
     }
     if let Some(base) = without_legacy_conflict.strip_suffix(UPDATE_JOURNAL_SUFFIX) {
+        return path.with_file_name(base);
+    }
+    if let Some(base) = without_legacy_conflict.strip_suffix(FULL_BUILD_JOURNAL_SUFFIX) {
         return path.with_file_name(base);
     }
     if let Some((base, suffix)) = without_legacy_conflict.rsplit_once(SNAPSHOT_SEPARATOR) {
@@ -2866,6 +3341,20 @@ mod tests {
         );
     }
 
+    #[test]
+    fn absent_output_aliases_share_the_identity_lock() {
+        let root = TempDir::new().unwrap();
+        let lower = root.path().join("graph.json");
+        let upper = root.path().join("GRAPH.JSON");
+
+        let first = super::acquire_output_identity_lock(&lower).unwrap();
+        let error = super::acquire_output_identity_lock(&upper).unwrap_err();
+
+        assert_eq!(error.kind(), "guard");
+        drop(first);
+        super::acquire_output_identity_lock(&upper).unwrap();
+    }
+
     #[cfg(unix)]
     #[test]
     fn resolved_output_file_pins_symlinked_parent() {
@@ -2924,14 +3413,96 @@ mod tests {
         let public = super::generation(b"public");
         let semantic = super::semantic_generation(&Graph::new()).unwrap();
         let bytes = super::serialize(&Graph::new(), &public, &semantic).unwrap();
-        let error = super::commit_full_build_state_with(&state, || {
-            super::write_full_build_state(state.path(), &bytes)?;
-            write_ref(&git_dir, "refs/heads/main", &"2".repeat(40));
-            Ok(())
-        })
+        let error = super::commit_full_build_state_with(
+            &state,
+            &bytes,
+            || {
+                super::write_full_build_state(state.path(), &bytes)?;
+                write_ref(&git_dir, "refs/heads/main", &"2".repeat(40));
+                Ok(())
+            },
+            || panic!("publication must not run after context rotation"),
+        )
         .unwrap_err();
         assert_eq!(error.kind(), "guard");
         assert!(error.to_string().contains("Git context changed"));
+        assert!(super::full_build_journal_path(state.path())
+            .unwrap()
+            .exists());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn full_build_context_rotation_during_publication_retains_journal() {
+        let root = TempDir::new().unwrap();
+        let git_dir = create_git(root.path(), "ref: refs/heads/main\n");
+        write_ref(&git_dir, "refs/heads/main", &"1".repeat(40));
+        let output_dir = root.path().join("public");
+        fs::create_dir_all(&output_dir).unwrap();
+        let output = output_dir.join("graph.json");
+        let legacy = output_dir.join(".habitat-graph-state.json");
+        let state = super::prepare_full_build_state(&output, &legacy).unwrap();
+        let public = super::generation(b"public");
+        let semantic = super::semantic_generation(&Graph::new()).unwrap();
+        let bytes = super::serialize(&Graph::new(), &public, &semantic).unwrap();
+
+        let error = super::commit_full_build_state_with(
+            &state,
+            &bytes,
+            || super::write_full_build_state(state.path(), &bytes),
+            || {
+                fs::write(&output, "published").unwrap();
+                write_ref(&git_dir, "refs/heads/main", &"2".repeat(40));
+                Ok(())
+            },
+        )
+        .unwrap_err();
+
+        assert_eq!(error.kind(), "guard");
+        assert!(super::full_build_journal_path(state.path())
+            .unwrap()
+            .exists());
+        assert!(super::ensure_no_pending_full_build_journal(state.path()).is_err());
+
+        let original_context_journal =
+            super::transaction_path(state.path(), super::FULL_BUILD_JOURNAL_SUFFIX).unwrap();
+        let next_state = super::prepare_full_build_state(&output, &legacy).unwrap();
+        super::commit_full_build_state(&next_state, &bytes).unwrap();
+
+        assert!(original_context_journal.exists());
+        assert!(super::ensure_no_pending_full_build_journal(state.path()).is_err());
+        assert!(super::ensure_no_pending_full_build_journal(next_state.path()).is_ok());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn context_rotation_after_journal_removal_restores_the_journal() {
+        let root = TempDir::new().unwrap();
+        let git_dir = create_git(root.path(), "ref: refs/heads/main\n");
+        write_ref(&git_dir, "refs/heads/main", &"1".repeat(40));
+        let output_dir = root.path().join("public");
+        fs::create_dir_all(&output_dir).unwrap();
+        let output = output_dir.join("graph.json");
+        let legacy = output_dir.join(".habitat-graph-state.json");
+        let state = super::path_for_output(&output, &legacy).unwrap();
+        let journal = super::transaction_path(&state, super::ADD_JOURNAL_SUFFIX).unwrap();
+        super::write(&journal, b"pending transaction").unwrap();
+
+        let error = super::finalize_context_journal_with(
+            &output,
+            &state,
+            &journal,
+            "test transaction",
+            || {
+                super::remove(&journal, "test transaction")?;
+                write_ref(&git_dir, "refs/heads/main", &"2".repeat(40));
+                Ok(())
+            },
+        )
+        .unwrap_err();
+
+        assert_eq!(error.kind(), "guard");
+        assert_eq!(fs::read_to_string(journal).unwrap(), "pending transaction");
     }
 
     #[cfg(unix)]
@@ -3507,6 +4078,45 @@ mod tests {
     }
 
     #[test]
+    fn legacy_revision_marker_is_upgraded_during_ancestry_check() {
+        let root = TempDir::new().unwrap();
+        init_real_git(root.path());
+        commit_real_git(root.path(), "ancestor");
+        let ancestor_commit = git(root.path(), &["rev-parse", "HEAD"]);
+        let output_dir = root.path().join("public");
+        fs::create_dir_all(&output_dir).unwrap();
+        let output = output_dir.join("graph.json");
+        let legacy = output_dir.join(".habitat-graph-state.json");
+        let public_generation = super::generation(b"shared public bytes");
+        let semantic = super::semantic_generation(&Graph::new()).unwrap();
+        let mut private = Graph::new();
+        private.manifest.tool_version = "legacy-marker-lineage".to_owned();
+        let ancestor_path = super::path_for_output(&output, &legacy).unwrap();
+        super::write_state(
+            &ancestor_path,
+            &super::serialize(&private, &public_generation, &semantic).unwrap(),
+        )
+        .unwrap();
+        let revision = super::context_revision(&ancestor_path).unwrap().unwrap();
+        let marker = super::context_revision_path(&ancestor_path, &revision.key).unwrap();
+        fs::write(&marker, "").unwrap();
+
+        commit_real_git(root.path(), "descendant");
+        let current = super::path_for_output(&output, &legacy).unwrap();
+        let inherited = super::load_matching(
+            &current,
+            Some(&public_generation),
+            Some(&semantic),
+            "test private state",
+        )
+        .unwrap()
+        .unwrap();
+
+        assert_eq!(inherited.graph, private);
+        assert_eq!(fs::read_to_string(marker).unwrap(), ancestor_commit);
+    }
+
+    #[test]
     fn unrelated_history_cannot_inherit_matching_private_state() {
         let root = TempDir::new().unwrap();
         init_real_git(root.path());
@@ -3550,20 +4160,28 @@ mod tests {
         let generation = super::generation(b"legacy snapshot");
         let legacy_snapshot = sibling(&legacy, &format!("{SNAPSHOT_SEPARATOR}{generation}"));
         let legacy_journal = sibling(&legacy, ADD_JOURNAL_SUFFIX);
+        let legacy_full_build = super::full_build_journal_path(&legacy).unwrap();
         fs::write(&legacy, "legacy state").unwrap();
         fs::write(&legacy_snapshot, "legacy snapshot").unwrap();
         fs::write(&legacy_journal, "legacy journal").unwrap();
+        fs::write(&legacy_full_build, "legacy full-build journal").unwrap();
 
         let state = super::path_for_output(&output_dir.join("graph.json"), &legacy).unwrap();
         let snapshot = sibling(&state, &format!("{SNAPSHOT_SEPARATOR}{generation}"));
         let journal = sibling(&state, ADD_JOURNAL_SUFFIX);
+        let full_build = super::full_build_journal_path(&state).unwrap();
 
         assert_eq!(fs::read_to_string(state).unwrap(), "legacy state");
         assert_eq!(fs::read_to_string(snapshot).unwrap(), "legacy snapshot");
         assert_eq!(fs::read_to_string(journal).unwrap(), "legacy journal");
+        assert_eq!(
+            fs::read_to_string(full_build).unwrap(),
+            "legacy full-build journal"
+        );
         assert!(!legacy.exists());
         assert!(!legacy_snapshot.exists());
         assert!(!legacy_journal.exists());
+        assert!(!legacy_full_build.exists());
     }
 
     #[test]
@@ -3690,6 +4308,7 @@ mod tests {
             sibling(&state, &snapshot_suffix),
             sibling(&state, ADD_JOURNAL_SUFFIX),
             sibling(&state, super::UPDATE_JOURNAL_SUFFIX),
+            sibling(&state, super::FULL_BUILD_JOURNAL_SUFFIX),
             sibling(
                 &state,
                 &format!("{}{generation}", super::MIGRATION_CONFLICT_SEPARATOR),
@@ -3713,6 +4332,10 @@ mod tests {
             sibling(&state, &format!("{SNAPSHOT_SEPARATOR}{generation}.backup")),
             sibling(&state, &format!("{ADD_JOURNAL_SUFFIX}.backup")),
             sibling(&state, &format!("{}.backup", super::UPDATE_JOURNAL_SUFFIX)),
+            sibling(
+                &state,
+                &format!("{}.backup", super::FULL_BUILD_JOURNAL_SUFFIX),
+            ),
             sibling(
                 &state,
                 &format!("{}{generation}.backup", super::MIGRATION_CONFLICT_SEPARATOR),
@@ -3787,8 +4410,14 @@ mod tests {
         let context = super::generation(b"context");
         let unscoped = state_dir.join(format!("{key}.json"));
         let scoped = state_dir.join(format!("{key}{}{context}.json", super::CONTEXT_SEPARATOR));
+        let scoped_journal = sibling(&scoped, super::UPDATE_JOURNAL_SUFFIX);
+        let scoped_full_build = sibling(&scoped, super::FULL_BUILD_JOURNAL_SUFFIX);
         let unrelated = state_dir.join(format!("{}.json", super::generation(b"other output")));
         let lookalike = sibling(&unrelated, &format!("{ADD_JOURNAL_SUFFIX}.backup"));
+        let invalid_temporary = sibling(
+            &unrelated,
+            &format!("{}1.2", super::super::atomic_file::PRIVATE_TEMP_SEPARATOR),
+        );
         let conflict_dir = state_dir.join(super::MIGRATION_CONFLICT_DIRECTORY);
         fs::create_dir_all(&conflict_dir).unwrap();
         let conflict = conflict_dir.join(format!(
@@ -3797,17 +4426,25 @@ mod tests {
             super::generation(b"member"),
             super::generation(b"contents")
         ));
+        let private_temporary_suffix =
+            format!("{}1.2.3", super::super::atomic_file::PRIVATE_TEMP_SEPARATOR);
         let owned = [
             legacy.clone(),
             sibling(&legacy, ADD_JOURNAL_SUFFIX),
+            sibling(&legacy, &private_temporary_suffix),
             unscoped.clone(),
             sibling(&unscoped, &format!("{SNAPSHOT_SEPARATOR}{generation}")),
             scoped.clone(),
-            sibling(&scoped, super::UPDATE_JOURNAL_SUFFIX),
+            scoped_journal.clone(),
+            sibling(&scoped_journal, &private_temporary_suffix),
+            scoped_full_build.clone(),
+            sibling(&scoped_full_build, &private_temporary_suffix),
+            state_dir.join(format!("{key}{}", super::FULL_BUILD_JOURNAL_SUFFIX)),
             unrelated,
-            conflict,
+            conflict.clone(),
+            sibling(&conflict, &private_temporary_suffix),
         ];
-        for path in owned.iter().chain(std::iter::once(&lookalike)) {
+        for path in owned.iter().chain([&lookalike, &invalid_temporary]) {
             fs::write(path, "raw state").unwrap();
         }
 
@@ -3815,6 +4452,36 @@ mod tests {
 
         assert!(owned.iter().all(|path| !path.exists()));
         assert!(lookalike.exists());
+        assert!(invalid_temporary.exists());
+    }
+
+    #[test]
+    fn unsupported_cleanup_removes_linked_worktree_state() {
+        let root = TempDir::new().unwrap();
+        let git_dir = create_git(root.path(), "ref: refs/heads/main\n");
+        let linked_git_dir = git_dir.join("worktrees/linked");
+        fs::create_dir_all(&linked_git_dir).unwrap();
+        fs::write(linked_git_dir.join("HEAD"), "ref: refs/heads/linked\n").unwrap();
+        fs::write(linked_git_dir.join("commondir"), "../..\n").unwrap();
+        let output_dir = root.path().join("public");
+        fs::create_dir_all(&output_dir).unwrap();
+        let output = output_dir.join("graph.json");
+        let legacy = output_dir.join(".habitat-graph-state.json");
+        let main_state = git_dir
+            .join("habitat-graph/state")
+            .join(format!("{}.json", super::generation(b"main state")));
+        let linked_state = linked_git_dir
+            .join("habitat-graph/state")
+            .join(format!("{}.json", super::generation(b"linked state")));
+        fs::create_dir_all(main_state.parent().unwrap()).unwrap();
+        fs::create_dir_all(linked_state.parent().unwrap()).unwrap();
+        fs::write(&main_state, "main raw state").unwrap();
+        fs::write(&linked_state, "linked raw state").unwrap();
+
+        super::remove_unsupported_state_families(&output, &legacy).unwrap();
+
+        assert!(!main_state.exists());
+        assert!(!linked_state.exists());
     }
 
     #[test]
@@ -3937,11 +4604,69 @@ mod tests {
         .unwrap();
 
         let index = super::load_expiration_index(&path).unwrap();
-        assert!(index.compacted);
         assert!(index.contexts.contains(&expired_context));
         assert!(index.revisions.contains(&expired_revision));
         assert!(!context_marker.exists());
         assert!(!revision_marker.exists());
+    }
+
+    #[test]
+    fn compacted_legacy_index_retries_stale_marker_cleanup() {
+        let root = TempDir::new().unwrap();
+        let output = super::generation(b"output path");
+        let current = super::generation(b"current context");
+        let expired_context = super::generation(b"expired context");
+        let path = root.path().join(format!(
+            "{output}{}{current}.json",
+            super::CONTEXT_SEPARATOR
+        ));
+        let marker = root.path().join(format!(
+            "{output}{}{expired_context}",
+            super::EXPIRED_CONTEXT_SEPARATOR
+        ));
+        let index_path = super::expiration_index_path(&path).unwrap();
+        fs::write(
+            &index_path,
+            serde_json::to_vec_pretty(&serde_json::json!({
+                "schema": super::LEGACY_EXPIRATION_INDEX_SCHEMA,
+                "compacted": true,
+                "contexts": [],
+                "revisions": [],
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+        fs::write(&marker, "").unwrap();
+
+        super::update_expiration_index(&path, |_| {}).unwrap();
+
+        assert!(!marker.exists());
+        assert!(super::load_expiration_index(&path)
+            .unwrap()
+            .contexts
+            .contains(&expired_context));
+    }
+
+    #[test]
+    fn expiration_filter_remains_bounded_without_forgetting_denials() {
+        let mut expired = super::ExpirationSet::default();
+        let values: Vec<_> = (0..(super::MAX_EXPIRATION_PREFIXES * 4))
+            .map(|index| super::generation(format!("expired-{index}").as_bytes()))
+            .collect();
+        for value in &values {
+            expired.expire(value.clone());
+        }
+
+        assert!(expired.prefixes.len() <= super::MAX_EXPIRATION_PREFIXES);
+        assert!(values.iter().all(|value| expired.contains(value)));
+
+        let admitted = values.last().unwrap();
+        expired.admit(admitted);
+        assert!(!expired.contains(admitted));
+        assert!(expired.admitted.len() <= super::MAX_EXPIRATION_ADMISSIONS);
+        assert!(values[..values.len() - 1]
+            .iter()
+            .all(|value| expired.contains(value)));
     }
 
     #[test]

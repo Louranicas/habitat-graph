@@ -1287,22 +1287,41 @@ pub(super) fn write_public_artifacts(out: &Path, graph: &Graph, opts: ExtractOpt
     Ok(())
 }
 
-#[cfg(unix)]
+#[cfg(all(test, unix))]
 pub(super) fn write_full_build_private_state(
     state: &super::private_state::FullBuildState,
     graph: &Graph,
     manifest: &Manifest,
 ) -> Result<()> {
+    let state_json = full_build_private_state_json(graph, manifest)?;
+    super::private_state::commit_full_build_state(state, &state_json)
+}
+
+#[cfg(unix)]
+pub(super) fn write_full_build_artifacts(
+    state: &super::private_state::FullBuildState,
+    graph: &Graph,
+    manifest: &Manifest,
+    out: &Path,
+    opts: ExtractOpts,
+) -> Result<()> {
+    let state_json = full_build_private_state_json(graph, manifest)?;
+    super::private_state::commit_full_build_state_and_publish(state, &state_json, || {
+        write_public_artifacts(out, graph, opts)
+    })
+}
+
+#[cfg(unix)]
+fn full_build_private_state_json(graph: &Graph, manifest: &Manifest) -> Result<Vec<u8>> {
     let mut private_graph = graph.clone();
     private_graph.manifest = manifest.clone();
     let public_json = habitat_graph_export::to_node_link(graph)?;
     let public_graph = habitat_graph_serve::from_node_link(&public_json)?;
-    let state_json = super::private_state::serialize(
+    super::private_state::serialize(
         &private_graph,
         &super::private_state::generation(public_json.as_bytes()),
         &super::private_state::semantic_generation(&public_graph)?,
-    )?;
-    super::private_state::commit_full_build_state(state, &state_json)
+    )
 }
 
 const FULL_BUILD_BATCH_SIZE: usize = 64;
@@ -1354,6 +1373,8 @@ fn run_inner(
     std::fs::create_dir_all(out).map_err(|error| GraphError::Io(error.to_string()))?;
     let out = super::private_state::resolve_output_directory(out)?;
     let legacy_state = out.join(".habitat-graph-state.json");
+    let _identity_lock =
+        super::private_state::acquire_output_identity_lock(&out.join("graph.json"))?;
     #[cfg(unix)]
     let full_build_state =
         super::private_state::prepare_full_build_state(&out.join("graph.json"), &legacy_state)?;
@@ -1376,7 +1397,8 @@ fn run_inner(
     let graph = full_build.0;
 
     #[cfg(unix)]
-    write_full_build_private_state(&full_build_state, &graph, &full_build.1)?;
+    write_full_build_artifacts(&full_build_state, &graph, &full_build.1, &out, opts)?;
+    #[cfg(not(unix))]
     write_public_artifacts(&out, &graph, opts)?;
 
     // Optionally emit an Obsidian vault — one note per node (`[[wikilinks]]` + frontmatter/tags)
