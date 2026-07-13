@@ -9,7 +9,7 @@ use std::collections::{BTreeMap, HashSet};
 use std::fmt::Write as _;
 use std::path::{Component, Path, PathBuf};
 
-use habitat_graph_core::{Graph, GraphError, InputRecord, Manifest, Result};
+use habitat_graph_core::{sanitize_label, Graph, GraphError, InputRecord, Manifest, Result};
 
 /// Ownership manifest for generated Obsidian notes. Only files recorded here (or recognized by
 /// the conservative legacy signature during first migration) may be removed on a later sync.
@@ -288,6 +288,44 @@ fn generated_vault_moc_link(
     }
 }
 
+fn legacy_vault_filename_stem(label: &str) -> String {
+    let stem: String = sanitize_label(label)
+        .chars()
+        .map(|character| {
+            if character == '/' || character.is_whitespace() {
+                '_'
+            } else {
+                character
+            }
+        })
+        .collect();
+    if stem.is_empty() {
+        "_".to_owned()
+    } else {
+        stem
+    }
+}
+
+fn legacy_vault_filenames_match(notes: &[(String, GeneratedVaultNode)]) -> bool {
+    let stems: Vec<_> = notes
+        .iter()
+        .map(|(_, note)| legacy_vault_filename_stem(&note.label))
+        .collect();
+    let mut counts = BTreeMap::new();
+    for stem in &stems {
+        *counts.entry(stem.as_str()).or_insert(0_usize) += 1;
+    }
+    let mut expected_names = HashSet::with_capacity(notes.len());
+    notes.iter().zip(&stems).all(|((filename, note), stem)| {
+        let expected = if counts.get(stem.as_str()).copied().unwrap_or(0) > 1 {
+            format!("{stem}_n{}.md", note.id)
+        } else {
+            format!("{stem}.md")
+        };
+        filename == &expected && expected_names.insert(expected)
+    })
+}
+
 fn generated_vault_moc_section_matches(
     links: &[&str],
     community: Option<u32>,
@@ -316,7 +354,9 @@ fn is_generated_vault_moc(content: &str, notes: &[(String, GeneratedVaultNode)])
         return false;
     };
     let mut seen_ids = HashSet::with_capacity(notes.len());
-    if notes.iter().any(|(_, note)| !seen_ids.insert(note.id)) {
+    if notes.iter().any(|(_, note)| !seen_ids.insert(note.id))
+        || !legacy_vault_filenames_match(notes)
+    {
         return false;
     }
     if sections.is_empty() {
@@ -564,7 +604,10 @@ fn generated_vault_ownership(vault_dir: &Path) -> Result<HashSet<String>> {
         {
             continue;
         }
-        let filename = entry.file_name().to_string_lossy().into_owned();
+        let filename = entry.file_name();
+        let Some(filename) = filename.to_str().map(str::to_owned) else {
+            return Ok(HashSet::new());
+        };
         if !safe_vault_filename(&filename) {
             continue;
         }
@@ -1731,6 +1774,77 @@ mod tests {
         ] {
             assert!(super::parse_generated_vault_node_note(&invalid).is_none());
         }
+    }
+
+    #[test]
+    fn legacy_vault_ownership_requires_allocator_generated_filenames() {
+        let vault = TempDir::new().unwrap();
+        fs::write(
+            vault.path().join("renamed.md"),
+            legacy_vault_note(1, None, "generated"),
+        )
+        .unwrap();
+        fs::write(
+            vault.path().join("_MOC.md"),
+            "# Map of Content\n\n## Unclustered\n\n- [[generated]]\n",
+        )
+        .unwrap();
+
+        assert!(super::generated_vault_ownership(vault.path())
+            .unwrap()
+            .is_empty());
+    }
+
+    #[test]
+    fn legacy_vault_ownership_accepts_collision_allocated_filenames() {
+        let vault = TempDir::new().unwrap();
+        fs::write(
+            vault.path().join("a_b_n1.md"),
+            legacy_vault_note(1, None, "a b"),
+        )
+        .unwrap();
+        fs::write(
+            vault.path().join("a_b_n2.md"),
+            legacy_vault_note(2, None, "a/b"),
+        )
+        .unwrap();
+        fs::write(
+            vault.path().join("_MOC.md"),
+            "# Map of Content\n\n## Unclustered\n\n- [[a b]]\n- [[a/b]]\n",
+        )
+        .unwrap();
+
+        assert_eq!(
+            super::generated_vault_ownership(vault.path()).unwrap(),
+            std::collections::HashSet::from([
+                "a_b_n1.md".to_owned(),
+                "a_b_n2.md".to_owned(),
+                "_MOC.md".to_owned(),
+            ])
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn legacy_vault_ownership_rejects_non_utf8_filenames() {
+        use std::os::unix::ffi::OsStringExt as _;
+
+        let vault = TempDir::new().unwrap();
+        let filename = std::ffi::OsString::from_vec(b"generated\xff.md".to_vec());
+        fs::write(
+            vault.path().join(filename),
+            legacy_vault_note(1, None, "generated"),
+        )
+        .unwrap();
+        fs::write(
+            vault.path().join("_MOC.md"),
+            "# Map of Content\n\n## Unclustered\n\n- [[generated]]\n",
+        )
+        .unwrap();
+
+        assert!(super::generated_vault_ownership(vault.path())
+            .unwrap()
+            .is_empty());
     }
 
     #[test]

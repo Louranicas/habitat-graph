@@ -770,12 +770,14 @@ fn validate_add_journal_origin(
     if target_status.any && !target_status.matched {
         return Err(reject_foreign_add_journal());
     }
-    let status = super::private_state::private_checksum_status(
-        journal_state_path,
-        &[before_checksum, &after_checksum],
-    )?;
-    if (migrated_unscoped || status.any) && !status.matched {
-        return Err(reject_foreign_add_journal());
+    if migrated_unscoped || !same_context {
+        let status = super::private_state::private_checksum_status(
+            journal_state_path,
+            &[before_checksum, &after_checksum],
+        )?;
+        if (migrated_unscoped || status.any) && !status.matched {
+            return Err(reject_foreign_add_journal());
+        }
     }
     Ok(())
 }
@@ -1751,6 +1753,51 @@ mod tests {
         assert!(private.contains("api_key_pending"));
         assert!(private.contains("after_retry"));
         assert!(!legacy_state.exists());
+    }
+
+    #[test]
+    fn same_context_first_add_recovery_ignores_unrelated_family_state() {
+        let d = tdir();
+        init_git(&d);
+        commit_git(&d, "first");
+        let out = d.join("public/graph.json");
+        fs::create_dir_all(out.parent().unwrap()).unwrap();
+        let state_path = super::private_state_path(&out).unwrap();
+        let filename = state_path.file_name().unwrap().to_str().unwrap();
+        let (output_key, _) = filename.split_once(".context-").unwrap();
+        let other_context = super::super::private_state::generation(b"other context");
+        let other_state_path =
+            state_path.with_file_name(format!("{output_key}.context-{other_context}.json"));
+        let other = extract_from_bytes(b"fn unrelated() {}", "rs").unwrap();
+        let other_public = habitat_graph_export::to_node_link(&other).unwrap();
+        let other_public_graph = habitat_graph_serve::from_node_link(&other_public).unwrap();
+        let other_state = super::super::private_state::serialize(
+            &other,
+            &super::content_generation(&other_public),
+            &super::super::private_state::semantic_generation(&other_public_graph).unwrap(),
+        )
+        .unwrap();
+        super::super::private_state::write_state(&other_state_path, &other_state).unwrap();
+
+        let pending = extract_from_bytes(b"fn pending() {}", "rs").unwrap();
+        let pending_public = habitat_graph_export::to_node_link(&pending).unwrap();
+        super::write_add_journal(
+            &out,
+            &state_path,
+            None,
+            &super::private_graph_generation(&Graph::new()).unwrap(),
+            &pending,
+            &pending_public,
+        )
+        .unwrap();
+
+        let mut public = super::load_public_output(&out).unwrap();
+        assert!(super::recover_add_journal(&out, &state_path, &mut public).unwrap());
+        assert_eq!(fs::read_to_string(&out).unwrap(), pending_public);
+        assert!(fs::read_to_string(&state_path).unwrap().contains("pending"));
+        assert!(fs::read_to_string(other_state_path)
+            .unwrap()
+            .contains("unrelated"));
     }
 
     #[test]

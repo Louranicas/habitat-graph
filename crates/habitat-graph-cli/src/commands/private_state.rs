@@ -15,6 +15,9 @@ use std::ffi::{OsStr, OsString};
 use std::io::{BufRead as _, Read as _};
 use std::path::{Path, PathBuf};
 
+#[cfg(unix)]
+use std::io::{Seek as _, Write as _};
+
 use habitat_graph_core::{Graph, GraphError, Result};
 
 #[cfg(unix)]
@@ -30,7 +33,11 @@ const EXPIRED_CONTEXT_SEPARATOR: &str = ".expired-context-";
 const EXPIRED_REVISION_SEPARATOR: &str = ".expired-revision-";
 const EXPIRATION_INDEX_SUFFIX: &str = ".expirations";
 const LEGACY_EXPIRATION_INDEX_SCHEMA: &str = "habitat-graph.expirations.v1";
-const EXPIRATION_INDEX_SCHEMA: &str = "habitat-graph.expirations.v2";
+const PREFIX_EXPIRATION_INDEX_SCHEMA: &str = "habitat-graph.expirations.v2";
+const EXPIRATION_INDEX_SCHEMA: &str = "habitat-graph.expirations.v3";
+const EXPIRATION_LOG_HEADER: &str = "habitat-graph.expirations.v3\n";
+const EXPIRATION_RECORD_BYTES: usize = 67;
+const EXPIRATION_FRAME_HEADER_BYTES: usize = 75;
 const MIGRATION_CONFLICT_SEPARATOR: &str = ".migration-conflict-";
 const MIGRATION_CONFLICT_DIRECTORY: &str = ".migration-conflicts";
 const ADD_JOURNAL_SUFFIX: &str = ".add-journal";
@@ -41,8 +48,7 @@ const OUTPUT_LOCK_SUFFIX: &str = ".output-lock";
 const OUTPUT_IDENTITY_LOCK: &str = ".habitat-graph.output-identity-lock";
 const MAX_SNAPSHOTS: usize = 16;
 const MAX_CONTEXTS_PER_OUTPUT: usize = 16;
-const MAX_EXPIRATION_PREFIXES: usize = 128;
-const MAX_EXPIRATION_ADMISSIONS: usize = MAX_CONTEXTS_PER_OUTPUT * 2;
+const MAX_EXPIRATION_LOG_OVERHEAD: usize = 256;
 const MAX_LEGACY_REVISION_SCAN: usize = 4096;
 const MAX_GIT_CONTROL_LINE_BYTES: u64 = 4096;
 
@@ -132,8 +138,9 @@ fn path_for_output_with_expiration(
     let context = git_context_identity(&git_dir)?;
     let state_path = state_dir.join(format!("{key}{CONTEXT_SEPARATOR}{}.json", context.key));
     if !allow_expired {
-        ensure_context_not_expired(&state_path)?;
-        ensure_revision_not_expired(&state_path, &context.revision)?;
+        let expirations = load_expiration_index(&state_path)?;
+        ensure_context_not_expired_in(&state_path, &expirations)?;
+        ensure_revision_not_expired_in(&state_path, &context.revision, &expirations)?;
     }
     write_context_revision(&state_path, &context.revision, context.commit.as_deref())?;
     let mut first_error = None;
@@ -774,7 +781,8 @@ pub(super) fn load_matching(
     public_semantic_generation: Option<&str>,
     context: &str,
 ) -> Result<Option<StoredGraph>> {
-    ensure_context_not_expired(path)?;
+    let expirations = load_expiration_index(path)?;
+    ensure_context_not_expired_in(path, &expirations)?;
     let current = read(path, context)?;
     let candidates = state_context_candidates(path)?;
 
@@ -801,7 +809,7 @@ pub(super) fn load_matching(
         let ancestry = context_ancestry(path, &candidates)?;
         let mut inherited = None;
         for candidate in &candidates {
-            if candidate == path || context_is_expired(candidate)? {
+            if candidate == path || context_is_expired_in(candidate, &expirations)? {
                 continue;
             }
             if let Some(stored) = read(candidate, context)? {
@@ -827,7 +835,7 @@ pub(super) fn load_matching(
     let ancestry = context_ancestry(path, &candidates)?;
     let mut selected = None;
     for candidate in candidates {
-        if candidate != path && context_is_expired(&candidate)? {
+        if candidate != path && context_is_expired_in(&candidate, &expirations)? {
             continue;
         }
         if candidate == path {
@@ -1458,8 +1466,18 @@ fn expired_revision_path(path: &Path, revision: &str) -> Option<PathBuf> {
     Some(path.with_file_name(format!("{key}{EXPIRED_REVISION_SEPARATOR}{revision}")))
 }
 
+#[cfg(test)]
 fn ensure_revision_not_expired(path: &Path, revision: &str) -> Result<()> {
-    if load_expiration_index(path)?.revisions.contains(revision) {
+    let expirations = load_expiration_index(path)?;
+    ensure_revision_not_expired_in(path, revision, &expirations)
+}
+
+fn ensure_revision_not_expired_in(
+    path: &Path,
+    revision: &str,
+    expirations: &ExpirationIndex,
+) -> Result<()> {
+    if expirations.revisions.contains(revision) {
         return Err(GraphError::Guard(format!(
             "private state for this Git revision has expired: {}",
             path.display()
@@ -1485,8 +1503,8 @@ fn remove_expiration_markers(path: &Path, revision: &str) -> Result<()> {
         ))
     })?;
     update_expiration_index(path, |index| {
-        index.contexts.admit(&context);
-        index.revisions.admit(revision);
+        index.contexts.remove(&context);
+        index.revisions.remove(revision);
     })
 }
 
@@ -1504,7 +1522,12 @@ fn remove_context_revision(path: &Path) -> Result<()> {
 }
 
 fn ensure_context_not_expired(path: &Path) -> Result<()> {
-    if !context_is_expired(path)? {
+    let expirations = load_expiration_index(path)?;
+    ensure_context_not_expired_in(path, &expirations)
+}
+
+fn ensure_context_not_expired_in(path: &Path, expirations: &ExpirationIndex) -> Result<()> {
+    if !context_is_expired_in(path, expirations)? {
         return Ok(());
     }
     Err(GraphError::Guard(format!(
@@ -1513,11 +1536,17 @@ fn ensure_context_not_expired(path: &Path) -> Result<()> {
     )))
 }
 
+#[cfg(test)]
 fn context_is_expired(path: &Path) -> Result<bool> {
+    let expirations = load_expiration_index(path)?;
+    context_is_expired_in(path, &expirations)
+}
+
+fn context_is_expired_in(path: &Path, expirations: &ExpirationIndex) -> Result<bool> {
     let Some(context) = state_context_key(path) else {
         return Ok(false);
     };
-    if load_expiration_index(path)?.contexts.contains(&context) {
+    if expirations.contexts.contains(&context) {
         return Ok(true);
     }
     let Some(expired) = expired_context_path(path) else {
@@ -1526,99 +1555,25 @@ fn context_is_expired(path: &Path) -> Result<bool> {
     marker_exists(&expired, "expired private state context marker")
 }
 
-#[derive(Default)]
-struct ExpirationSet {
-    prefixes: BTreeSet<String>,
-    admitted: BTreeSet<String>,
-}
-
-impl ExpirationSet {
-    fn contains(&self, value: &str) -> bool {
-        self.prefixes.iter().any(|prefix| value.starts_with(prefix))
-            && !self.admitted.contains(value)
-    }
-
-    fn expire(&mut self, value: String) {
-        self.admitted.remove(&value);
-        self.insert_prefix(value);
-    }
-
-    fn admit(&mut self, value: &str) {
-        self.prefixes.remove(value);
-        if self.prefixes.iter().any(|prefix| value.starts_with(prefix)) {
-            self.admitted.insert(value.to_owned());
-            while self.admitted.len() > MAX_EXPIRATION_ADMISSIONS {
-                let removable = self
-                    .admitted
-                    .iter()
-                    .find(|candidate| candidate.as_str() != value)
-                    .cloned();
-                let Some(removable) = removable else {
-                    break;
-                };
-                self.admitted.remove(&removable);
-            }
-        } else {
-            self.admitted.remove(value);
-        }
-    }
-
-    fn merge(&mut self, other: Self) {
-        for prefix in other.prefixes {
-            self.admitted.retain(|value| !value.starts_with(&prefix));
-            self.insert_prefix(prefix);
-        }
-    }
-
-    fn insert_prefix(&mut self, prefix: String) {
-        if self
-            .prefixes
-            .iter()
-            .any(|existing| prefix.starts_with(existing))
-        {
-            return;
-        }
-        self.prefixes
-            .retain(|existing| !existing.starts_with(&prefix));
-        self.admitted.retain(|value| !value.starts_with(&prefix));
-        self.prefixes.insert(prefix);
-        self.compact();
-    }
-
-    fn compact(&mut self) {
-        while self.prefixes.len() > MAX_EXPIRATION_PREFIXES {
-            let prefixes: Vec<_> = self.prefixes.iter().cloned().collect();
-            let mut selected = (0, 1, 0);
-            for left in 0..prefixes.len() {
-                for right in (left + 1)..prefixes.len() {
-                    let length = prefixes[left]
-                        .bytes()
-                        .zip(prefixes[right].bytes())
-                        .take_while(|(left, right)| left == right)
-                        .count();
-                    if length > selected.2 {
-                        selected = (left, right, length);
-                    }
-                }
-            }
-            let parent = prefixes[selected.0][..selected.2].to_owned();
-            self.prefixes.remove(&prefixes[selected.0]);
-            self.prefixes.remove(&prefixes[selected.1]);
-            self.prefixes
-                .retain(|existing| !existing.starts_with(&parent));
-            self.prefixes.insert(parent);
-        }
-    }
-
-    fn is_empty(&self) -> bool {
-        self.prefixes.is_empty() && self.admitted.is_empty()
-    }
-}
-
-#[derive(Default)]
+#[derive(Clone, Default, Eq, PartialEq)]
 struct ExpirationIndex {
-    contexts: ExpirationSet,
-    revisions: ExpirationSet,
+    contexts: BTreeSet<String>,
+    revisions: BTreeSet<String>,
+}
+
+enum ExpirationStorage {
+    Missing,
+    Legacy,
+    Log {
+        records: usize,
+        complete_bytes: usize,
+        partial_tail: bool,
+    },
+}
+
+struct LoadedExpirationIndex {
+    index: ExpirationIndex,
+    storage: ExpirationStorage,
 }
 
 fn expiration_values(value: &serde_json::Value, field: &str) -> Result<BTreeSet<String>> {
@@ -1666,46 +1621,126 @@ fn expiration_prefixes(value: &serde_json::Value, field: &str) -> Result<BTreeSe
     Ok(prefixes)
 }
 
-fn load_expiration_index(path: &Path) -> Result<ExpirationIndex> {
-    let Some(index_path) = expiration_index_path(path) else {
-        return Ok(ExpirationIndex::default());
+fn apply_expiration_record(index: &mut ExpirationIndex, record: &[u8]) -> Result<()> {
+    if record.len() != EXPIRATION_RECORD_BYTES || record[EXPIRATION_RECORD_BYTES - 1] != b'\n' {
+        return Err(GraphError::Schema(
+            "private state expiration log record is invalid".to_owned(),
+        ));
+    }
+    let value = std::str::from_utf8(&record[2..66])
+        .ok()
+        .filter(|value| is_generation(value))
+        .ok_or_else(|| {
+            GraphError::Schema("private state expiration log record is invalid".to_owned())
+        })?;
+    let values = match record[1] {
+        b'c' => &mut index.contexts,
+        b'r' => &mut index.revisions,
+        _ => {
+            return Err(GraphError::Schema(
+                "private state expiration log record is invalid".to_owned(),
+            ))
+        }
     };
-    let Some(text) = read_text(&index_path, "private state expiration index")? else {
-        return Ok(ExpirationIndex::default());
-    };
-    let value: serde_json::Value = serde_json::from_str(&text)
+    match record[0] {
+        b'+' => {
+            values.insert(value.to_owned());
+        }
+        b'-' => {
+            values.remove(value);
+        }
+        _ => {
+            return Err(GraphError::Schema(
+                "private state expiration log record is invalid".to_owned(),
+            ))
+        }
+    }
+    Ok(())
+}
+
+fn parse_expiration_log(text: &str) -> Result<(ExpirationIndex, usize, usize, bool)> {
+    let body = text.strip_prefix(EXPIRATION_LOG_HEADER).ok_or_else(|| {
+        GraphError::Schema("private state expiration log header is invalid".to_owned())
+    })?;
+    let mut index = ExpirationIndex::default();
+    let mut records = 0;
+    let mut offset = 0;
+    while offset < body.len() {
+        let remaining = &body.as_bytes()[offset..];
+        if remaining.len() < EXPIRATION_FRAME_HEADER_BYTES {
+            return Ok((index, records, offset, true));
+        }
+        let header = &remaining[..EXPIRATION_FRAME_HEADER_BYTES];
+        if header[0] != b'@' || header[9] != b':' || header[74] != b'\n' {
+            return Err(GraphError::Schema(
+                "private state expiration log frame is invalid".to_owned(),
+            ));
+        }
+        let count = std::str::from_utf8(&header[1..9])
+            .ok()
+            .and_then(|value| u32::from_str_radix(value, 16).ok())
+            .filter(|count| *count != 0)
+            .ok_or_else(|| {
+                GraphError::Schema("private state expiration log frame is invalid".to_owned())
+            })?;
+        let checksum = std::str::from_utf8(&header[10..74])
+            .ok()
+            .filter(|value| is_generation(value))
+            .ok_or_else(|| {
+                GraphError::Schema("private state expiration log frame is invalid".to_owned())
+            })?;
+        let count = usize::try_from(count).map_err(|_| {
+            GraphError::Schema("private state expiration log frame is invalid".to_owned())
+        })?;
+        let payload_length = count.checked_mul(EXPIRATION_RECORD_BYTES).ok_or_else(|| {
+            GraphError::Schema("private state expiration log frame is invalid".to_owned())
+        })?;
+        let frame_length = EXPIRATION_FRAME_HEADER_BYTES
+            .checked_add(payload_length)
+            .ok_or_else(|| {
+                GraphError::Schema("private state expiration log frame is invalid".to_owned())
+            })?;
+        if remaining.len() < frame_length {
+            return Ok((index, records, offset, true));
+        }
+        let payload = &remaining[EXPIRATION_FRAME_HEADER_BYTES..frame_length];
+        if generation(payload) != checksum {
+            return Err(GraphError::Schema(
+                "private state expiration log frame checksum is invalid".to_owned(),
+            ));
+        }
+        for record in payload.chunks_exact(EXPIRATION_RECORD_BYTES) {
+            apply_expiration_record(&mut index, record)?;
+        }
+        records = records.saturating_add(count);
+        offset = offset.saturating_add(frame_length);
+    }
+    Ok((index, records, offset, false))
+}
+
+fn load_legacy_expiration_index(text: &str) -> Result<ExpirationIndex> {
+    let value: serde_json::Value = serde_json::from_str(text)
         .map_err(|error| GraphError::Schema(format!("private state expiration index: {error}")))?;
     match value["schema"].as_str() {
-        Some(LEGACY_EXPIRATION_INDEX_SCHEMA) => {
-            let mut index = ExpirationIndex::default();
-            for context in expiration_values(&value, "contexts")? {
-                index.contexts.expire(context);
+        Some(LEGACY_EXPIRATION_INDEX_SCHEMA) => Ok(ExpirationIndex {
+            contexts: expiration_values(&value, "contexts")?,
+            revisions: expiration_values(&value, "revisions")?,
+        }),
+        Some(PREFIX_EXPIRATION_INDEX_SCHEMA) => {
+            let mut contexts: BTreeSet<_> = expiration_prefixes(&value, "context_prefixes")?
+                .into_iter()
+                .filter(|value| is_generation(value))
+                .collect();
+            let mut revisions: BTreeSet<_> = expiration_prefixes(&value, "revision_prefixes")?
+                .into_iter()
+                .filter(|value| is_generation(value))
+                .collect();
+            for admitted in expiration_values(&value, "admitted_contexts")? {
+                contexts.remove(&admitted);
             }
-            for revision in expiration_values(&value, "revisions")? {
-                index.revisions.expire(revision);
+            for admitted in expiration_values(&value, "admitted_revisions")? {
+                revisions.remove(&admitted);
             }
-            Ok(index)
-        }
-        Some(EXPIRATION_INDEX_SCHEMA) => {
-            let context_admissions = expiration_values(&value, "admitted_contexts")?;
-            let revision_admissions = expiration_values(&value, "admitted_revisions")?;
-            if context_admissions.len() > MAX_EXPIRATION_ADMISSIONS
-                || revision_admissions.len() > MAX_EXPIRATION_ADMISSIONS
-            {
-                return Err(GraphError::Schema(
-                    "private state expiration index has too many admissions".to_owned(),
-                ));
-            }
-            let mut contexts = ExpirationSet {
-                prefixes: expiration_prefixes(&value, "context_prefixes")?,
-                admitted: context_admissions,
-            };
-            let mut revisions = ExpirationSet {
-                prefixes: expiration_prefixes(&value, "revision_prefixes")?,
-                admitted: revision_admissions,
-            };
-            contexts.compact();
-            revisions.compact();
             Ok(ExpirationIndex {
                 contexts,
                 revisions,
@@ -1715,6 +1750,41 @@ fn load_expiration_index(path: &Path) -> Result<ExpirationIndex> {
             "unsupported private state expiration index schema".to_owned(),
         )),
     }
+}
+
+fn load_expiration_storage(path: &Path) -> Result<LoadedExpirationIndex> {
+    let Some(index_path) = expiration_index_path(path) else {
+        return Ok(LoadedExpirationIndex {
+            index: ExpirationIndex::default(),
+            storage: ExpirationStorage::Missing,
+        });
+    };
+    let Some(text) = read_text(&index_path, "private state expiration index")? else {
+        return Ok(LoadedExpirationIndex {
+            index: ExpirationIndex::default(),
+            storage: ExpirationStorage::Missing,
+        });
+    };
+    if text.starts_with(EXPIRATION_INDEX_SCHEMA) {
+        let (index, records, complete_bytes, partial_tail) = parse_expiration_log(&text)?;
+        Ok(LoadedExpirationIndex {
+            index,
+            storage: ExpirationStorage::Log {
+                records,
+                complete_bytes,
+                partial_tail,
+            },
+        })
+    } else {
+        Ok(LoadedExpirationIndex {
+            index: load_legacy_expiration_index(&text)?,
+            storage: ExpirationStorage::Legacy,
+        })
+    }
+}
+
+fn load_expiration_index(path: &Path) -> Result<ExpirationIndex> {
+    load_expiration_storage(path).map(|loaded| loaded.index)
 }
 
 fn legacy_expiration_markers(path: &Path) -> Result<(ExpirationIndex, Vec<PathBuf>)> {
@@ -1752,13 +1822,13 @@ fn legacy_expiration_markers(path: &Path) -> Result<(ExpirationIndex, Vec<PathBu
             if !is_generation(context) {
                 continue;
             }
-            index.contexts.expire(context.to_owned());
+            index.contexts.insert(context.to_owned());
             context
         } else if let Some(revision) = filename.strip_prefix(&revision_prefix) {
             if !is_generation(revision) {
                 continue;
             }
-            index.revisions.expire(revision.to_owned());
+            index.revisions.insert(revision.to_owned());
             revision
         } else {
             continue;
@@ -1768,6 +1838,64 @@ fn legacy_expiration_markers(path: &Path) -> Result<(ExpirationIndex, Vec<PathBu
         markers.push(entry.path());
     }
     Ok((index, markers))
+}
+
+fn push_expiration_record(records: &mut Vec<u8>, operation: u8, kind: u8, value: &str) {
+    debug_assert!(is_generation(value));
+    records.push(operation);
+    records.push(kind);
+    records.extend_from_slice(value.as_bytes());
+    records.push(b'\n');
+}
+
+fn expiration_changes(before: &ExpirationIndex, after: &ExpirationIndex) -> Vec<u8> {
+    let mut records = Vec::new();
+    for value in before.contexts.difference(&after.contexts) {
+        push_expiration_record(&mut records, b'-', b'c', value);
+    }
+    for value in before.revisions.difference(&after.revisions) {
+        push_expiration_record(&mut records, b'-', b'r', value);
+    }
+    for value in after.contexts.difference(&before.contexts) {
+        push_expiration_record(&mut records, b'+', b'c', value);
+    }
+    for value in after.revisions.difference(&before.revisions) {
+        push_expiration_record(&mut records, b'+', b'r', value);
+    }
+    records
+}
+
+fn expiration_frame(records: &[u8]) -> Result<Vec<u8>> {
+    if records.is_empty() || !records.len().is_multiple_of(EXPIRATION_RECORD_BYTES) {
+        return Err(GraphError::Schema(
+            "private state expiration log frame is invalid".to_owned(),
+        ));
+    }
+    let count = u32::try_from(records.len() / EXPIRATION_RECORD_BYTES)
+        .map_err(|_| GraphError::Io("private state expiration log is too large".to_owned()))?;
+    let header = format!("@{count:08x}:{}\n", generation(records));
+    debug_assert_eq!(header.len(), EXPIRATION_FRAME_HEADER_BYTES);
+    let mut frame = Vec::with_capacity(header.len().saturating_add(records.len()));
+    frame.extend_from_slice(header.as_bytes());
+    frame.extend_from_slice(records);
+    Ok(frame)
+}
+
+fn expiration_log_bytes(index: &ExpirationIndex) -> Result<Vec<u8>> {
+    let mut records = Vec::with_capacity(
+        EXPIRATION_RECORD_BYTES * (index.contexts.len() + index.revisions.len()),
+    );
+    for value in &index.contexts {
+        push_expiration_record(&mut records, b'+', b'c', value);
+    }
+    for value in &index.revisions {
+        push_expiration_record(&mut records, b'+', b'r', value);
+    }
+    let frame = expiration_frame(&records)?;
+    let mut bytes = Vec::with_capacity(EXPIRATION_LOG_HEADER.len().saturating_add(frame.len()));
+    bytes.extend_from_slice(EXPIRATION_LOG_HEADER.as_bytes());
+    bytes.extend_from_slice(&frame);
+    Ok(bytes)
 }
 
 fn write_expiration_index(path: &Path, index: &ExpirationIndex) -> Result<()> {
@@ -1780,24 +1908,122 @@ fn write_expiration_index(path: &Path, index: &ExpirationIndex) -> Result<()> {
     if index.contexts.is_empty() && index.revisions.is_empty() {
         return remove(&index_path, "private state expiration index");
     }
-    let bytes = serde_json::to_vec_pretty(&serde_json::json!({
-        "schema": EXPIRATION_INDEX_SCHEMA,
-        "context_prefixes": index.contexts.prefixes,
-        "revision_prefixes": index.revisions.prefixes,
-        "admitted_contexts": index.contexts.admitted,
-        "admitted_revisions": index.revisions.admitted,
-    }))
-    .map_err(|error| GraphError::Schema(format!("private state expiration index: {error}")))?;
-    write(&index_path, &bytes)
+    write(&index_path, &expiration_log_bytes(index)?)
+}
+
+#[cfg(unix)]
+fn append_expiration_records(path: &Path, records: &[u8], complete_bytes: usize) -> Result<()> {
+    if records.is_empty() {
+        return Ok(());
+    }
+    let frame = expiration_frame(records)?;
+    let expected = std::fs::symlink_metadata(path).map_err(|error| {
+        GraphError::Io(format!("inspect private state expiration log: {error}"))
+    })?;
+    if !expected.file_type().is_file() {
+        return Err(GraphError::Guard(format!(
+            "private state expiration log is not a regular file: {}",
+            path.display()
+        )));
+    }
+    let mut options = std::fs::OpenOptions::new();
+    options.read(true).append(true);
+    {
+        use std::os::unix::fs::OpenOptionsExt as _;
+        options.custom_flags(libc::O_NOFOLLOW);
+    }
+    let mut file = options
+        .open(path)
+        .map_err(|error| GraphError::Io(format!("open private state expiration log: {error}")))?;
+    let opened = file.metadata().map_err(|error| {
+        GraphError::Io(format!(
+            "inspect opened private state expiration log: {error}"
+        ))
+    })?;
+    if !opened.file_type().is_file() || !same_file(&expected, &opened) {
+        return Err(GraphError::Guard(format!(
+            "private state expiration log changed while being opened: {}",
+            path.display()
+        )));
+    }
+    file.set_permissions(std::fs::Permissions::from_mode(0o600))
+        .map_err(|error| GraphError::Io(format!("harden private state expiration log: {error}")))?;
+    let valid_length = EXPIRATION_LOG_HEADER.len().saturating_add(complete_bytes);
+    if opened.len()
+        != u64::try_from(valid_length).map_err(|_| {
+            GraphError::Io("private state expiration log length overflow".to_owned())
+        })?
+    {
+        return Err(GraphError::Guard(format!(
+            "private state expiration log changed before append: {}",
+            path.display()
+        )));
+    }
+    file.seek(std::io::SeekFrom::End(0))
+        .map_err(|error| GraphError::Io(format!("seek private state expiration log: {error}")))?;
+    file.write_all(&frame)
+        .map_err(|error| GraphError::Io(format!("append private state expiration log: {error}")))?;
+    file.sync_all()
+        .map_err(|error| GraphError::Io(format!("sync private state expiration log: {error}")))?;
+    let current = std::fs::symlink_metadata(path).map_err(|error| {
+        GraphError::Guard(format!(
+            "private state expiration log changed while being appended: {error}"
+        ))
+    })?;
+    if !current.file_type().is_file() || !same_file(&opened, &current) {
+        return Err(GraphError::Guard(format!(
+            "private state expiration log changed while being appended: {}",
+            path.display()
+        )));
+    }
+    Ok(())
+}
+
+#[cfg(not(unix))]
+fn append_expiration_records(_path: &Path, _records: &[u8], _complete_bytes: usize) -> Result<()> {
+    Err(GraphError::Guard(
+        "private graph state requires owner-only file permissions".to_owned(),
+    ))
 }
 
 fn update_expiration_index(path: &Path, update: impl FnOnce(&mut ExpirationIndex)) -> Result<()> {
-    let mut index = load_expiration_index(path)?;
+    let loaded = load_expiration_storage(path)?;
+    let original = loaded.index.clone();
+    let mut index = loaded.index;
     let (legacy, markers) = legacy_expiration_markers(path)?;
-    index.contexts.merge(legacy.contexts);
-    index.revisions.merge(legacy.revisions);
+    index.contexts.extend(legacy.contexts);
+    index.revisions.extend(legacy.revisions);
     update(&mut index);
-    write_expiration_index(path, &index)?;
+    let changes = expiration_changes(&original, &index);
+    let index_path = expiration_index_path(path).ok_or_else(|| {
+        GraphError::Guard(format!(
+            "cannot update unscoped private state expiration index: {}",
+            path.display()
+        ))
+    })?;
+    match loaded.storage {
+        ExpirationStorage::Missing | ExpirationStorage::Legacy => {
+            write_expiration_index(path, &index)?;
+        }
+        ExpirationStorage::Log {
+            records,
+            complete_bytes,
+            partial_tail,
+        } => {
+            let live_records = index.contexts.len().saturating_add(index.revisions.len());
+            if index.contexts.is_empty() && index.revisions.is_empty()
+                || partial_tail
+                || records
+                    > live_records
+                        .saturating_mul(2)
+                        .saturating_add(MAX_EXPIRATION_LOG_OVERHEAD)
+            {
+                write_expiration_index(path, &index)?;
+            } else {
+                append_expiration_records(&index_path, &changes, complete_bytes)?;
+            }
+        }
+    }
     for marker in markers {
         remove(&marker, "legacy private state expiration marker")?;
     }
@@ -1818,8 +2044,8 @@ fn expire_context(path: &Path) -> Result<()> {
         ))
     })?;
     update_expiration_index(path, |index| {
-        index.contexts.expire(context);
-        index.revisions.expire(revision.key);
+        index.contexts.insert(context);
+        index.revisions.insert(revision.key);
     })
 }
 
@@ -4648,25 +4874,97 @@ mod tests {
     }
 
     #[test]
-    fn expiration_filter_remains_bounded_without_forgetting_denials() {
-        let mut expired = super::ExpirationSet::default();
-        let values: Vec<_> = (0..(super::MAX_EXPIRATION_PREFIXES * 4))
+    fn expiration_log_preserves_exact_denials_without_prefix_false_positives() {
+        let root = TempDir::new().unwrap();
+        let output = super::generation(b"output path");
+        let current = super::generation(b"current context");
+        let path = root.path().join(format!(
+            "{output}{}{current}.json",
+            super::CONTEXT_SEPARATOR
+        ));
+        let values: Vec<_> = (0..512)
             .map(|index| super::generation(format!("expired-{index}").as_bytes()))
             .collect();
-        for value in &values {
-            expired.expire(value.clone());
-        }
+        super::update_expiration_index(&path, |index| {
+            index.contexts.extend(values.iter().cloned());
+        })
+        .unwrap();
+        let prefix = &values[0][..2];
+        let mut candidate_index = 0_u64;
+        let unexpired = loop {
+            let candidate = super::generation(format!("unexpired-{candidate_index}").as_bytes());
+            if candidate.starts_with(prefix) && !values.contains(&candidate) {
+                break candidate;
+            }
+            candidate_index += 1;
+        };
 
-        assert!(expired.prefixes.len() <= super::MAX_EXPIRATION_PREFIXES);
-        assert!(values.iter().all(|value| expired.contains(value)));
+        let expired = super::load_expiration_index(&path).unwrap();
+        assert!(values.iter().all(|value| expired.contexts.contains(value)));
+        assert!(!expired.contexts.contains(&unexpired));
+        assert!(
+            fs::read_to_string(super::expiration_index_path(&path).unwrap())
+                .unwrap()
+                .starts_with(super::EXPIRATION_LOG_HEADER)
+        );
 
         let admitted = values.last().unwrap();
-        expired.admit(admitted);
-        assert!(!expired.contains(admitted));
-        assert!(expired.admitted.len() <= super::MAX_EXPIRATION_ADMISSIONS);
+        super::update_expiration_index(&path, |index| {
+            index.contexts.remove(admitted);
+        })
+        .unwrap();
+        let expired = super::load_expiration_index(&path).unwrap();
+        assert!(!expired.contexts.contains(admitted));
         assert!(values[..values.len() - 1]
             .iter()
-            .all(|value| expired.contains(value)));
+            .all(|value| expired.contexts.contains(value)));
+    }
+
+    #[test]
+    fn expiration_log_ignores_an_incomplete_change_frame() {
+        use std::io::Write as _;
+
+        let root = TempDir::new().unwrap();
+        let output = super::generation(b"output path");
+        let current = super::generation(b"current context");
+        let path = root.path().join(format!(
+            "{output}{}{current}.json",
+            super::CONTEXT_SEPARATOR
+        ));
+        let first = super::generation(b"first expiration");
+        let second = super::generation(b"second expiration");
+        let third = super::generation(b"third expiration");
+        super::update_expiration_index(&path, |index| {
+            index.contexts.insert(first.clone());
+        })
+        .unwrap();
+        let index_path = super::expiration_index_path(&path).unwrap();
+        let mut records = Vec::new();
+        super::push_expiration_record(&mut records, b'+', b'c', &second);
+        super::push_expiration_record(&mut records, b'+', b'c', &third);
+        let frame = super::expiration_frame(&records).unwrap();
+        let partial_length = super::EXPIRATION_FRAME_HEADER_BYTES + super::EXPIRATION_RECORD_BYTES;
+        fs::OpenOptions::new()
+            .append(true)
+            .open(&index_path)
+            .unwrap()
+            .write_all(&frame[..partial_length])
+            .unwrap();
+
+        let expired = super::load_expiration_index(&path).unwrap();
+        assert!(expired.contexts.contains(&first));
+        assert!(!expired.contexts.contains(&second));
+        assert!(!expired.contexts.contains(&third));
+
+        super::update_expiration_index(&path, |index| {
+            index.contexts.insert(second.clone());
+            index.contexts.insert(third.clone());
+        })
+        .unwrap();
+        let expired = super::load_expiration_index(&path).unwrap();
+        assert!(expired.contexts.contains(&first));
+        assert!(expired.contexts.contains(&second));
+        assert!(expired.contexts.contains(&third));
     }
 
     #[test]

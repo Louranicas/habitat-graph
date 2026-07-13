@@ -220,6 +220,13 @@ fn ambiguous_projected_node_ids(
             }
         }
     }
+    let mut shared_slots = projected_node_ids(base);
+    let ours_slots = projected_node_ids(ours);
+    let theirs_slots = projected_node_ids(theirs);
+    shared_slots.retain(|id| ours_slots.contains(id) && theirs_slots.contains(id));
+    for ambiguous in &mut ambiguous {
+        ambiguous.retain(|id| !shared_slots.contains(id));
+    }
     ambiguous
 }
 
@@ -320,12 +327,7 @@ fn intersecting_probe_ids(
 }
 
 fn projected_collision_groups(graph: &Graph) -> Vec<(HashSet<NodeId>, ProbeRange)> {
-    let projected_ids: HashSet<NodeId> = graph
-        .nodes
-        .iter()
-        .filter(|node| habitat_graph_core::is_canonical_redaction_marker(&node.label))
-        .map(|node| node.id)
-        .collect();
+    let projected_ids = projected_node_ids(graph);
     let mut result = Vec::new();
     for group in occupied_collision_groups(graph) {
         let projected: HashSet<NodeId> = group
@@ -350,12 +352,7 @@ fn projected_collision_groups(graph: &Graph) -> Vec<(HashSet<NodeId>, ProbeRange
 }
 
 fn projected_probe_ranges(graph: &Graph) -> Vec<(NodeId, ProbeRange)> {
-    let projected_ids: HashSet<NodeId> = graph
-        .nodes
-        .iter()
-        .filter(|node| habitat_graph_core::is_canonical_redaction_marker(&node.label))
-        .map(|node| node.id)
-        .collect();
+    let projected_ids = projected_node_ids(graph);
     let mut result = Vec::new();
     for group in occupied_collision_groups(graph) {
         let Some(start) = group.first().map(|id| id.get()) else {
@@ -377,6 +374,15 @@ fn projected_probe_ranges(graph: &Graph) -> Vec<(NodeId, ProbeRange)> {
         );
     }
     result
+}
+
+fn projected_node_ids(graph: &Graph) -> HashSet<NodeId> {
+    graph
+        .nodes
+        .iter()
+        .filter(|node| habitat_graph_core::is_canonical_redaction_marker(&node.label))
+        .map(|node| node.id)
+        .collect()
 }
 
 fn occupied_collision_groups(graph: &Graph) -> Vec<Vec<NodeId>> {
@@ -1853,7 +1859,7 @@ mod tests {
     }
 
     #[test]
-    fn ambiguous_projected_collision_chain_is_dropped() {
+    fn shared_projected_slot_survives_adjacent_base_deletion() {
         let marker = "[REDACTED:api_key]";
         let mut base = nodes_graph(&[(10, marker), (11, marker), (20, "Safe")]);
         base.edges.push(edge(10, 20, "calls"));
@@ -1864,12 +1870,13 @@ mod tests {
         theirs.edges.push(edge(10, 20, "calls"));
 
         let merged = merge3(&base, &ours, &theirs);
-        assert_eq!(node_labels(&merged), vec!["Safe"]);
-        assert!(merged.edges.is_empty());
+        assert_eq!(node_labels(&merged), vec!["Safe", marker]);
+        assert_eq!(merged.edges.len(), 1);
+        assert_eq!(merged.edges[0].source, NodeId::new(10));
     }
 
     #[test]
-    fn clean_occupied_slot_does_not_split_projected_collision_chain() {
+    fn shared_projected_slot_survives_adjacent_clean_occupancy() {
         let marker = "[REDACTED:api_key]";
         let mut base = nodes_graph(&[(10, marker), (11, "Occupied"), (12, marker), (20, "Safe")]);
         base.edges.push(edge(10, 20, "calls"));
@@ -1879,8 +1886,9 @@ mod tests {
         let theirs = ours.clone();
 
         let merged = merge3(&base, &ours, &theirs);
-        assert_eq!(node_labels(&merged), vec!["Occupied", "Safe"]);
-        assert!(merged.edges.is_empty());
+        assert_eq!(node_labels(&merged), vec!["Occupied", "Safe", marker]);
+        assert_eq!(merged.edges.len(), 1);
+        assert_eq!(merged.edges[0].source, NodeId::new(10));
     }
 
     #[test]
@@ -1958,6 +1966,28 @@ mod tests {
             .edges
             .iter()
             .any(|edge| edge.relation == "theirs-edge"));
+    }
+
+    #[test]
+    fn adjacent_base_projected_deletion_preserves_shared_slot_and_topology() {
+        let marker = "[REDACTED:api_key]";
+        let mut base = nodes_graph(&[(10, marker), (11, marker), (20, "Safe")]);
+        base.edges.push(edge(10, 20, "deleted-edge"));
+        base.edges.push(edge(11, 20, "shared-edge"));
+        let mut ours = nodes_graph(&[(11, marker), (20, "Safe")]);
+        ours.edges.push(edge(11, 20, "shared-edge"));
+        let theirs = base.clone();
+
+        let merged = merge3(&base, &ours, &theirs);
+        let projected = merged
+            .nodes
+            .iter()
+            .find(|node| node.label == marker)
+            .unwrap();
+        assert_eq!(projected.id, NodeId::new(11));
+        assert_eq!(merged.edges.len(), 1);
+        assert_eq!(merged.edges[0].source, NodeId::new(11));
+        assert_eq!(merged.edges[0].relation, "shared-edge");
     }
 
     #[test]
