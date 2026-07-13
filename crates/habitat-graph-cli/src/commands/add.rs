@@ -36,7 +36,7 @@ use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use habitat_graph_core::{Graph, GraphError, Result, SCHEMA_VERSION};
-use habitat_graph_source::ssrf::is_safe_url;
+use habitat_graph_source::ssrf::{is_safe_url, validate_url_syntax};
 
 // ── Constants ─────────────────────────────────────────────────────────────────
 
@@ -870,20 +870,16 @@ pub fn run(url: &str, out: &Path) -> u8 {
 /// - [`GraphError::Parse`] — extraction or JSON parse failure.
 /// - [`GraphError::Schema`] — serialization failure.
 fn run_inner(url: &str, out: &Path) -> Result<usize> {
-    // 1. SSRF check — no network I/O before this passes.
+    validate_url_syntax(url).map_err(GraphError::Guard)?;
+    recover_pending_add(out)?;
     is_safe_url(url).map_err(GraphError::Guard)?;
 
-    recover_pending_add(out)?;
-
-    // 2. Fetch.
     let bytes = fetch_bytes(url)?;
 
-    // 3. Infer extension and extract.
     let ext = infer_extension(url);
     let new_graph = extract_from_bytes(&bytes, &ext)?;
     let n = new_graph.nodes.len();
 
-    // 4. Merge into output.
     merge_into_output(new_graph, out)?;
 
     Ok(n)
@@ -1512,6 +1508,39 @@ mod tests {
         let error = super::run_inner("https://example.com/unavailable.rs", &out).unwrap_err();
 
         assert!(error.to_string().contains("--features live"));
+        assert!(!super::add_journal_path(&state_path).unwrap().exists());
+        assert!(fs::read_to_string(&state_path).unwrap().contains("pending"));
+        assert!(fs::read_to_string(&out).unwrap().contains("pending"));
+    }
+
+    #[test]
+    fn run_recovers_a_pending_add_before_host_safety_rejection() {
+        let d = tdir();
+        let out = d.join("g.json");
+        let original = extract_from_bytes(b"fn original() {}", "rs").unwrap();
+        merge_into_output(original.clone(), &out).unwrap();
+        let public_before = fs::read_to_string(&out).unwrap();
+        let before_graph = habitat_graph_serve::from_node_link(&public_before).unwrap();
+        let pending = habitat_graph_build::merge(
+            extract_from_bytes(b"fn pending() {}", "rs").unwrap(),
+            original,
+        )
+        .sorted();
+        let pending_json = habitat_graph_export::to_node_link(&pending).unwrap();
+        let state_path = super::private_state_path(&out).unwrap();
+        super::write_add_journal(
+            &out,
+            &state_path,
+            Some(&before_graph),
+            &private_checksum(&state_path),
+            &pending,
+            &pending_json,
+        )
+        .unwrap();
+
+        let error = super::run_inner("http://127.0.0.1/unavailable.rs", &out).unwrap_err();
+
+        assert!(error.to_string().contains("loopback"));
         assert!(!super::add_journal_path(&state_path).unwrap().exists());
         assert!(fs::read_to_string(&state_path).unwrap().contains("pending"));
         assert!(fs::read_to_string(&out).unwrap().contains("pending"));

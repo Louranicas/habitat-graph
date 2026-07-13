@@ -158,6 +158,26 @@ fn parse_url_parts(url: &str) -> Result<(&str, String), String> {
     Ok((scheme, host.to_owned()))
 }
 
+fn validate_url_parts(url: &str) -> Result<(&str, String), String> {
+    let (scheme, host) = parse_url_parts(url)?;
+    if !scheme.eq_ignore_ascii_case("http") && !scheme.eq_ignore_ascii_case("https") {
+        return Err(format!(
+            "scheme {scheme:?} is not permitted; only 'http' and 'https' are allowed"
+        ));
+    }
+    Ok((scheme, host))
+}
+
+/// Validates the structure and scheme of an untrusted ingest URL without resolving its host.
+///
+/// # Errors
+///
+/// Returns `Err(reason)` when the URL cannot be parsed or does not use `http` or `https`.
+#[must_use = "ignoring the URL validation result defeats the security purpose"]
+pub fn validate_url_syntax(url: &str) -> Result<(), String> {
+    validate_url_parts(url).map(|_| ())
+}
+
 // ── Public URL guard ──────────────────────────────────────────────────────────
 
 /// Validates that `url` is safe to fetch from an untrusted ingest path.
@@ -181,14 +201,7 @@ fn parse_url_parts(url: &str) -> Result<(&str, String), String> {
 /// - The hostname fails to resolve.
 #[must_use = "ignoring the SSRF check result defeats the security purpose"]
 pub fn is_safe_url(url: &str) -> Result<(), String> {
-    let (scheme, host) = parse_url_parts(url)?;
-
-    // Scheme gate — only http/https permitted (case-insensitive, per RFC 3986 §3.1).
-    if !scheme.eq_ignore_ascii_case("http") && !scheme.eq_ignore_ascii_case("https") {
-        return Err(format!(
-            "scheme {scheme:?} is not permitted; only 'http' and 'https' are allowed"
-        ));
-    }
+    let (_, host) = validate_url_parts(url)?;
 
     // Literal-IP gate (no I/O).
     if let Ok(ip) = host.parse::<IpAddr>() {
@@ -221,7 +234,7 @@ pub fn is_safe_url(url: &str) -> Result<(), String> {
 mod tests {
     use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
 
-    use super::{ip_is_blocked, is_safe_url};
+    use super::{ip_is_blocked, is_safe_url, validate_url_syntax};
 
     // ── helpers ───────────────────────────────────────────────────────────────
 
@@ -587,6 +600,12 @@ mod tests {
     fn scheme_data_no_sep_err() {
         // `data:` has no `://`.
         assert!(is_safe_url("data:text/plain,hello").is_err());
+    }
+
+    #[test]
+    fn syntax_validation_does_not_require_dns() {
+        assert!(validate_url_syntax("https://unresolvable.invalid/file.rs").is_ok());
+        assert!(validate_url_syntax("ftp://unresolvable.invalid/file.rs").is_err());
     }
 
     // ── is_safe_url: literal IP gate ─────────────────────────────────────────

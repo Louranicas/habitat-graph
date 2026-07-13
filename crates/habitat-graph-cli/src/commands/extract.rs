@@ -1302,23 +1302,25 @@ pub(super) fn write_full_build_private_state(
         &super::private_state::generation(public_json.as_bytes()),
         &super::private_state::semantic_generation(&public_graph)?,
     )?;
-    super::private_state::write_state(state_path, &state_json)
+    super::private_state::write_full_build_state(state_path, &state_json)
 }
+
+const FULL_BUILD_BATCH_SIZE: usize = 64;
 
 pub(super) fn build_full_graph(files: &[PathBuf]) -> Result<(Graph, Manifest)> {
     let mut extractions = Vec::with_capacity(files.len());
     let mut records = Vec::with_capacity(files.len());
-    for path in files {
-        let bytes = habitat_graph_source::read_local(path, 0)?;
-        let content_hash = blake3::hash(&bytes).to_hex().to_string();
-        let input = (path.clone(), bytes);
-        extractions.extend(habitat_graph_extract::extract_inputs(
-            std::slice::from_ref(&input),
-        )?);
-        records.push(InputRecord {
-            path: path.to_string_lossy().into_owned(),
-            content_hash,
-        });
+    for batch in files.chunks(FULL_BUILD_BATCH_SIZE) {
+        let mut inputs = Vec::with_capacity(batch.len());
+        for path in batch {
+            let bytes = habitat_graph_source::read_local(path, 0)?;
+            records.push(InputRecord {
+                path: path.to_string_lossy().into_owned(),
+                content_hash: blake3::hash(&bytes).to_hex().to_string(),
+            });
+            inputs.push((path.clone(), bytes));
+        }
+        extractions.extend(habitat_graph_extract::extract_inputs(&inputs)?);
     }
     records.sort_unstable_by(|left, right| left.path.cmp(&right.path));
     let mut graph = habitat_graph_build::assemble(extractions);
@@ -1387,7 +1389,7 @@ fn run_inner(
 #[cfg(test)]
 mod tests {
     use std::fs;
-    use std::path::Path;
+    use std::path::{Path, PathBuf};
 
     use tempfile::TempDir;
 
@@ -1498,6 +1500,61 @@ mod tests {
                 env!("CARGO_PKG_VERSION")
             )
         );
+    }
+
+    #[test]
+    fn full_build_batches_preserve_graph_and_manifest() {
+        let src = TempDir::new().unwrap();
+        let files: Vec<PathBuf> = (0..=super::FULL_BUILD_BATCH_SIZE)
+            .map(|index| {
+                let name = format!("batch_{index}.rs");
+                mk_file(src.path(), &name, &format!("fn batch_{index}() {{}}"));
+                src.path().join(name)
+            })
+            .collect();
+
+        let (graph, manifest) = super::build_full_graph(&files).unwrap();
+
+        let inputs: Vec<(PathBuf, Vec<u8>)> = files
+            .iter()
+            .map(|path| {
+                (
+                    path.clone(),
+                    habitat_graph_source::read_local(path, 0).unwrap(),
+                )
+            })
+            .collect();
+        let mut expected_graph =
+            habitat_graph_build::assemble(habitat_graph_extract::extract_inputs(&inputs).unwrap());
+        expected_graph.communities = habitat_graph_analyze::detect_communities(
+            &habitat_graph_analyze::trusted_subgraph(&expected_graph),
+        );
+
+        assert_eq!(graph, expected_graph.sorted());
+        assert_eq!(
+            manifest,
+            habitat_graph_source::build_manifest(&inputs, env!("CARGO_PKG_VERSION"))
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn full_extract_rejects_symlink_graph_output() {
+        use std::os::unix::fs::symlink;
+
+        let src = TempDir::new().unwrap();
+        let out = TempDir::new().unwrap();
+        let victim = out.path().join("victim.json");
+        mk_file(src.path(), "lib.rs", "fn current() {}");
+        fs::write(&victim, "victim").unwrap();
+        symlink(&victim, out.path().join("graph.json")).unwrap();
+
+        assert_eq!(run(src.path(), out.path(), None), 4);
+        assert_eq!(fs::read_to_string(victim).unwrap(), "victim");
+        assert!(fs::symlink_metadata(out.path().join("graph.json"))
+            .unwrap()
+            .file_type()
+            .is_symlink());
     }
 
     #[cfg(not(unix))]

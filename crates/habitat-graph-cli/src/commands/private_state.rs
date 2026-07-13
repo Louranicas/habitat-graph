@@ -63,7 +63,7 @@ pub(super) fn path_for_full_build(output: &Path, legacy: &Path) -> Result<PathBu
 fn path_for_output_with_expiration(
     output: &Path,
     legacy: &Path,
-    readmit_expired: bool,
+    allow_expired: bool,
 ) -> Result<PathBuf> {
     #[cfg(not(unix))]
     remove_family(legacy, "unsupported legacy private state")?;
@@ -78,6 +78,26 @@ fn path_for_output_with_expiration(
             parent.display()
         ))
     })?;
+    let output_name = output
+        .file_name()
+        .ok_or_else(|| GraphError::Io("output path has no filename".to_owned()))?;
+    match std::fs::symlink_metadata(output) {
+        Ok(metadata) if metadata.file_type().is_symlink() => {
+            return Err(GraphError::Guard(format!(
+                "output path must not be a symbolic link: {}",
+                output.display()
+            )))
+        }
+        Ok(_) => {}
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+        Err(error) => {
+            return Err(GraphError::Io(format!(
+                "inspect output path {}: {error}",
+                output.display()
+            )))
+        }
+    }
+    let canonical_output = canonical_parent.join(output_name);
     let Some(git_dir) = find_git_dir(&canonical_parent)? else {
         return Ok(legacy.to_path_buf());
     };
@@ -87,27 +107,11 @@ fn path_for_output_with_expiration(
     ensure_private_directory(&state_root)?;
     ensure_private_directory(&state_dir)?;
 
-    let canonical_output = match std::fs::canonicalize(output) {
-        Ok(path) => path,
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => canonical_parent.join(
-            output
-                .file_name()
-                .ok_or_else(|| GraphError::Io("output path has no filename".to_owned()))?,
-        ),
-        Err(error) => {
-            return Err(GraphError::Io(format!(
-                "resolve output path {}: {error}",
-                output.display()
-            )))
-        }
-    };
     let key = output_key(&canonical_output);
     let unscoped_state_path = state_dir.join(format!("{key}.json"));
     let context = git_context_identity(&git_dir)?;
     let state_path = state_dir.join(format!("{key}{CONTEXT_SEPARATOR}{}.json", context.key));
-    if readmit_expired {
-        remove_expiration_markers(&state_path, &context.revision)?;
-    } else {
+    if !allow_expired {
         ensure_context_not_expired(&state_path)?;
         ensure_revision_not_expired(&state_path, &context.revision)?;
     }
@@ -722,6 +726,25 @@ fn select_unique_state(
 
 pub(super) fn write_state(path: &Path, bytes: &[u8]) -> Result<()> {
     ensure_context_not_expired(path)?;
+    write_state_contents(path, bytes)
+}
+
+pub(super) fn write_full_build_state(path: &Path, bytes: &[u8]) -> Result<()> {
+    let revision = context_revision(path)?;
+    if expired_context_path(path).is_some() && revision.is_none() {
+        return Err(GraphError::Guard(format!(
+            "private state context lacks revision provenance: {}",
+            path.display()
+        )));
+    }
+    write_state_contents(path, bytes)?;
+    if let Some(revision) = revision {
+        remove_expiration_markers(path, &revision)?;
+    }
+    Ok(())
+}
+
+fn write_state_contents(path: &Path, bytes: &[u8]) -> Result<()> {
     let text = std::str::from_utf8(bytes)
         .map_err(|error| GraphError::Schema(format!("private state serialize: {error}")))?;
     let replacement = parse(text)?;
@@ -2265,7 +2288,7 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
-    fn existing_output_aliases_share_private_state_identity() {
+    fn existing_output_symlink_is_rejected() {
         use std::os::unix::fs::symlink;
 
         let root = TempDir::new().unwrap();
@@ -2277,14 +2300,13 @@ mod tests {
         fs::write(&output, "{}").unwrap();
         symlink("graph.json", &alias).unwrap();
 
-        let direct =
-            super::path_for_output(&output, &output_dir.join(".habitat-graph-state.json")).unwrap();
-        let through_alias = super::path_for_output(
+        let error = super::path_for_output(
             &alias,
             &output_dir.join(".Graph.json.habitat-graph-state.json"),
         )
-        .unwrap();
-        assert_eq!(direct, through_alias);
+        .unwrap_err();
+        assert_eq!(error.kind(), "guard");
+        assert!(error.to_string().contains("symbolic link"));
     }
 
     #[cfg(unix)]
@@ -3170,10 +3192,17 @@ mod tests {
         let renamed_state = super::path_for_full_build(&output, &legacy).unwrap();
         assert_ne!(renamed_state, expired_path);
         assert!(
-            !super::expired_revision_path(&renamed_state, &renamed_revision)
+            super::expired_revision_path(&renamed_state, &renamed_revision)
                 .unwrap()
                 .exists()
         );
+        assert!(super::path_for_output(&output, &legacy).is_err());
+        let renamed_public = super::generation(b"renamed rebuilt public");
+        super::write_full_build_state(
+            &renamed_state,
+            &super::serialize(&Graph::new(), &renamed_public, &semantic).unwrap(),
+        )
+        .unwrap();
         assert_eq!(
             super::path_for_output(&output, &legacy).unwrap(),
             renamed_state
@@ -3182,9 +3211,16 @@ mod tests {
         fs::write(git_dir.join("HEAD"), "ref: refs/heads/main\n").unwrap();
         let rebuilt_state = super::path_for_full_build(&output, &legacy).unwrap();
         assert_eq!(rebuilt_state, expired_path);
-        assert!(!super::expired_context_path(&rebuilt_state)
+        assert!(super::expired_context_path(&rebuilt_state)
             .unwrap()
             .exists());
+        assert!(super::path_for_output(&output, &legacy).is_err());
+        let rebuilt_public = super::generation(b"rebuilt public");
+        super::write_full_build_state(
+            &rebuilt_state,
+            &super::serialize(&Graph::new(), &rebuilt_public, &semantic).unwrap(),
+        )
+        .unwrap();
         assert_eq!(
             super::path_for_output(&output, &legacy).unwrap(),
             rebuilt_state
