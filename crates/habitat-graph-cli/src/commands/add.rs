@@ -299,13 +299,15 @@ pub fn merge_into_output(new_graph: Graph, out: &Path) -> Result<()> {
         &merged,
         &json,
     )?;
-    super::atomic_file::write(&out, json.as_bytes(), false, "public graph")?;
-    super::private_state::write_state(&state_path, &state_json)?;
-    super::private_state::remove(&add_journal_path(&state_path)?, "add journal")?;
-    if state_path != legacy_state_path {
-        super::private_state::remove(&legacy_state_path, "legacy private state")?;
-    }
-    Ok(())
+    commit_add_transaction(
+        &out,
+        &state_path,
+        &add_journal_path(&state_path)?,
+        Some(&legacy_state_path),
+        &json,
+        &state_json,
+        true,
+    )
 }
 
 #[cfg(test)]
@@ -489,12 +491,18 @@ fn write_add_journal(
     let before_public = before_public.map(public_graph_state);
     let after_public = public_graph_state(&habitat_graph_serve::from_node_link(public_json)?);
     let origin = super::private_state::context_identity_for_output(out)?;
-    let state_context = super::private_state::state_context_key(state_path);
-    if origin.as_ref().map(|identity| identity.key.as_str()) != state_context.as_deref() {
+    if origin.as_ref().map(|identity| identity.key.as_str())
+        != super::private_state::state_context_key(state_path).as_deref()
+    {
         return Err(GraphError::Guard(
             "Git context changed while preparing add transaction".to_owned(),
         ));
     }
+    super::private_state::ensure_state_context_current(
+        out,
+        state_path,
+        "add transaction preparation",
+    )?;
     let bytes = serde_json::to_vec_pretty(&serde_json::json!({
         "schema": ADD_JOURNAL_SCHEMA,
         "before_public": before_public,
@@ -508,6 +516,27 @@ fn write_add_journal(
     }))
     .map_err(|error| GraphError::Schema(format!("add journal serialize: {error}")))?;
     super::private_state::write(&add_journal_path(state_path)?, &bytes)
+}
+
+fn commit_add_transaction(
+    out: &Path,
+    state_path: &Path,
+    journal_path: &Path,
+    legacy_state_path: Option<&Path>,
+    public_json: &str,
+    state_json: &[u8],
+    write_public: bool,
+) -> Result<()> {
+    super::private_state::ensure_state_context_current(out, state_path, "add transaction commit")?;
+    if write_public {
+        super::atomic_file::write(out, public_json.as_bytes(), false, "public graph")?;
+    }
+    super::private_state::write_state(state_path, state_json)?;
+    super::private_state::remove(journal_path, "add journal")?;
+    if let Some(legacy) = legacy_state_path.filter(|legacy| *legacy != state_path) {
+        super::private_state::remove(legacy, "legacy private state")?;
+    }
+    Ok(())
 }
 
 fn parse_journal_graph(value: &serde_json::Value, field: &str) -> Result<Graph> {
@@ -778,22 +807,22 @@ fn recover_add_journal(out: &Path, state_path: &Path, public: &mut PublicOutput)
         ));
     }
     let intended_generation = content_generation(&journal.public_json);
-    if public.content_generation.as_deref() != Some(intended_generation.as_str()) {
-        super::atomic_file::write(
-            out,
-            journal.public_json.as_bytes(),
-            false,
-            "public graph recovery",
-        )?;
-    }
+    let write_public = public.content_generation.as_deref() != Some(intended_generation.as_str());
     let intended_semantic_generation = super::private_state::semantic_generation(&intended_graph)?;
     let state_json = super::private_state::serialize(
         &journal.graph,
         &intended_generation,
         &intended_semantic_generation,
     )?;
-    super::private_state::write_state(state_path, &state_json)?;
-    super::private_state::remove(&journal_path, "add journal")?;
+    commit_add_transaction(
+        out,
+        state_path,
+        &journal_path,
+        None,
+        &journal.public_json,
+        &state_json,
+        write_public,
+    )?;
     *public = PublicOutput {
         graph: Some(intended_graph),
         content_generation: Some(intended_generation),
@@ -1620,6 +1649,52 @@ mod tests {
         assert_eq!(error.kind(), "guard");
         assert!(error.to_string().contains("Git context changed"));
         assert!(!super::add_journal_path(&state_path).unwrap().exists());
+    }
+
+    #[test]
+    fn add_commit_rechecks_context_after_journal_creation() {
+        let d = tdir();
+        init_git(&d);
+        commit_git(&d, "first");
+        let out = d.join("public/graph.json");
+        fs::create_dir_all(out.parent().unwrap()).unwrap();
+        let state_path = super::private_state_path(&out).unwrap();
+        let graph = Graph::new();
+        let public_json = habitat_graph_export::to_node_link(&graph).unwrap();
+        let public_graph = habitat_graph_serve::from_node_link(&public_json).unwrap();
+        let state_json = super::super::private_state::serialize(
+            &graph,
+            &super::content_generation(&public_json),
+            &super::super::private_state::semantic_generation(&public_graph).unwrap(),
+        )
+        .unwrap();
+        let before_checksum = super::private_graph_generation(&graph).unwrap();
+        super::write_add_journal(
+            &out,
+            &state_path,
+            None,
+            &before_checksum,
+            &graph,
+            &public_json,
+        )
+        .unwrap();
+        let journal_path = super::add_journal_path(&state_path).unwrap();
+
+        commit_git(&d, "second");
+
+        let error = super::commit_add_transaction(
+            &out,
+            &state_path,
+            &journal_path,
+            None,
+            &public_json,
+            &state_json,
+            true,
+        )
+        .unwrap_err();
+        assert_eq!(error.kind(), "guard");
+        assert!(!out.exists());
+        assert!(journal_path.exists());
     }
 
     #[test]

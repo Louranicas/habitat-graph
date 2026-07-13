@@ -10,7 +10,7 @@
 //! Output locks serialize writers, while add/update journals bind interrupted transactions to their
 //! originating context, lineage, public generations, and private checksums before retrying them.
 
-use std::collections::{BTreeSet, HashMap, HashSet};
+use std::collections::{BTreeSet, HashMap};
 use std::ffi::{OsStr, OsString};
 use std::io::{BufRead as _, Read as _};
 use std::path::{Path, PathBuf};
@@ -28,6 +28,8 @@ const CONTEXT_SEPARATOR: &str = ".context-";
 const CONTEXT_REVISION_SEPARATOR: &str = ".context-revision-";
 const EXPIRED_CONTEXT_SEPARATOR: &str = ".expired-context-";
 const EXPIRED_REVISION_SEPARATOR: &str = ".expired-revision-";
+const EXPIRATION_INDEX_SUFFIX: &str = ".expirations";
+const EXPIRATION_INDEX_SCHEMA: &str = "habitat-graph.expirations.v1";
 const MIGRATION_CONFLICT_SEPARATOR: &str = ".migration-conflict-";
 const MIGRATION_CONFLICT_DIRECTORY: &str = ".migration-conflicts";
 const ADD_JOURNAL_SUFFIX: &str = ".add-journal";
@@ -49,6 +51,7 @@ pub(super) struct ContextIdentity {
     pub(super) key: String,
     pub(super) lineage: String,
     revision: String,
+    commit: Option<String>,
     unborn_predecessor: Option<(String, String)>,
 }
 
@@ -125,7 +128,7 @@ fn path_for_output_with_expiration(
         ensure_context_not_expired(&state_path)?;
         ensure_revision_not_expired(&state_path, &context.revision)?;
     }
-    write_context_revision(&state_path, &context.revision)?;
+    write_context_revision(&state_path, &context.revision, context.commit.as_deref())?;
     let mut first_error = None;
     for result in [
         migrate_family(&unscoped_state_path, &state_path, "unscoped private state"),
@@ -175,7 +178,40 @@ pub(super) fn resolve_output_file(path: &Path) -> Result<PathBuf> {
             "output path must not be a symbolic link: {}",
             resolved.display()
         ))),
-        Ok(_) => Ok(resolved),
+        Ok(metadata) => {
+            if !metadata.file_type().is_file() {
+                return Err(GraphError::Guard(format!(
+                    "output path is not a regular file: {}",
+                    resolved.display()
+                )));
+            }
+            let entries = std::fs::read_dir(&parent)
+                .map_err(|error| GraphError::Io(format!("list output directory: {error}")))?;
+            let mut matches = Vec::new();
+            for entry in entries {
+                let entry = entry
+                    .map_err(|error| GraphError::Io(format!("list output directory: {error}")))?;
+                let candidate_metadata =
+                    std::fs::symlink_metadata(entry.path()).map_err(|error| {
+                        GraphError::Io(format!("inspect output directory entry: {error}"))
+                    })?;
+                if candidate_metadata.file_type().is_file()
+                    && same_file(&metadata, &candidate_metadata)
+                {
+                    if entry.file_name() == filename {
+                        return Ok(entry.path());
+                    }
+                    matches.push(entry.path());
+                }
+            }
+            if matches.len() != 1 {
+                return Err(GraphError::Guard(format!(
+                    "output path has an ambiguous filesystem identity: {}",
+                    resolved.display()
+                )));
+            }
+            Ok(matches.remove(0))
+        }
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(resolved),
         Err(error) => Err(GraphError::Io(format!(
             "inspect output path {}: {error}",
@@ -199,6 +235,22 @@ pub(super) fn context_identity_for_output(output: &Path) -> Result<Option<Contex
         return Ok(None);
     };
     git_context_identity(&git_dir).map(Some)
+}
+
+pub(super) fn ensure_state_context_current(
+    output: &Path,
+    state_path: &Path,
+    operation: &str,
+) -> Result<()> {
+    let current = context_identity_for_output(output)?;
+    if current.as_ref().map(|identity| identity.key.as_str())
+        != state_context_key(state_path).as_deref()
+    {
+        return Err(GraphError::Guard(format!(
+            "Git context changed during {operation}"
+        )));
+    }
+    Ok(())
 }
 
 #[derive(Debug)]
@@ -315,16 +367,21 @@ pub(super) fn acquire_output_lock(state_path: &Path) -> Result<OutputTransaction
 fn output_lock_path(state_path: &Path) -> Result<PathBuf> {
     let filename = state_path
         .file_name()
-        .and_then(|filename| filename.to_str())
-        .ok_or_else(|| GraphError::Io("private state path has no UTF-8 filename".to_owned()))?;
-    let base = if state_context_key(state_path).is_some() {
-        filename
-            .split_once(CONTEXT_SEPARATOR)
-            .map_or(filename, |(key, _)| key)
+        .ok_or_else(|| GraphError::Io("private state path has no filename".to_owned()))?;
+    let mut base = if state_context_key(state_path).is_some() {
+        let filename = filename.to_str().ok_or_else(|| {
+            GraphError::Io("context-scoped private state filename is not UTF-8".to_owned())
+        })?;
+        OsString::from(
+            filename
+                .split_once(CONTEXT_SEPARATOR)
+                .map_or(filename, |(key, _)| key),
+        )
     } else {
-        filename
+        OsString::from(filename)
     };
-    Ok(state_path.with_file_name(format!("{base}{OUTPUT_LOCK_SUFFIX}")))
+    base.push(OUTPUT_LOCK_SUFFIX);
+    Ok(state_path.with_file_name(base))
 }
 
 pub(super) fn generation(bytes: &[u8]) -> String {
@@ -521,18 +578,12 @@ pub(super) fn private_checksum_status_at_path(
 
 #[derive(Default)]
 struct ContextAncestry {
-    verified: bool,
-    known: HashSet<PathBuf>,
-    ancestors: HashSet<PathBuf>,
+    statuses: HashMap<PathBuf, bool>,
 }
 
 impl ContextAncestry {
     fn status(&self, path: &Path) -> Option<bool> {
-        if !self.verified || !self.known.contains(path) {
-            None
-        } else {
-            Some(self.ancestors.contains(path))
-        }
+        self.statuses.get(path).copied()
     }
 }
 
@@ -556,13 +607,12 @@ fn context_ancestry(path: &Path, candidates: &[PathBuf]) -> Result<ContextAncest
         return Ok(ContextAncestry::default());
     };
     let current_identity = git_context_identity(&git_dir)?;
-    if current_identity.revision != expected_head
+    if current_identity.revision != expected_head.key
         || state_context_key(path).as_deref() != Some(current_identity.key.as_str())
     {
         return Ok(ContextAncestry::default());
     }
-    let mut revisions: HashMap<String, Vec<PathBuf>> = HashMap::new();
-    let mut direct_ancestors = HashSet::new();
+    let mut ancestry = ContextAncestry::default();
     for candidate in candidates {
         if candidate == path {
             continue;
@@ -571,70 +621,48 @@ fn context_ancestry(path: &Path, candidates: &[PathBuf]) -> Result<ContextAncest
             if current_identity.unborn_predecessor.as_ref().is_some_and(
                 |(context, predecessor_revision)| {
                     state_context_key(candidate).as_deref() == Some(context.as_str())
-                        && revision == *predecessor_revision
+                        && revision.key == *predecessor_revision
                 },
             ) {
-                direct_ancestors.insert(candidate.clone());
+                ancestry.statuses.insert(candidate.clone(), true);
+                continue;
             }
-            revisions
-                .entry(revision)
-                .or_default()
-                .push(candidate.clone());
+            let (Some(candidate_commit), Some(current_commit)) = (
+                revision.commit.as_deref(),
+                current_identity.commit.as_deref(),
+            ) else {
+                continue;
+            };
+            let Ok(status) = std::process::Command::new("git")
+                .arg("--git-dir")
+                .arg(&git_dir)
+                .args([
+                    "merge-base",
+                    "--is-ancestor",
+                    candidate_commit,
+                    current_commit,
+                ])
+                .stdout(std::process::Stdio::null())
+                .stderr(std::process::Stdio::null())
+                .status()
+            else {
+                continue;
+            };
+            match status.code() {
+                Some(0) => {
+                    ancestry.statuses.insert(candidate.clone(), true);
+                }
+                Some(1) => {
+                    ancestry.statuses.insert(candidate.clone(), false);
+                }
+                _ => {}
+            }
         }
     }
-    if revisions.is_empty() {
+    if git_context_identity(&git_dir)? != current_identity {
         return Ok(ContextAncestry::default());
     }
-
-    let Ok(mut child) = std::process::Command::new("git")
-        .arg("--git-dir")
-        .arg(&git_dir)
-        .args(["rev-list", "HEAD"])
-        .stdout(std::process::Stdio::piped())
-        .stderr(std::process::Stdio::null())
-        .spawn()
-    else {
-        return Ok(ContextAncestry::default());
-    };
-    let stdout = child
-        .stdout
-        .take()
-        .ok_or_else(|| GraphError::Io("read Git ancestry output".to_owned()))?;
-    let mut ancestors = direct_ancestors;
-    let mut observed_head = None;
-    let mut line = String::new();
-    let mut reader = std::io::BufReader::new(stdout);
-    loop {
-        line.clear();
-        let read = reader
-            .read_line(&mut line)
-            .map_err(|error| GraphError::Io(format!("read Git ancestry: {error}")))?;
-        if read == 0 {
-            break;
-        }
-        let commit = line.trim();
-        if !is_object_id(commit) || read > 130 {
-            let _ = child.kill();
-            let _ = child.wait();
-            return Ok(ContextAncestry::default());
-        }
-        let revision = generation(format!("commit:{}", commit.to_ascii_lowercase()).as_bytes());
-        observed_head.get_or_insert_with(|| revision.clone());
-        if let Some(paths) = revisions.get(&revision) {
-            ancestors.extend(paths.iter().cloned());
-        }
-    }
-    let status = child
-        .wait()
-        .map_err(|error| GraphError::Io(format!("wait for Git ancestry: {error}")))?;
-    if !status.success() || observed_head.as_deref() != Some(expected_head.as_str()) {
-        return Ok(ContextAncestry::default());
-    }
-    Ok(ContextAncestry {
-        verified: true,
-        known: revisions.into_values().flatten().collect(),
-        ancestors,
-    })
+    Ok(ancestry)
 }
 
 pub(super) fn context_is_verified_ancestor(ancestor: &Path, current: &Path) -> Result<bool> {
@@ -783,8 +811,17 @@ pub(super) fn write_state(path: &Path, bytes: &[u8]) -> Result<()> {
 
 #[cfg(unix)]
 pub(super) fn commit_full_build_state(state: &FullBuildState, bytes: &[u8]) -> Result<()> {
+    commit_full_build_state_with(state, || write_full_build_state(state.path(), bytes))
+}
+
+#[cfg(unix)]
+fn commit_full_build_state_with(
+    state: &FullBuildState,
+    write_state: impl FnOnce() -> Result<()>,
+) -> Result<()> {
     state.ensure_current()?;
-    write_full_build_state(state.path(), bytes)
+    write_state()?;
+    state.ensure_current()
 }
 
 fn write_full_build_state(path: &Path, bytes: &[u8]) -> Result<()> {
@@ -797,7 +834,7 @@ fn write_full_build_state(path: &Path, bytes: &[u8]) -> Result<()> {
     }
     write_state_contents(path, bytes)?;
     if let Some(revision) = revision {
-        remove_expiration_markers(path, &revision)?;
+        remove_expiration_markers(path, &revision.key)?;
     }
     Ok(())
 }
@@ -1041,6 +1078,19 @@ fn expired_context_path(path: &Path) -> Option<PathBuf> {
     Some(path.with_file_name(format!("{key}{EXPIRED_CONTEXT_SEPARATOR}{context}")))
 }
 
+fn output_state_key(path: &Path) -> Option<&str> {
+    let filename = path.file_name()?.to_str()?;
+    let (key, context) = filename.split_once(CONTEXT_SEPARATOR)?;
+    (is_generation(key) && context.strip_suffix(".json").is_some_and(is_generation)).then_some(key)
+}
+
+fn expiration_index_path(path: &Path) -> Option<PathBuf> {
+    Some(path.with_file_name(format!(
+        "{}{EXPIRATION_INDEX_SUFFIX}",
+        output_state_key(path)?
+    )))
+}
+
 fn marker_exists(path: &Path, context: &str) -> Result<bool> {
     let metadata = match std::fs::symlink_metadata(path) {
         Ok(metadata) => metadata,
@@ -1057,14 +1107,6 @@ fn marker_exists(path: &Path, context: &str) -> Result<bool> {
     Ok(true)
 }
 
-fn write_marker(path: &Path, context: &str) -> Result<()> {
-    if marker_exists(path, context)? {
-        Ok(())
-    } else {
-        write(path, b"")
-    }
-}
-
 fn context_revision_prefix(path: &Path) -> Option<String> {
     let filename = path.file_name()?.to_str()?;
     let (key, context) = filename.split_once(CONTEXT_SEPARATOR)?;
@@ -1075,7 +1117,35 @@ fn context_revision_prefix(path: &Path) -> Option<String> {
     Some(format!("{key}{CONTEXT_REVISION_SEPARATOR}{context}-"))
 }
 
-fn context_revision(path: &Path) -> Result<Option<String>> {
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct ContextRevision {
+    key: String,
+    commit: Option<String>,
+}
+
+fn revision_marker_commit(path: &Path, revision: &str) -> Result<Option<String>> {
+    let text = read_text(path, "private state revision marker")?
+        .ok_or_else(|| GraphError::Io("private state revision marker disappeared".to_owned()))?;
+    if text.is_empty() {
+        return Ok(None);
+    }
+    if !is_object_id(&text) {
+        return Err(GraphError::Guard(format!(
+            "private state revision marker is invalid: {}",
+            path.display()
+        )));
+    }
+    let commit = text.to_ascii_lowercase();
+    if generation(format!("commit:{commit}").as_bytes()) != revision {
+        return Err(GraphError::Guard(format!(
+            "private state revision marker does not match its filename: {}",
+            path.display()
+        )));
+    }
+    Ok(Some(commit))
+}
+
+fn context_revision(path: &Path) -> Result<Option<ContextRevision>> {
     let Some(prefix) = context_revision_prefix(path) else {
         return Ok(None);
     };
@@ -1085,30 +1155,36 @@ fn context_revision(path: &Path) -> Result<Option<String>> {
         .unwrap_or_else(|| Path::new("."));
     let entries = std::fs::read_dir(parent)
         .map_err(|error| GraphError::Io(format!("list private state revisions: {error}")))?;
-    let mut revisions = BTreeSet::new();
+    let mut stored_revision = None;
     for entry in entries {
         let entry = entry
             .map_err(|error| GraphError::Io(format!("list private state revisions: {error}")))?;
         let filename = entry.file_name();
-        let Some(revision) = filename
+        let Some(revision_key) = filename
             .to_str()
             .and_then(|name| name.strip_prefix(&prefix))
         else {
             continue;
         };
-        if !is_generation(revision) {
+        if !is_generation(revision_key) {
             continue;
         }
-        marker_exists(&entry.path(), "private state revision marker")?;
-        revisions.insert(revision.to_owned());
+        let candidate = ContextRevision {
+            key: revision_key.to_owned(),
+            commit: revision_marker_commit(&entry.path(), revision_key)?,
+        };
+        if stored_revision
+            .as_ref()
+            .is_some_and(|stored| stored != &candidate)
+        {
+            return Err(GraphError::Guard(format!(
+                "private state context has conflicting revision provenance: {}",
+                path.display()
+            )));
+        }
+        stored_revision = Some(candidate);
     }
-    if revisions.len() > 1 {
-        return Err(GraphError::Guard(format!(
-            "private state context has conflicting revision provenance: {}",
-            path.display()
-        )));
-    }
-    Ok(revisions.pop_first())
+    Ok(stored_revision)
 }
 
 fn context_revision_path(path: &Path, revision: &str) -> Option<PathBuf> {
@@ -1118,11 +1194,23 @@ fn context_revision_path(path: &Path, revision: &str) -> Option<PathBuf> {
     Some(path.with_file_name(format!("{}{revision}", context_revision_prefix(path)?)))
 }
 
-fn write_context_revision(path: &Path, revision: &str) -> Result<()> {
-    if context_revision(path)?
-        .as_deref()
-        .is_some_and(|stored| stored != revision)
-    {
+fn write_context_revision(path: &Path, revision: &str, commit: Option<&str>) -> Result<()> {
+    let commit = commit.map(str::to_ascii_lowercase);
+    if commit.as_deref().is_some_and(|commit| {
+        !is_object_id(commit) || generation(format!("commit:{commit}").as_bytes()) != revision
+    }) {
+        return Err(GraphError::Guard(
+            "private state context commit is invalid".to_owned(),
+        ));
+    }
+    let existing = context_revision(path)?;
+    if existing.as_ref().is_some_and(|stored| {
+        stored.key != revision
+            || stored
+                .commit
+                .as_ref()
+                .is_some_and(|stored| Some(stored) != commit.as_ref())
+    }) {
         return Err(GraphError::Guard(format!(
             "private state context revision changed: {}",
             path.display()
@@ -1134,7 +1222,12 @@ fn write_context_revision(path: &Path, revision: &str) -> Result<()> {
             path.display()
         ))
     })?;
-    write_marker(&marker, "private state revision marker")
+    if existing.is_some()
+        && (commit.is_none() || existing.and_then(|stored| stored.commit).is_some())
+    {
+        return Ok(());
+    }
+    write(&marker, commit.as_deref().unwrap_or_default().as_bytes())
 }
 
 fn expired_revision_path(path: &Path, revision: &str) -> Option<PathBuf> {
@@ -1150,6 +1243,12 @@ fn expired_revision_path(path: &Path, revision: &str) -> Option<PathBuf> {
 }
 
 fn ensure_revision_not_expired(path: &Path, revision: &str) -> Result<()> {
+    if load_expiration_index(path)?.revisions.contains(revision) {
+        return Err(GraphError::Guard(format!(
+            "private state for this Git revision has expired: {}",
+            path.display()
+        )));
+    }
     let Some(expired) = expired_revision_path(path, revision) else {
         return Ok(());
     };
@@ -1163,36 +1262,23 @@ fn ensure_revision_not_expired(path: &Path, revision: &str) -> Result<()> {
 }
 
 fn remove_expiration_markers(path: &Path, revision: &str) -> Result<()> {
-    if let Some(marker) = expired_context_path(path) {
-        remove(&marker, "expired private state context marker")?;
-    }
-    if let Some(marker) = expired_revision_path(path, revision) {
-        remove(&marker, "expired private state revision marker")?;
-    }
-    Ok(())
-}
-
-fn mark_context_revision_expired(path: &Path) -> Result<()> {
-    let revision = context_revision(path)?.ok_or_else(|| {
+    let context = state_context_key(path).ok_or_else(|| {
         GraphError::Guard(format!(
-            "private state context lacks revision provenance: {}",
+            "cannot admit unscoped private state context: {}",
             path.display()
         ))
     })?;
-    let expired = expired_revision_path(path, &revision).ok_or_else(|| {
-        GraphError::Guard(format!(
-            "cannot expire unscoped private state revision: {}",
-            path.display()
-        ))
-    })?;
-    write_marker(&expired, "expired private state revision marker")
+    update_expiration_index(path, |index| {
+        index.contexts.remove(&context);
+        index.revisions.remove(revision);
+    })
 }
 
 fn remove_context_revision(path: &Path) -> Result<()> {
     let Some(revision) = context_revision(path)? else {
         return Ok(());
     };
-    let marker = context_revision_path(path, &revision).ok_or_else(|| {
+    let marker = context_revision_path(path, &revision.key).ok_or_else(|| {
         GraphError::Guard(format!(
             "cannot remove unscoped private state revision: {}",
             path.display()
@@ -1212,20 +1298,179 @@ fn ensure_context_not_expired(path: &Path) -> Result<()> {
 }
 
 fn context_is_expired(path: &Path) -> Result<bool> {
+    let Some(context) = state_context_key(path) else {
+        return Ok(false);
+    };
+    if load_expiration_index(path)?.contexts.contains(&context) {
+        return Ok(true);
+    }
     let Some(expired) = expired_context_path(path) else {
         return Ok(false);
     };
     marker_exists(&expired, "expired private state context marker")
 }
 
-fn mark_context_expired(path: &Path) -> Result<()> {
-    let Some(expired) = expired_context_path(path) else {
-        return Err(GraphError::Guard(format!(
+#[derive(Default)]
+struct ExpirationIndex {
+    compacted: bool,
+    contexts: BTreeSet<String>,
+    revisions: BTreeSet<String>,
+}
+
+fn expiration_values(value: &serde_json::Value, field: &str) -> Result<BTreeSet<String>> {
+    let values = value[field].as_array().ok_or_else(|| {
+        GraphError::Schema(format!(
+            "private state expiration index `{field}` is invalid"
+        ))
+    })?;
+    let mut generations = BTreeSet::new();
+    for value in values {
+        let generation = value
+            .as_str()
+            .filter(|value| is_generation(value))
+            .ok_or_else(|| {
+                GraphError::Schema(format!(
+                    "private state expiration index `{field}` is invalid"
+                ))
+            })?;
+        generations.insert(generation.to_owned());
+    }
+    Ok(generations)
+}
+
+fn load_expiration_index(path: &Path) -> Result<ExpirationIndex> {
+    let Some(index_path) = expiration_index_path(path) else {
+        return Ok(ExpirationIndex::default());
+    };
+    let Some(text) = read_text(&index_path, "private state expiration index")? else {
+        return Ok(ExpirationIndex::default());
+    };
+    let value: serde_json::Value = serde_json::from_str(&text)
+        .map_err(|error| GraphError::Schema(format!("private state expiration index: {error}")))?;
+    if value["schema"] != EXPIRATION_INDEX_SCHEMA {
+        return Err(GraphError::Schema(
+            "unsupported private state expiration index schema".to_owned(),
+        ));
+    }
+    Ok(ExpirationIndex {
+        compacted: value
+            .get("compacted")
+            .and_then(serde_json::Value::as_bool)
+            .unwrap_or(false),
+        contexts: expiration_values(&value, "contexts")?,
+        revisions: expiration_values(&value, "revisions")?,
+    })
+}
+
+fn legacy_expiration_markers(path: &Path) -> Result<(ExpirationIndex, Vec<PathBuf>)> {
+    let Some(key) = output_state_key(path) else {
+        return Ok((ExpirationIndex::default(), Vec::new()));
+    };
+    let parent = path
+        .parent()
+        .filter(|parent| !parent.as_os_str().is_empty())
+        .unwrap_or_else(|| Path::new("."));
+    let entries = match std::fs::read_dir(parent) {
+        Ok(entries) => entries,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            return Ok((ExpirationIndex::default(), Vec::new()))
+        }
+        Err(error) => {
+            return Err(GraphError::Io(format!(
+                "list private state expiration markers: {error}"
+            )))
+        }
+    };
+    let context_prefix = format!("{key}{EXPIRED_CONTEXT_SEPARATOR}");
+    let revision_prefix = format!("{key}{EXPIRED_REVISION_SEPARATOR}");
+    let mut index = ExpirationIndex::default();
+    let mut markers = Vec::new();
+    for entry in entries {
+        let entry = entry.map_err(|error| {
+            GraphError::Io(format!("list private state expiration markers: {error}"))
+        })?;
+        let filename = entry.file_name();
+        let Some(filename) = filename.to_str() else {
+            continue;
+        };
+        let value = if let Some(context) = filename.strip_prefix(&context_prefix) {
+            if !is_generation(context) {
+                continue;
+            }
+            index.contexts.insert(context.to_owned());
+            context
+        } else if let Some(revision) = filename.strip_prefix(&revision_prefix) {
+            if !is_generation(revision) {
+                continue;
+            }
+            index.revisions.insert(revision.to_owned());
+            revision
+        } else {
+            continue;
+        };
+        debug_assert!(is_generation(value));
+        marker_exists(&entry.path(), "private state expiration marker")?;
+        markers.push(entry.path());
+    }
+    Ok((index, markers))
+}
+
+fn write_expiration_index(path: &Path, index: &ExpirationIndex) -> Result<()> {
+    let index_path = expiration_index_path(path).ok_or_else(|| {
+        GraphError::Guard(format!(
+            "cannot update unscoped private state expiration index: {}",
+            path.display()
+        ))
+    })?;
+    if !index.compacted && index.contexts.is_empty() && index.revisions.is_empty() {
+        return remove(&index_path, "private state expiration index");
+    }
+    let bytes = serde_json::to_vec_pretty(&serde_json::json!({
+        "schema": EXPIRATION_INDEX_SCHEMA,
+        "compacted": index.compacted,
+        "contexts": index.contexts,
+        "revisions": index.revisions,
+    }))
+    .map_err(|error| GraphError::Schema(format!("private state expiration index: {error}")))?;
+    write(&index_path, &bytes)
+}
+
+fn update_expiration_index(path: &Path, update: impl FnOnce(&mut ExpirationIndex)) -> Result<()> {
+    let mut index = load_expiration_index(path)?;
+    let markers = if index.compacted {
+        Vec::new()
+    } else {
+        let (legacy, markers) = legacy_expiration_markers(path)?;
+        index.contexts.extend(legacy.contexts);
+        index.revisions.extend(legacy.revisions);
+        markers
+    };
+    index.compacted = true;
+    update(&mut index);
+    write_expiration_index(path, &index)?;
+    for marker in markers {
+        remove(&marker, "legacy private state expiration marker")?;
+    }
+    Ok(())
+}
+
+fn expire_context(path: &Path) -> Result<()> {
+    let context = state_context_key(path).ok_or_else(|| {
+        GraphError::Guard(format!(
             "cannot expire unscoped private state context: {}",
             path.display()
-        )));
-    };
-    write_marker(&expired, "expired private state context marker")
+        ))
+    })?;
+    let revision = context_revision(path)?.ok_or_else(|| {
+        GraphError::Guard(format!(
+            "private state context lacks revision provenance: {}",
+            path.display()
+        ))
+    })?;
+    update_expiration_index(path, |index| {
+        index.contexts.insert(context);
+        index.revisions.insert(revision.key);
+    })
 }
 
 fn context_member_key<'a>(filename: &'a str, prefix: &str) -> Option<&'a str> {
@@ -1239,6 +1484,9 @@ fn context_member_key<'a>(filename: &'a str, prefix: &str) -> Option<&'a str> {
 }
 
 fn prune_contexts(path: &Path) -> Result<()> {
+    if expiration_index_path(path).is_some() {
+        update_expiration_index(path, |_| {})?;
+    }
     let candidates = context_state_candidates(path)?;
     if candidates.len() <= MAX_CONTEXTS_PER_OUTPUT {
         return Ok(());
@@ -1287,8 +1535,7 @@ fn prune_contexts(path: &Path) -> Result<()> {
         )));
     }
     for (_, candidate) in removable.into_iter().take(remove_count) {
-        mark_context_revision_expired(&candidate)?;
-        mark_context_expired(&candidate)?;
+        expire_context(&candidate)?;
         remove_family(&candidate, "expired private state context")?;
         remove_context_revision(&candidate)?;
     }
@@ -1395,7 +1642,7 @@ fn remove_family(path: &Path, context: &str) -> Result<()> {
 }
 
 #[cfg(any(test, not(unix)))]
-fn remove_state_families_for_output(output: &Path, legacy: &Path) -> Result<()> {
+fn remove_unsupported_state_families(output: &Path, legacy: &Path) -> Result<()> {
     remove_family(legacy, "unsupported legacy private state")?;
     let output = resolve_output_file(output)?;
     let parent = output
@@ -1405,23 +1652,145 @@ fn remove_state_families_for_output(output: &Path, legacy: &Path) -> Result<()> 
         return Ok(());
     };
     let state_dir = git_dir.join("habitat-graph").join("state");
-    let key = output_key(&output);
-    let unscoped = state_dir.join(format!("{key}.json"));
-    remove_family(&unscoped, "unsupported Git private state")?;
-
-    let context_probe = state_dir.join(format!(
-        "{key}{CONTEXT_SEPARATOR}{}.json",
-        generation(b"unsupported context probe")
-    ));
-    for candidate in context_state_candidates(&context_probe)? {
-        remove_family(&candidate, "unsupported Git private state")?;
-    }
-    Ok(())
+    remove_repository_private_state(&state_dir)
 }
 
 #[cfg(not(unix))]
 pub(super) fn remove_unsupported_state(output: &Path, legacy: &Path) -> Result<()> {
-    remove_state_families_for_output(output, legacy)
+    remove_unsupported_state_families(output, legacy)
+}
+
+#[cfg(any(test, not(unix)))]
+fn repository_state_filename(filename: &str) -> bool {
+    let Some(key) = filename.get(..64).filter(|key| is_generation(key)) else {
+        return false;
+    };
+    let Some(rest) = filename.get(key.len()..) else {
+        return false;
+    };
+    if let Some(suffix) = rest.strip_prefix(".json") {
+        return is_family_member_suffix(suffix);
+    }
+    if let Some(context) = rest.strip_prefix(CONTEXT_SEPARATOR) {
+        let Some(context_key) = context.get(..64).filter(|value| is_generation(value)) else {
+            return false;
+        };
+        return context
+            .get(context_key.len()..)
+            .and_then(|value| value.strip_prefix(".json"))
+            .is_some_and(is_family_member_suffix);
+    }
+    if let Some(revision) = rest.strip_prefix(CONTEXT_REVISION_SEPARATOR) {
+        let Some(context) = revision.get(..64).filter(|value| is_generation(value)) else {
+            return false;
+        };
+        return revision
+            .get(context.len()..)
+            .and_then(|value| value.strip_prefix('-'))
+            .is_some_and(is_generation);
+    }
+    if let Some(context) = rest.strip_prefix(EXPIRED_CONTEXT_SEPARATOR) {
+        return is_generation(context);
+    }
+    if let Some(revision) = rest.strip_prefix(EXPIRED_REVISION_SEPARATOR) {
+        return is_generation(revision);
+    }
+    rest == EXPIRATION_INDEX_SUFFIX
+}
+
+#[cfg(any(test, not(unix)))]
+fn repository_conflict_filename(filename: &str) -> bool {
+    let mut parts = filename.split('-');
+    parts.next().is_some_and(is_generation)
+        && parts.next().is_some_and(is_generation)
+        && parts.next().is_some_and(is_generation)
+        && parts.next().is_none()
+}
+
+#[cfg(any(test, not(unix)))]
+fn remove_repository_private_state(state_dir: &Path) -> Result<()> {
+    let metadata = match std::fs::symlink_metadata(state_dir) {
+        Ok(metadata) => metadata,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(error) => {
+            return Err(GraphError::Io(format!(
+                "inspect unsupported Git private state directory: {error}"
+            )))
+        }
+    };
+    if !metadata.file_type().is_dir() {
+        return Err(GraphError::Guard(format!(
+            "unsupported Git private state path is not a directory: {}",
+            state_dir.display()
+        )));
+    }
+    let entries = std::fs::read_dir(state_dir)
+        .map_err(|error| GraphError::Io(format!("list unsupported Git private state: {error}")))?;
+    for entry in entries {
+        let entry = entry.map_err(|error| {
+            GraphError::Io(format!("list unsupported Git private state: {error}"))
+        })?;
+        let filename = entry.file_name();
+        if !filename.to_str().is_some_and(repository_state_filename) {
+            continue;
+        }
+        let metadata = std::fs::symlink_metadata(entry.path()).map_err(|error| {
+            GraphError::Io(format!("inspect unsupported Git private state: {error}"))
+        })?;
+        if !metadata.file_type().is_file() {
+            return Err(GraphError::Guard(format!(
+                "unsupported Git private state is not a regular file: {}",
+                entry.path().display()
+            )));
+        }
+        remove(&entry.path(), "unsupported Git private state")?;
+    }
+
+    let conflicts = state_dir.join(MIGRATION_CONFLICT_DIRECTORY);
+    let metadata = match std::fs::symlink_metadata(&conflicts) {
+        Ok(metadata) => metadata,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(error) => {
+            return Err(GraphError::Io(format!(
+                "inspect unsupported Git private state conflicts: {error}"
+            )))
+        }
+    };
+    if !metadata.file_type().is_dir() {
+        return Err(GraphError::Guard(format!(
+            "unsupported Git private state conflict path is not a directory: {}",
+            conflicts.display()
+        )));
+    }
+    let entries = std::fs::read_dir(&conflicts).map_err(|error| {
+        GraphError::Io(format!(
+            "list unsupported Git private state conflicts: {error}"
+        ))
+    })?;
+    for entry in entries {
+        let entry = entry.map_err(|error| {
+            GraphError::Io(format!(
+                "list unsupported Git private state conflicts: {error}"
+            ))
+        })?;
+        let filename = entry.file_name();
+        if !filename.to_str().is_some_and(repository_conflict_filename) {
+            continue;
+        }
+        let metadata = std::fs::symlink_metadata(entry.path()).map_err(|error| {
+            GraphError::Io(format!(
+                "inspect unsupported Git private state conflict: {error}"
+            ))
+        })?;
+        if !metadata.file_type().is_file() {
+            return Err(GraphError::Guard(format!(
+                "unsupported Git private state conflict is not a regular file: {}",
+                entry.path().display()
+            )));
+        }
+        remove(&entry.path(), "unsupported Git private state conflict")?;
+    }
+    Ok(())
 }
 
 fn family_members(path: &Path) -> Result<Vec<(PathBuf, String)>> {
@@ -1766,7 +2135,17 @@ fn same_file(left: &std::fs::Metadata, right: &std::fs::Metadata) -> bool {
     left.dev() == right.dev() && left.ino() == right.ino()
 }
 
-#[cfg(not(unix))]
+#[cfg(windows)]
+fn same_file(left: &std::fs::Metadata, right: &std::fs::Metadata) -> bool {
+    use std::os::windows::fs::MetadataExt as _;
+
+    left.volume_serial_number().is_some()
+        && left.volume_serial_number() == right.volume_serial_number()
+        && left.file_index().is_some()
+        && left.file_index() == right.file_index()
+}
+
+#[cfg(not(any(unix, windows)))]
 fn same_file(_left: &std::fs::Metadata, _right: &std::fs::Metadata) -> bool {
     true
 }
@@ -1885,15 +2264,17 @@ fn valid_git_dir(path: &Path) -> Result<bool> {
 }
 
 fn git_context_identity(git_dir: &Path) -> Result<ContextIdentity> {
+    ensure_supported_reference_backend(git_dir)?;
     let head = git_dir.join("HEAD");
     let identity = read_git_control_line(&head, "Git HEAD")?
         .ok_or_else(|| GraphError::Guard("Git HEAD is missing".to_owned()))?;
-    let (context, lineage, revision, unborn_predecessor) = if is_object_id(&identity) {
+    let (context, lineage, revision, commit, unborn_predecessor) = if is_object_id(&identity) {
         let commit = identity.to_ascii_lowercase();
         (
             format!("detached:{commit}"),
             format!("detached:{commit}"),
             format!("commit:{commit}"),
+            Some(commit),
             None,
         )
     } else {
@@ -1902,7 +2283,7 @@ fn git_context_identity(git_dir: &Path) -> Result<ContextIdentity> {
             .map(str::trim)
             .filter(|reference| valid_git_reference(reference))
             .ok_or_else(|| GraphError::Guard("invalid Git HEAD".to_owned()))?;
-        let (context, revision, unborn_predecessor) =
+        let (context, revision, commit, unborn_predecessor) =
             match resolve_git_reference(git_dir, reference)? {
                 Some(commit) => {
                     let predecessor_context =
@@ -1911,6 +2292,7 @@ fn git_context_identity(git_dir: &Path) -> Result<ContextIdentity> {
                     (
                         format!("ref:{reference}\ncommit:{commit}"),
                         format!("commit:{commit}"),
+                        Some(commit),
                         Some((predecessor_context, predecessor_revision)),
                     )
                 }
@@ -1918,12 +2300,14 @@ fn git_context_identity(git_dir: &Path) -> Result<ContextIdentity> {
                     format!("ref:{reference}\nunborn"),
                     format!("unborn:{reference}"),
                     None,
+                    None,
                 ),
             };
         (
             context,
             format!("ref:{reference}"),
             revision,
+            commit,
             unborn_predecessor,
         )
     };
@@ -1931,8 +2315,30 @@ fn git_context_identity(git_dir: &Path) -> Result<ContextIdentity> {
         key: generation(context.as_bytes()),
         lineage: generation(lineage.as_bytes()),
         revision: generation(revision.as_bytes()),
+        commit,
         unborn_predecessor,
     })
+}
+
+fn ensure_supported_reference_backend(git_dir: &Path) -> Result<()> {
+    let common_dir = git_common_dir(git_dir)?;
+    for root in [git_dir, common_dir.as_path()] {
+        let stack = root.join("reftable").join("tables.list");
+        match std::fs::symlink_metadata(&stack) {
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => {
+                return Err(GraphError::Io(format!(
+                    "inspect Git reference backend: {error}"
+                )))
+            }
+            Ok(_) => {
+                return Err(GraphError::Guard(
+                    "Git reftable references are not supported for private state".to_owned(),
+                ))
+            }
+        }
+    }
+    Ok(())
 }
 
 fn resolve_git_reference(git_dir: &Path, initial: &str) -> Result<Option<String>> {
@@ -2107,6 +2513,8 @@ fn valid_git_reference(reference: &str) -> bool {
             !component.is_empty()
                 && component != "."
                 && component != ".."
+                && !component.starts_with('.')
+                && !component.ends_with('.')
                 && !component.as_bytes().ends_with(b".lock")
         })
         && !reference.chars().any(|character| {
@@ -2387,6 +2795,22 @@ mod tests {
     }
 
     #[test]
+    fn reftable_reference_backend_fails_closed() {
+        let root = TempDir::new().unwrap();
+        let git_dir = create_git(root.path(), "ref: refs/heads/.invalid\n");
+        fs::create_dir_all(git_dir.join("reftable")).unwrap();
+        fs::write(git_dir.join("reftable/tables.list"), "table.ref\n").unwrap();
+        let output_dir = root.path().join("public");
+        fs::create_dir_all(&output_dir).unwrap();
+        let legacy = output_dir.join(".habitat-graph-state.json");
+
+        let error = super::path_for_output(&output_dir.join("graph.json"), &legacy).unwrap_err();
+
+        assert_eq!(error.kind(), "guard");
+        assert!(error.to_string().contains("reftable"));
+    }
+
+    #[test]
     fn git_private_path_migrates_legacy_state_immediately() {
         let root = TempDir::new().unwrap();
         let git_dir = root.path().join(".git");
@@ -2424,6 +2848,22 @@ mod tests {
         .unwrap_err();
         assert_eq!(error.kind(), "guard");
         assert!(error.to_string().contains("symbolic link"));
+    }
+
+    #[test]
+    fn existing_output_uses_canonical_final_component() {
+        let root = TempDir::new().unwrap();
+        let output = root.path().join("Graph.json");
+        fs::write(&output, "{}").unwrap();
+        let alias = root.path().join("graph.json");
+        if fs::symlink_metadata(&alias).is_err() {
+            return;
+        }
+
+        assert_eq!(
+            super::resolve_output_file(&alias).unwrap(),
+            super::resolve_output_file(&output).unwrap()
+        );
     }
 
     #[cfg(unix)]
@@ -2466,6 +2906,30 @@ mod tests {
         write_ref(&git_dir, "refs/heads/main", &"2".repeat(40));
 
         let error = super::commit_full_build_state(&state, b"{}").unwrap_err();
+        assert_eq!(error.kind(), "guard");
+        assert!(error.to_string().contains("Git context changed"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn full_build_state_rechecks_context_after_private_commit() {
+        let root = TempDir::new().unwrap();
+        let git_dir = create_git(root.path(), "ref: refs/heads/main\n");
+        write_ref(&git_dir, "refs/heads/main", &"1".repeat(40));
+        let output_dir = root.path().join("public");
+        fs::create_dir_all(&output_dir).unwrap();
+        let output = output_dir.join("graph.json");
+        let legacy = output_dir.join(".habitat-graph-state.json");
+        let state = super::prepare_full_build_state(&output, &legacy).unwrap();
+        let public = super::generation(b"public");
+        let semantic = super::semantic_generation(&Graph::new()).unwrap();
+        let bytes = super::serialize(&Graph::new(), &public, &semantic).unwrap();
+        let error = super::commit_full_build_state_with(&state, || {
+            super::write_full_build_state(state.path(), &bytes)?;
+            write_ref(&git_dir, "refs/heads/main", &"2".repeat(40));
+            Ok(())
+        })
+        .unwrap_err();
         assert_eq!(error.kind(), "guard");
         assert!(error.to_string().contains("Git context changed"));
     }
@@ -2516,6 +2980,24 @@ mod tests {
         assert_eq!(error.kind(), "guard");
         drop(first);
         super::acquire_output_lock(&state).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn output_transaction_lock_accepts_non_utf8_state_name() {
+        use std::os::unix::ffi::{OsStrExt as _, OsStringExt as _};
+
+        let root = TempDir::new().unwrap();
+        let state = root
+            .path()
+            .join(OsString::from_vec(b"state-\xff.json".to_vec()));
+        let lock_path = super::output_lock_path(&state).unwrap();
+        let _lock = super::acquire_output_lock(&state).unwrap();
+
+        let mut expected = state.file_name().unwrap().as_bytes().to_vec();
+        expected.extend_from_slice(super::OUTPUT_LOCK_SUFFIX.as_bytes());
+        assert_eq!(lock_path.file_name().unwrap().as_bytes(), expected);
+        assert!(lock_path.is_file());
     }
 
     #[cfg(unix)]
@@ -2917,6 +3399,25 @@ mod tests {
     }
 
     #[test]
+    fn context_revision_records_commit_for_bounded_ancestry_checks() {
+        let root = TempDir::new().unwrap();
+        init_real_git(root.path());
+        commit_real_git(root.path(), "first");
+        let output_dir = root.path().join("public");
+        fs::create_dir_all(&output_dir).unwrap();
+        let output = output_dir.join("graph.json");
+        let legacy = output_dir.join(".habitat-graph-state.json");
+
+        let state = super::path_for_output(&output, &legacy).unwrap();
+        let revision = super::context_revision(&state).unwrap().unwrap();
+
+        assert_eq!(
+            revision.commit.unwrap(),
+            git(root.path(), &["rev-parse", "HEAD"])
+        );
+    }
+
+    #[test]
     fn new_commit_inherits_only_unique_exact_generation_state() {
         let root = TempDir::new().unwrap();
         init_real_git(root.path());
@@ -3271,7 +3772,7 @@ mod tests {
     }
 
     #[test]
-    fn output_scoped_cleanup_removes_legacy_and_git_state_families() {
+    fn unsupported_cleanup_removes_every_repository_state_family() {
         let root = TempDir::new().unwrap();
         let git_dir = create_git(root.path(), "ref: refs/heads/main\n");
         let output_dir = root.path().join("public");
@@ -3287,6 +3788,15 @@ mod tests {
         let unscoped = state_dir.join(format!("{key}.json"));
         let scoped = state_dir.join(format!("{key}{}{context}.json", super::CONTEXT_SEPARATOR));
         let unrelated = state_dir.join(format!("{}.json", super::generation(b"other output")));
+        let lookalike = sibling(&unrelated, &format!("{ADD_JOURNAL_SUFFIX}.backup"));
+        let conflict_dir = state_dir.join(super::MIGRATION_CONFLICT_DIRECTORY);
+        fs::create_dir_all(&conflict_dir).unwrap();
+        let conflict = conflict_dir.join(format!(
+            "{}-{}-{}",
+            super::generation(b"family"),
+            super::generation(b"member"),
+            super::generation(b"contents")
+        ));
         let owned = [
             legacy.clone(),
             sibling(&legacy, ADD_JOURNAL_SUFFIX),
@@ -3294,15 +3804,17 @@ mod tests {
             sibling(&unscoped, &format!("{SNAPSHOT_SEPARATOR}{generation}")),
             scoped.clone(),
             sibling(&scoped, super::UPDATE_JOURNAL_SUFFIX),
+            unrelated,
+            conflict,
         ];
-        for path in owned.iter().chain(std::iter::once(&unrelated)) {
+        for path in owned.iter().chain(std::iter::once(&lookalike)) {
             fs::write(path, "raw state").unwrap();
         }
 
-        super::remove_state_families_for_output(&output, &legacy).unwrap();
+        super::remove_unsupported_state_families(&output, &legacy).unwrap();
 
         assert!(owned.iter().all(|path| !path.exists()));
-        assert!(unrelated.exists());
+        assert!(lookalike.exists());
     }
 
     #[test]
@@ -3362,7 +3874,7 @@ mod tests {
                 super::CONTEXT_SEPARATOR,
                 context
             ));
-            super::write_context_revision(&path, &context).unwrap();
+            super::write_context_revision(&path, &context, None).unwrap();
             let mut graph = Graph::new();
             graph.manifest.tool_version = format!("private-lineage-{index}");
             let public = super::generation(format!("public-{index}").as_bytes());
@@ -3380,6 +3892,56 @@ mod tests {
             super::context_state_candidates(&current).unwrap().len(),
             super::MAX_CONTEXTS_PER_OUTPUT
         );
+        let expiration_files = fs::read_dir(root.path())
+            .unwrap()
+            .filter_map(std::result::Result::ok)
+            .filter(|entry| {
+                let name = entry.file_name();
+                let name = name.to_string_lossy();
+                name.ends_with(super::EXPIRATION_INDEX_SUFFIX)
+                    || name.contains(super::EXPIRED_CONTEXT_SEPARATOR)
+                    || name.contains(super::EXPIRED_REVISION_SEPARATOR)
+            })
+            .count();
+        assert_eq!(expiration_files, 1);
+    }
+
+    #[test]
+    fn legacy_expiration_markers_are_compacted_on_state_write() {
+        let root = TempDir::new().unwrap();
+        let output = super::generation(b"output path");
+        let current = super::generation(b"current context");
+        let expired_context = super::generation(b"expired context");
+        let expired_revision = super::generation(b"expired revision");
+        let path = root.path().join(format!(
+            "{output}{}{current}.json",
+            super::CONTEXT_SEPARATOR
+        ));
+        let context_marker = root.path().join(format!(
+            "{output}{}{expired_context}",
+            super::EXPIRED_CONTEXT_SEPARATOR
+        ));
+        let revision_marker = root.path().join(format!(
+            "{output}{}{expired_revision}",
+            super::EXPIRED_REVISION_SEPARATOR
+        ));
+        fs::write(&context_marker, "").unwrap();
+        fs::write(&revision_marker, "").unwrap();
+        let public = super::generation(b"public");
+        let semantic = super::semantic_generation(&Graph::new()).unwrap();
+
+        super::write_state(
+            &path,
+            &super::serialize(&Graph::new(), &public, &semantic).unwrap(),
+        )
+        .unwrap();
+
+        let index = super::load_expiration_index(&path).unwrap();
+        assert!(index.compacted);
+        assert!(index.contexts.contains(&expired_context));
+        assert!(index.revisions.contains(&expired_revision));
+        assert!(!context_marker.exists());
+        assert!(!revision_marker.exists());
     }
 
     #[test]
@@ -3412,7 +3974,7 @@ mod tests {
             .into_iter()
             .find(|(_, path)| !path.exists())
             .expect("one old context must be pruned");
-        assert!(super::expired_context_path(&expired_path).unwrap().exists());
+        assert!(super::context_is_expired(&expired_path).unwrap());
         write_ref(&git_dir, "refs/heads/main", &expired_commit);
 
         let error = super::path_for_output(&output, &legacy).unwrap_err();
@@ -3430,11 +3992,7 @@ mod tests {
         let renamed_revision = super::git_context_identity(&git_dir).unwrap().revision;
         let renamed_state = super::path_for_full_build(&output, &legacy).unwrap();
         assert_ne!(renamed_state, expired_path);
-        assert!(
-            super::expired_revision_path(&renamed_state, &renamed_revision)
-                .unwrap()
-                .exists()
-        );
+        assert!(super::ensure_revision_not_expired(&renamed_state, &renamed_revision).is_err());
         assert!(super::path_for_output(&output, &legacy).is_err());
         let renamed_public = super::generation(b"renamed rebuilt public");
         super::write_full_build_state(
@@ -3450,9 +4008,7 @@ mod tests {
         fs::write(git_dir.join("HEAD"), "ref: refs/heads/main\n").unwrap();
         let rebuilt_state = super::path_for_full_build(&output, &legacy).unwrap();
         assert_eq!(rebuilt_state, expired_path);
-        assert!(super::expired_context_path(&rebuilt_state)
-            .unwrap()
-            .exists());
+        assert!(super::context_is_expired(&rebuilt_state).unwrap());
         assert!(super::path_for_output(&output, &legacy).is_err());
         let rebuilt_public = super::generation(b"rebuilt public");
         super::write_full_build_state(

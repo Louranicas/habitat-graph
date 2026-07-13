@@ -336,6 +336,11 @@ impl UpdateJournal {
                 "update journal private generation is invalid".to_owned(),
             ));
         }
+        super::private_state::ensure_state_context_current(
+            &out.join("graph.json"),
+            state_path,
+            "update transaction preparation",
+        )?;
         let public_json = habitat_graph_export::to_node_link(public_graph)?;
         let origin = super::private_state::context_identity_for_output(&out.join("graph.json"))?;
         let journal = Self {
@@ -354,6 +359,11 @@ impl UpdateJournal {
                 "Git context changed while preparing update transaction".to_owned(),
             ));
         }
+        super::private_state::ensure_state_context_current(
+            &out.join("graph.json"),
+            state_path,
+            "update transaction preparation",
+        )?;
         Ok(journal)
     }
 }
@@ -570,6 +580,11 @@ fn commit_update_journal(
     journal_path: &Path,
     journal: &UpdateJournal,
 ) -> Result<()> {
+    super::private_state::ensure_state_context_current(
+        &out.join("graph.json"),
+        state_path,
+        "update transaction commit",
+    )?;
     super::extract::write_public_artifacts(
         out,
         &journal.public_graph,
@@ -1892,6 +1907,34 @@ mod tests {
         assert_eq!(run(src.path(), out.path()), 4);
         assert_eq!(read_graph_json(out.path()), public_before);
         assert!(out.path().join(format!("{SIDECAR}.add-journal")).exists());
+    }
+
+    #[test]
+    fn update_commit_rechecks_context_after_journal_creation() {
+        let repo = TempDir::new().unwrap();
+        init_git(repo.path());
+        commit_git(repo.path(), "first");
+        let out = repo.path().join("public");
+        let (state_path, legacy_state_path) = super::prepare_private_state(&out).unwrap();
+        let graph = Graph::new();
+        let journal =
+            super::UpdateJournal::new(&out, &state_path, &graph, graph.clone(), None).unwrap();
+        super::write_update_journal(&state_path, &journal).unwrap();
+        let journal_path = super::super::private_state::update_journal_path(&state_path).unwrap();
+
+        commit_git(repo.path(), "second");
+
+        let error = super::commit_update_journal(
+            &out,
+            &state_path,
+            &legacy_state_path,
+            &journal_path,
+            &journal,
+        )
+        .unwrap_err();
+        assert_eq!(error.kind(), "guard");
+        assert!(!out.join("graph.json").exists());
+        assert!(journal_path.exists());
     }
 
     #[test]
