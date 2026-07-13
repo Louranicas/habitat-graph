@@ -112,12 +112,10 @@ fn git_metadata(path: &Path) -> Option<GitMetadata> {
         })
     } else if path.is_file() {
         let marker = gitdir_marker(path)?;
-        let gitdir = if marker.path.is_absolute() {
-            marker.path
+        let gitdir = if marker.is_absolute() {
+            marker
         } else {
-            path.parent()
-                .unwrap_or_else(|| Path::new(""))
-                .join(marker.path)
+            path.parent().unwrap_or_else(|| Path::new("")).join(marker)
         };
         if !gitdir.is_dir() || !gitdir.join("HEAD").is_file() {
             return None;
@@ -125,34 +123,27 @@ fn git_metadata(path: &Path) -> Option<GitMetadata> {
         let common_dir = git_common_dir(&gitdir)?;
         Some(GitMetadata {
             root: path.parent().unwrap_or_else(|| Path::new("")).to_path_buf(),
-            manual_exclude: (marker.non_utf8 || common_dir.non_utf8)
-                .then(|| common_dir.path.join("info/exclude")),
+            manual_exclude: Some(common_dir.join("info/exclude")),
         })
     } else {
         None
     }
 }
 
-fn git_common_dir(gitdir: &Path) -> Option<NativePath> {
+fn git_common_dir(gitdir: &Path) -> Option<PathBuf> {
     let marker = gitdir.join("commondir");
     if !marker.exists() {
-        return Some(NativePath {
-            path: gitdir.to_path_buf(),
-            non_utf8: false,
-        });
+        return Some(gitdir.to_path_buf());
     }
     let common = native_path_line(&marker)?;
-    Some(NativePath {
-        path: if common.path.is_absolute() {
-            common.path
-        } else {
-            gitdir.join(common.path)
-        },
-        non_utf8: common.non_utf8,
+    Some(if common.is_absolute() {
+        common
+    } else {
+        gitdir.join(common)
     })
 }
 
-fn gitdir_marker(path: &Path) -> Option<NativePath> {
+fn gitdir_marker(path: &Path) -> Option<PathBuf> {
     let line = bounded_first_line(path)?;
     let gitdir = trim_ascii_whitespace(line.strip_prefix(b"gitdir:")?);
     if gitdir.is_empty() {
@@ -161,7 +152,7 @@ fn gitdir_marker(path: &Path) -> Option<NativePath> {
     native_path_from_bytes(gitdir)
 }
 
-fn native_path_line(path: &Path) -> Option<NativePath> {
+fn native_path_line(path: &Path) -> Option<PathBuf> {
     let line = bounded_first_line(path)?;
     if line.is_empty() {
         None
@@ -192,30 +183,19 @@ fn trim_ascii_whitespace(mut bytes: &[u8]) -> &[u8] {
 }
 
 #[cfg(unix)]
-fn native_path_from_bytes(bytes: &[u8]) -> Option<NativePath> {
+fn native_path_from_bytes(bytes: &[u8]) -> Option<PathBuf> {
     use std::os::unix::ffi::OsStringExt as _;
 
     if bytes.contains(&0) {
         None
     } else {
-        Some(NativePath {
-            path: std::ffi::OsString::from_vec(bytes.to_vec()).into(),
-            non_utf8: std::str::from_utf8(bytes).is_err(),
-        })
+        Some(std::ffi::OsString::from_vec(bytes.to_vec()).into())
     }
 }
 
 #[cfg(not(unix))]
-fn native_path_from_bytes(bytes: &[u8]) -> Option<NativePath> {
-    std::str::from_utf8(bytes).ok().map(|path| NativePath {
-        path: PathBuf::from(path),
-        non_utf8: false,
-    })
-}
-
-struct NativePath {
-    path: PathBuf,
-    non_utf8: bool,
+fn native_path_from_bytes(bytes: &[u8]) -> Option<PathBuf> {
+    std::str::from_utf8(bytes).ok().map(PathBuf::from)
 }
 
 #[cfg(test)]
@@ -602,6 +582,30 @@ mod tests {
 
         let got = detect(&repository.path().join("src"), &["rs"]).unwrap();
         assert!(got.is_empty());
+    }
+
+    #[test]
+    fn relative_worktree_pointer_uses_resolved_common_exclude() {
+        let repository = TempDir::new().unwrap();
+        let common_dir = repository.path().join(".git-data");
+        let gitdir = common_dir.join("worktrees/linked");
+        fs::create_dir_all(common_dir.join("info")).unwrap();
+        fs::create_dir_all(&gitdir).unwrap();
+        fs::write(gitdir.join("HEAD"), "ref: refs/heads/main\n").unwrap();
+        fs::write(gitdir.join("commondir"), "../..\n").unwrap();
+        fs::write(common_dir.join("info/exclude"), "/src/excluded.rs\n").unwrap();
+        fs::write(
+            repository.path().join(".git"),
+            "gitdir: .git-data/worktrees/linked\n",
+        )
+        .unwrap();
+        fs::create_dir(repository.path().join("src")).unwrap();
+        fs::write(repository.path().join("src/excluded.rs"), b"").unwrap();
+        fs::write(repository.path().join("src/kept.rs"), b"").unwrap();
+
+        let got = detect(&repository.path().join("src"), &["rs"]).unwrap();
+
+        assert_eq!(filenames(&got), vec!["kept.rs"]);
     }
 
     #[cfg(unix)]

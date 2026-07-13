@@ -6,7 +6,7 @@
 use std::ffi::OsString;
 use std::fs::OpenOptions;
 use std::io::Write as _;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -64,34 +64,7 @@ pub(super) fn write(path: &Path, bytes: &[u8], owner_only: bool, context: &str) 
         .parent()
         .filter(|parent| !parent.as_os_str().is_empty())
         .unwrap_or_else(|| Path::new("."));
-    let filename = path
-        .file_name()
-        .ok_or_else(|| GraphError::Io(format!("{context} path has no filename")))?;
-    let sequence = TEMP_SEQUENCE.fetch_add(1, Ordering::Relaxed);
-    let timestamp = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map_or(0, |duration| {
-            u64::try_from(duration.as_nanos())
-                .unwrap_or_else(|_| duration.as_secs() ^ u64::from(duration.subsec_nanos()))
-        });
-    let nonce = format!(
-        "{}.{}.{}",
-        radix36(u64::from(std::process::id())),
-        radix36(timestamp),
-        radix36(sequence)
-    );
-    debug_assert!(is_private_temporary_suffix(&format!(
-        "{PRIVATE_TEMP_SEPARATOR}{nonce}"
-    )));
-    let temporary_name = if owner_only {
-        let mut name = OsString::from(filename);
-        name.push(PRIVATE_TEMP_SEPARATOR);
-        name.push(nonce);
-        name
-    } else {
-        OsString::from(format!(".habitat-graph.tmp.{nonce}"))
-    };
-    let temporary = parent.join(temporary_name);
+    let temporary = temporary_path(path, owner_only, context)?;
 
     let mut options = OpenOptions::new();
     options.create_new(true).write(true);
@@ -130,6 +103,41 @@ pub(super) fn write(path: &Path, bytes: &[u8], owner_only: bool, context: &str) 
     write_result
 }
 
+pub(super) fn temporary_path(path: &Path, owner_only: bool, context: &str) -> Result<PathBuf> {
+    let parent = path
+        .parent()
+        .filter(|parent| !parent.as_os_str().is_empty())
+        .unwrap_or_else(|| Path::new("."));
+    let filename = path
+        .file_name()
+        .ok_or_else(|| GraphError::Io(format!("{context} path has no filename")))?;
+    let sequence = TEMP_SEQUENCE.fetch_add(1, Ordering::Relaxed);
+    let timestamp = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map_or(0, |duration| {
+            u64::try_from(duration.as_nanos())
+                .unwrap_or_else(|_| duration.as_secs() ^ u64::from(duration.subsec_nanos()))
+        });
+    let nonce = format!(
+        "{}.{}.{}",
+        radix36(u64::from(std::process::id())),
+        radix36(timestamp),
+        radix36(sequence)
+    );
+    debug_assert!(is_private_temporary_suffix(&format!(
+        "{PRIVATE_TEMP_SEPARATOR}{nonce}"
+    )));
+    let temporary_name = if owner_only {
+        let mut name = OsString::from(filename);
+        name.push(PRIVATE_TEMP_SEPARATOR);
+        name.push(nonce);
+        name
+    } else {
+        OsString::from(format!(".habitat-graph.tmp.{nonce}"))
+    };
+    Ok(parent.join(temporary_name))
+}
+
 /// Removes `path` if present and synchronizes its containing directory.
 ///
 /// # Errors
@@ -150,13 +158,13 @@ pub(super) fn remove(path: &Path, context: &str) -> Result<()> {
 }
 
 #[cfg(unix)]
-fn sync_directory(directory: &Path, context: &str) -> Result<()> {
+pub(super) fn sync_directory(directory: &Path, context: &str) -> Result<()> {
     std::fs::File::open(directory)
         .and_then(|file| file.sync_all())
         .map_err(|error| GraphError::Io(format!("{context} directory sync: {error}")))
 }
 
 #[cfg(not(unix))]
-fn sync_directory(_directory: &Path, _context: &str) -> Result<()> {
+pub(super) fn sync_directory(_directory: &Path, _context: &str) -> Result<()> {
     Ok(())
 }

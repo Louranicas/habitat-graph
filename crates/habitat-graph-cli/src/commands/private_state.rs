@@ -46,6 +46,7 @@ const FULL_BUILD_JOURNAL_SUFFIX: &str = ".full-build-journal";
 const FULL_BUILD_JOURNAL_SCHEMA: &str = "habitat-graph.full-build-journal.v1";
 const OUTPUT_LOCK_SUFFIX: &str = ".output-lock";
 const OUTPUT_IDENTITY_LOCK: &str = ".habitat-graph.output-identity-lock";
+const OUTPUT_IDENTITY_LOCK_SIGNATURE: &[u8] = b"habitat-graph.output-identity-lock.v1\n";
 const MAX_SNAPSHOTS: usize = 16;
 const MAX_CONTEXTS_PER_OUTPUT: usize = 16;
 const MAX_EXPIRATION_LOG_OVERHEAD: usize = 256;
@@ -323,7 +324,7 @@ pub(super) fn acquire_output_identity_lock(output: &Path) -> Result<OutputTransa
     acquire_lock_path(
         &parent.join(OUTPUT_IDENTITY_LOCK),
         Some(&parent.join(filename)),
-        None,
+        Some(OUTPUT_IDENTITY_LOCK_SIGNATURE),
     )
 }
 
@@ -357,6 +358,14 @@ fn acquire_lock_path(
                 )))
             }
         };
+        if prior_metadata.is_none() {
+            if let Some(signature) = signature {
+                if let Some(lock) = publish_signed_lock(lock_path, output, signature)? {
+                    return Ok(lock);
+                }
+                continue;
+            }
+        }
         let mut options = std::fs::OpenOptions::new();
         options.read(true).write(true);
         if prior_metadata.is_some() {
@@ -397,17 +406,7 @@ fn acquire_lock_path(
                 "output transaction lock changed while being opened".to_owned(),
             ));
         }
-        match file.try_lock() {
-            Ok(()) => {}
-            Err(std::fs::TryLockError::WouldBlock) => {
-                return Err(GraphError::Guard(
-                    "another habitat-graph writer is updating this output".to_owned(),
-                ))
-            }
-            Err(std::fs::TryLockError::Error(error)) => {
-                return Err(GraphError::Io(format!("lock output transaction: {error}")))
-            }
-        }
+        lock_output_file(&file)?;
         let current_metadata = std::fs::symlink_metadata(lock_path).map_err(|error| {
             GraphError::Guard(format!(
                 "output transaction lock changed while being opened: {error}"
@@ -422,13 +421,7 @@ fn acquire_lock_path(
         }
         ensure_lock_does_not_alias_output(&opened_metadata, output)?;
         if let Some(signature) = signature {
-            ensure_lock_signature(
-                &mut file,
-                &opened_metadata,
-                lock_path,
-                signature,
-                prior_metadata.is_none(),
-            )?;
+            ensure_lock_signature(&mut file, &opened_metadata, lock_path, signature)?;
         }
         #[cfg(unix)]
         file.set_permissions(std::fs::Permissions::from_mode(0o600))
@@ -440,21 +433,106 @@ fn acquire_lock_path(
     ))
 }
 
+fn publish_signed_lock(
+    lock_path: &Path,
+    output: Option<&Path>,
+    signature: &[u8],
+) -> Result<Option<OutputTransactionLock>> {
+    let context = "initialize output transaction lock";
+    let temporary = super::atomic_file::temporary_path(lock_path, true, context)?;
+    let mut options = std::fs::OpenOptions::new();
+    options.create_new(true).read(true).write(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt as _;
+        options.mode(0o600).custom_flags(libc::O_NOFOLLOW);
+    }
+    let mut file = options
+        .open(&temporary)
+        .map_err(|error| GraphError::Io(format!("{context}: {error}")))?;
+
+    let publication = (|| -> Result<bool> {
+        #[cfg(unix)]
+        file.set_permissions(std::fs::Permissions::from_mode(0o600))
+            .map_err(|error| GraphError::Io(format!("harden output transaction lock: {error}")))?;
+        std::io::Write::write_all(&mut file, signature)
+            .map_err(|error| GraphError::Io(format!("sign output transaction lock: {error}")))?;
+        file.sync_all()
+            .map_err(|error| GraphError::Io(format!("sync output transaction lock: {error}")))?;
+        lock_output_file(&file)?;
+        match std::fs::hard_link(&temporary, lock_path) {
+            Ok(()) => Ok(true),
+            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => Ok(false),
+            Err(error) => Err(GraphError::Io(format!(
+                "publish initialized output transaction lock: {error}"
+            ))),
+        }
+    })();
+
+    let cleanup = std::fs::remove_file(&temporary);
+    let published = match publication {
+        Ok(published) => {
+            cleanup.map_err(|error| {
+                GraphError::Io(format!(
+                    "remove output transaction lock initializer: {error}"
+                ))
+            })?;
+            published
+        }
+        Err(error) => {
+            if let Err(cleanup_error) = cleanup {
+                eprintln!(
+                    "warning: failed to remove output transaction lock initializer {}: {cleanup_error}",
+                    temporary.display()
+                );
+            }
+            return Err(error);
+        }
+    };
+    if !published {
+        return Ok(None);
+    }
+
+    let parent = lock_path
+        .parent()
+        .filter(|parent| !parent.as_os_str().is_empty())
+        .unwrap_or_else(|| Path::new("."));
+    super::atomic_file::sync_directory(parent, context)?;
+    let opened_metadata = file
+        .metadata()
+        .map_err(|error| GraphError::Io(format!("inspect output transaction lock: {error}")))?;
+    let current_metadata = std::fs::symlink_metadata(lock_path).map_err(|error| {
+        GraphError::Guard(format!(
+            "output transaction lock changed while being opened: {error}"
+        ))
+    })?;
+    if !current_metadata.file_type().is_file() || !same_file(&opened_metadata, &current_metadata) {
+        return Err(GraphError::Guard(
+            "output transaction lock changed while being opened".to_owned(),
+        ));
+    }
+    ensure_lock_does_not_alias_output(&opened_metadata, output)?;
+    Ok(Some(OutputTransactionLock { file }))
+}
+
+fn lock_output_file(file: &std::fs::File) -> Result<()> {
+    match file.try_lock() {
+        Ok(()) => Ok(()),
+        Err(std::fs::TryLockError::WouldBlock) => Err(GraphError::Guard(
+            "another habitat-graph writer is updating this output".to_owned(),
+        )),
+        Err(std::fs::TryLockError::Error(error)) => {
+            Err(GraphError::Io(format!("lock output transaction: {error}")))
+        }
+    }
+}
+
 fn ensure_lock_signature(
     file: &mut std::fs::File,
     metadata: &std::fs::Metadata,
     lock_path: &Path,
     signature: &[u8],
-    initialize: bool,
 ) -> Result<()> {
-    if initialize {
-        std::io::Write::write_all(file, signature)
-            .map_err(|error| GraphError::Io(format!("sign output transaction lock: {error}")))?;
-        file.sync_all()
-            .map_err(|error| GraphError::Io(format!("sync output transaction lock: {error}")))?;
-        return Ok(());
-    }
-
     let expected_length = u64::try_from(signature.len())
         .map_err(|_| GraphError::Io("output transaction lock signature is too long".to_owned()))?;
     if metadata.len() != expected_length {
@@ -3784,6 +3862,10 @@ mod tests {
         let upper = root.path().join("GRAPH.JSON");
 
         let first = super::acquire_output_identity_lock(&lower).unwrap();
+        assert_eq!(
+            fs::read(root.path().join(super::OUTPUT_IDENTITY_LOCK)).unwrap(),
+            super::OUTPUT_IDENTITY_LOCK_SIGNATURE
+        );
         let error = super::acquire_output_identity_lock(&upper).unwrap_err();
 
         assert_eq!(error.kind(), "guard");
@@ -3830,6 +3912,30 @@ mod tests {
         );
         assert_eq!(
             fs::metadata(&output).unwrap().permissions().mode() & 0o777,
+            0o644
+        );
+    }
+
+    #[test]
+    fn output_identity_lock_rejects_unowned_file_without_hardening_it() {
+        #[cfg(unix)]
+        use std::os::unix::fs::PermissionsExt as _;
+
+        let root = TempDir::new().unwrap();
+        let lock = root.path().join(super::OUTPUT_IDENTITY_LOCK);
+        let output = root.path().join("graph.json");
+        fs::write(&lock, "user lock").unwrap();
+        #[cfg(unix)]
+        fs::set_permissions(&lock, fs::Permissions::from_mode(0o644)).unwrap();
+
+        let error = super::acquire_output_identity_lock(&output).unwrap_err();
+
+        assert_eq!(error.kind(), "guard");
+        assert!(error.to_string().contains("not owned"));
+        assert_eq!(fs::read_to_string(&lock).unwrap(), "user lock");
+        #[cfg(unix)]
+        assert_eq!(
+            fs::metadata(lock).unwrap().permissions().mode() & 0o777,
             0o644
         );
     }
@@ -4045,6 +4151,20 @@ mod tests {
         drop(first);
         super::acquire_signed_output_lock(&state, signature).unwrap();
         assert_eq!(fs::read(lock_path).unwrap(), signature);
+    }
+
+    #[test]
+    fn signed_lock_publication_preserves_competing_path() {
+        let root = TempDir::new().unwrap();
+        let lock_path = root.path().join("generated-directory.output-lock");
+        let signature = b"habitat-graph.test-lock.v1\n";
+        fs::write(&lock_path, "competing lock").unwrap();
+
+        let published = super::publish_signed_lock(&lock_path, None, signature).unwrap();
+
+        assert!(published.is_none());
+        assert_eq!(fs::read_to_string(&lock_path).unwrap(), "competing lock");
+        assert_eq!(fs::read_dir(root.path()).unwrap().count(), 1);
     }
 
     #[cfg(unix)]
