@@ -80,8 +80,13 @@ pub fn rebuild(dir: &Path, out: &Path) -> Result<usize> {
     #[cfg(not(unix))]
     let state_path = legacy_state;
     let _output_lock = super::private_state::acquire_output_lock(&state_path)?;
-    super::private_state::ensure_no_pending_add_journals(&state_path)?;
-    super::private_state::ensure_no_pending_update_journals(&state_path)?;
+    #[cfg(unix)]
+    {
+        super::private_state::ensure_no_pending_add_journals(&state_path)?;
+        super::private_state::ensure_no_pending_update_journals(&state_path)?;
+    }
+    #[cfg(not(unix))]
+    super::private_state::remove_unsupported_family(&state_path)?;
 
     // Detect source files (all extractor-supported extensions).
     let files = habitat_graph_source::detect(dir, &["rs", "ts", "tsx", "js", "jsx", "go", "py"])?;
@@ -96,6 +101,8 @@ pub fn rebuild(dir: &Path, out: &Path) -> Result<usize> {
 
     let n = graph.nodes.len();
 
+    #[cfg(unix)]
+    super::extract::write_full_build_private_state(&state_path, &graph, &files)?;
     super::extract::write_public_artifacts(out, &graph, super::extract::ExtractOpts::default())?;
 
     Ok(n)
@@ -636,6 +643,27 @@ mod tests {
         let json = read_graph_json(&out);
         assert!(!json.contains("old_fn"), "old function must be gone");
         assert!(json.contains("new_fn"), "new function must appear");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn rebuild_refreshes_private_state_when_public_bytes_are_unchanged() {
+        let src = tdir();
+        let out = tdir();
+        let first = "api_key=first-secret.rs";
+        let second = "api_key=second-secret.rs";
+        mk(&src, first, "fn stable() {}");
+        rebuild(&src, &out).unwrap();
+        let public = read_graph_json(&out);
+
+        fs::remove_file(src.join(first)).unwrap();
+        mk(&src, second, "fn stable() {}");
+        rebuild(&src, &out).unwrap();
+
+        assert_eq!(read_graph_json(&out), public);
+        let private = fs::read_to_string(out.join(".habitat-graph-state.json")).unwrap();
+        assert!(!private.contains(first));
+        assert!(private.contains(second));
     }
 
     #[test]

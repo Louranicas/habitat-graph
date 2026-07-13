@@ -535,7 +535,7 @@ fn validate_update_journal_origin(
             }
         }
     }
-    if !same_context {
+    if !same_context || journal.before_private_checksum.is_some() {
         let expected = journal.before_private_checksum.as_deref().map_or_else(
             || vec![journal.after_private_checksum.as_str()],
             |before| vec![before, journal.after_private_checksum.as_str()],
@@ -1946,6 +1946,55 @@ mod tests {
         assert!(private.contains("api_key_remote"));
         assert!(
             !super::super::private_state::update_journal_path(&state_path)
+                .unwrap()
+                .exists()
+        );
+    }
+
+    #[test]
+    fn same_context_update_rejects_a_conflicting_target_despite_a_matching_snapshot() {
+        let src = TempDir::new().unwrap();
+        let out = TempDir::new().unwrap();
+        mk_file(src.path(), "lib.rs", "fn original() {}");
+        assert_eq!(run(src.path(), out.path()), 0);
+        let state_path = out.path().join(SIDECAR);
+        let stored = super::super::private_state::read(&state_path, "test state")
+            .unwrap()
+            .unwrap();
+        let before_checksum = super::private_graph_generation(&stored.graph).unwrap();
+        let mut pending_state = stored.graph.clone();
+        pending_state.manifest.tool_version = "pending lineage".to_owned();
+        let journal = super::UpdateJournal::new(
+            out.path(),
+            &state_path,
+            &stored.graph,
+            pending_state,
+            Some(&before_checksum),
+        )
+        .unwrap();
+        super::write_update_journal(&state_path, &journal).unwrap();
+
+        let mut replacement = stored.graph.clone();
+        replacement.nodes[0].source_file = "replacement.rs".to_owned();
+        let replacement_public = habitat_graph_export::to_node_link(&replacement).unwrap();
+        let replacement_public_graph =
+            habitat_graph_serve::from_node_link(&replacement_public).unwrap();
+        let replacement_bytes = super::super::private_state::serialize(
+            &replacement,
+            &super::super::private_state::generation(replacement_public.as_bytes()),
+            &super::super::private_state::semantic_generation(&replacement_public_graph).unwrap(),
+        )
+        .unwrap();
+        super::super::private_state::write_state(&state_path, &replacement_bytes).unwrap();
+        let public_before = read_graph_json(out.path());
+
+        assert_eq!(run(src.path(), out.path()), 4);
+        assert_eq!(read_graph_json(out.path()), public_before);
+        assert!(fs::read_to_string(&state_path)
+            .unwrap()
+            .contains("replacement"));
+        assert!(
+            super::super::private_state::update_journal_path(&state_path)
                 .unwrap()
                 .exists()
         );

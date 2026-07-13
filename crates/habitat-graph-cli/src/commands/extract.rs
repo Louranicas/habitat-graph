@@ -7,7 +7,7 @@
 
 use std::collections::{BTreeMap, HashSet};
 use std::fmt::Write as _;
-use std::path::{Component, Path};
+use std::path::{Component, Path, PathBuf};
 
 use habitat_graph_core::{Graph, GraphError, Result};
 
@@ -24,6 +24,7 @@ const WIKI_MANIFEST_SCHEMA: &str = "habitat-graph.wiki-manifest.v3";
 const OPTIONAL_ARTIFACT_MANIFEST: &str = ".habitat-graph-artifacts.json";
 const OPTIONAL_ARTIFACT_MANIFEST_SCHEMA: &str = "habitat-graph.artifact-manifest.v1";
 const OPTIONAL_ARTIFACTS: &[&str] = &["graph.svg", "graph.graphml", "graph.cypher"];
+const VAULT_LOCK_STEM: &str = ".habitat-graph-vault";
 
 /// Optional PB exporter artifacts to emit alongside the always-written core artifacts.
 ///
@@ -551,7 +552,6 @@ fn generated_vault_ownership(vault_dir: &Path) -> Result<HashSet<String>> {
         return Ok(owned);
     }
 
-    let mut owned = HashSet::new();
     let mut generated_notes = Vec::new();
     for entry in std::fs::read_dir(vault_dir)
         .map_err(|error| GraphError::Io(format!("vault inventory: {error}")))?
@@ -571,7 +571,6 @@ fn generated_vault_ownership(vault_dir: &Path) -> Result<HashSet<String>> {
         let content = std::fs::read_to_string(entry.path())
             .map_err(|error| GraphError::Io(format!("legacy vault note {filename}: {error}")))?;
         if let Some(note) = parse_generated_vault_node_note(&content) {
-            owned.insert(filename.clone());
             generated_notes.push((filename, note));
         }
     }
@@ -580,10 +579,15 @@ fn generated_vault_ownership(vault_dir: &Path) -> Result<HashSet<String>> {
         let content = std::fs::read_to_string(&moc_path)
             .map_err(|error| GraphError::Io(format!("legacy vault MOC: {error}")))?;
         if is_generated_vault_moc(&content, &generated_notes) {
+            let mut owned: HashSet<_> = generated_notes
+                .into_iter()
+                .map(|(filename, _)| filename)
+                .collect();
             owned.insert("_MOC.md".to_owned());
+            return Ok(owned);
         }
     }
-    Ok(owned)
+    Ok(HashSet::new())
 }
 
 fn write_vault_manifest(vault_dir: &Path, names: &HashSet<String>) -> Result<()> {
@@ -607,9 +611,20 @@ fn write_vault_manifest_state(
     )
 }
 
+fn acquire_vault_lock(
+    vault_dir: &Path,
+) -> Result<(PathBuf, super::private_state::OutputTransactionLock)> {
+    let canonical_vault = std::fs::canonicalize(vault_dir)
+        .map_err(|error| GraphError::Io(format!("resolve vault directory: {error}")))?;
+    let lock = super::private_state::acquire_output_lock(&canonical_vault.join(VAULT_LOCK_STEM))?;
+    Ok((canonical_vault, lock))
+}
+
 /// Synchronizes generated notes exactly while preserving every unowned/user-authored file.
 fn sync_generated_vault(vault_dir: &Path, rendered: &[(String, String)]) -> Result<()> {
     std::fs::create_dir_all(vault_dir).map_err(|error| GraphError::Io(error.to_string()))?;
+    let (canonical_vault, _vault_lock) = acquire_vault_lock(vault_dir)?;
+    let vault_dir = canonical_vault.as_path();
     let prior_owned = generated_vault_ownership(vault_dir)?;
     let mut current_names = HashSet::with_capacity(rendered.len());
     for (filename, _) in rendered {
@@ -1272,6 +1287,29 @@ pub(super) fn write_public_artifacts(out: &Path, graph: &Graph, opts: ExtractOpt
     Ok(())
 }
 
+#[cfg(unix)]
+pub(super) fn write_full_build_private_state(
+    state_path: &Path,
+    graph: &Graph,
+    files: &[PathBuf],
+) -> Result<()> {
+    let inputs = files
+        .iter()
+        .map(|path| habitat_graph_source::read_local(path, 0).map(|bytes| (path.clone(), bytes)))
+        .collect::<Result<Vec<_>>>()?;
+    let mut private_graph = graph.clone();
+    private_graph.manifest =
+        habitat_graph_source::build_manifest(&inputs, env!("CARGO_PKG_VERSION"));
+    let public_json = habitat_graph_export::to_node_link(graph)?;
+    let public_graph = habitat_graph_serve::from_node_link(&public_json)?;
+    let state_json = super::private_state::serialize(
+        &private_graph,
+        &super::private_state::generation(public_json.as_bytes()),
+        &super::private_state::semantic_generation(&public_graph)?,
+    )?;
+    super::private_state::write_state(state_path, &state_json)
+}
+
 /// Inner pipeline: detect → extract → build → analyze → export → write.
 ///
 /// Returns `(node_count, edge_count, community_count)` on success.
@@ -1311,8 +1349,14 @@ fn run_inner(
     #[cfg(not(unix))]
     let state_path = legacy_state;
     let _output_lock = super::private_state::acquire_output_lock(&state_path)?;
-    super::private_state::ensure_no_pending_add_journals(&state_path)?;
-    super::private_state::ensure_no_pending_update_journals(&state_path)?;
+    #[cfg(unix)]
+    {
+        super::private_state::ensure_no_pending_add_journals(&state_path)?;
+        super::private_state::ensure_no_pending_update_journals(&state_path)?;
+        write_full_build_private_state(&state_path, &graph, &files)?;
+    }
+    #[cfg(not(unix))]
+    super::private_state::remove_unsupported_family(&state_path)?;
     write_public_artifacts(out, &graph, opts)?;
 
     // Optionally emit an Obsidian vault — one note per node (`[[wikilinks]]` + frontmatter/tags)
@@ -1383,6 +1427,52 @@ mod tests {
         let out = TempDir::new().unwrap();
         mk_file(src.path(), "lib.rs", "fn a() { b(); } fn b() {}");
         assert_eq!(run(src.path(), out.path(), None), 0);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn full_extract_refreshes_private_state_when_public_bytes_are_unchanged() {
+        let src = TempDir::new().unwrap();
+        let out = TempDir::new().unwrap();
+        let first = "api_key=first-secret.rs";
+        let second = "api_key=second-secret.rs";
+        mk_file(src.path(), first, "fn stable() {}");
+        assert_eq!(run(src.path(), out.path(), None), 0);
+        let public = read_graph_json(out.path());
+
+        fs::remove_file(src.path().join(first)).unwrap();
+        mk_file(src.path(), second, "fn stable() {}");
+        assert_eq!(run(src.path(), out.path(), None), 0);
+        assert_eq!(read_graph_json(out.path()), public);
+
+        let added = super::super::add::extract_from_bytes(b"fn added() {}", "rs").unwrap();
+        super::super::add::merge_into_output(added, &out.path().join("graph.json")).unwrap();
+        let private = fs::read_to_string(out.path().join(".habitat-graph-state.json")).unwrap();
+        assert!(!private.contains(first));
+        assert!(private.contains(second));
+        assert!(private.contains("added"));
+    }
+
+    #[cfg(not(unix))]
+    #[test]
+    fn full_extract_removes_unsupported_private_state_family() {
+        let src = TempDir::new().unwrap();
+        let out = TempDir::new().unwrap();
+        mk_file(src.path(), "lib.rs", "fn current() {}");
+        let state = out.path().join(".habitat-graph-state.json");
+        let family = [
+            state.clone(),
+            out.path()
+                .join(".habitat-graph-state.json.snapshot-generation"),
+            out.path().join(".habitat-graph-state.json.add-journal"),
+            out.path().join(".habitat-graph-state.json.update-journal"),
+        ];
+        for member in &family {
+            fs::write(member, "unsupported private state").unwrap();
+        }
+
+        assert_eq!(run(src.path(), out.path(), None), 0);
+        assert!(family.iter().all(|member| !member.exists()));
     }
 
     // ── T1b: graph.html is written (the interactive viewer) ──────────────────
@@ -1522,6 +1612,24 @@ mod tests {
     }
 
     #[test]
+    fn legacy_vault_notes_without_a_moc_are_not_claimed() {
+        let src = TempDir::new().unwrap();
+        let out = TempDir::new().unwrap();
+        let vault = TempDir::new().unwrap();
+        mk_file(src.path(), "lib.rs", "fn current() {}");
+        let note = legacy_vault_note(1, None, "current");
+        fs::write(vault.path().join("current.md"), &note).unwrap();
+
+        assert_eq!(run(src.path(), out.path(), Some(vault.path())), 4);
+        assert_eq!(
+            fs::read_to_string(vault.path().join("current.md")).unwrap(),
+            note
+        );
+        assert!(!vault.path().join("_MOC.md").exists());
+        assert!(!vault.path().join(super::VAULT_MANIFEST).exists());
+    }
+
+    #[test]
     fn legacy_empty_vault_moc_is_not_claimed_with_stale_notes() {
         let src = TempDir::new().unwrap();
         let out = TempDir::new().unwrap();
@@ -1611,6 +1719,21 @@ mod tests {
         assert_eq!(run(src.path(), out.path(), Some(vault.path())), 0);
         assert!(vault.path().join("new_generated.md").exists());
         assert!(!vault.path().join("old_generated.md").exists());
+    }
+
+    #[test]
+    fn vault_sync_uses_a_vault_scoped_lock() {
+        let vault = TempDir::new().unwrap();
+        let (_, _lock) = super::acquire_vault_lock(vault.path()).unwrap();
+        let error = sync_generated_vault(
+            vault.path(),
+            &[("generated.md".to_owned(), "generated".to_owned())],
+        )
+        .unwrap_err();
+
+        assert_eq!(error.kind(), "guard");
+        assert!(!vault.path().join("generated.md").exists());
+        assert!(!vault.path().join(super::VAULT_MANIFEST).exists());
     }
 
     #[test]

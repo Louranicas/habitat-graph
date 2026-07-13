@@ -690,14 +690,12 @@ fn validate_add_journal_origin(
     }
 
     let after_checksum = private_graph_generation(&journal.graph)?;
-    if !same_context {
-        let target_status = super::private_state::private_checksum_status_at_path(
-            state_path,
-            &[before_checksum, &after_checksum],
-        )?;
-        if target_status.any && !target_status.matched {
-            return Err(reject_foreign_add_journal());
-        }
+    let target_status = super::private_state::private_checksum_status_at_path(
+        state_path,
+        &[before_checksum, &after_checksum],
+    )?;
+    if target_status.any && !target_status.matched {
+        return Err(reject_foreign_add_journal());
     }
     let status = super::private_state::private_checksum_status(
         journal_state_path,
@@ -1543,7 +1541,7 @@ mod tests {
     }
 
     #[test]
-    fn journal_lineage_can_match_a_private_snapshot() {
+    fn same_context_journal_rejects_a_conflicting_target_despite_a_matching_snapshot() {
         let d = tdir();
         let out = d.join("g.json");
         let original = extract_from_bytes(b"fn api_key_original() {}", "rs").unwrap();
@@ -1583,15 +1581,18 @@ mod tests {
         )
         .unwrap();
 
-        merge_into_output(
+        let error = merge_into_output(
             extract_from_bytes(b"fn after_retry() {}", "rs").unwrap(),
             &out,
         )
-        .unwrap();
-        let private = fs::read_to_string(state_path).unwrap();
-        assert!(private.contains("api_key_original"));
-        assert!(private.contains("api_key_pending"));
-        assert!(private.contains("after_retry"));
+        .unwrap_err();
+        assert_eq!(error.kind(), "guard");
+        assert_eq!(fs::read_to_string(&out).unwrap(), public_before);
+        let private = fs::read_to_string(&state_path).unwrap();
+        assert!(private.contains("replacement"));
+        assert!(!private.contains("api_key_pending"));
+        assert!(!private.contains("after_retry"));
+        assert!(super::add_journal_path(&state_path).unwrap().exists());
     }
 
     #[test]

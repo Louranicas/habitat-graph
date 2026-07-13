@@ -1280,6 +1280,11 @@ fn remove_family(path: &Path, context: &str) -> Result<()> {
     Ok(())
 }
 
+#[cfg(not(unix))]
+pub(super) fn remove_unsupported_family(path: &Path) -> Result<()> {
+    remove_family(path, "unsupported private state")
+}
+
 fn family_members(path: &Path) -> Result<Vec<(PathBuf, String)>> {
     let parent = path
         .parent()
