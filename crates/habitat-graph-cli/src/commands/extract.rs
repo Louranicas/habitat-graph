@@ -26,7 +26,7 @@ const WIKI_MANIFEST_SCHEMA: &str = "habitat-graph.wiki-manifest.v3";
 const OPTIONAL_ARTIFACT_MANIFEST: &str = ".habitat-graph-artifacts.json";
 const OPTIONAL_ARTIFACT_MANIFEST_SCHEMA: &str = "habitat-graph.artifact-manifest.v1";
 const OPTIONAL_ARTIFACTS: &[&str] = &["graph.svg", "graph.graphml", "graph.cypher"];
-const VAULT_LOCK_STEM: &str = ".habitat-graph-vault";
+const GENERATED_DIRECTORY_LOCK_STEM: &str = ".habitat-graph-vault";
 
 /// Optional PB exporter artifacts to emit alongside the always-written core artifacts.
 ///
@@ -801,19 +801,21 @@ fn write_vault_manifest_state(
     )
 }
 
-fn acquire_vault_lock(
-    vault_dir: &Path,
+fn acquire_generated_directory_lock(
+    directory: &Path,
 ) -> Result<(PathBuf, super::private_state::OutputTransactionLock)> {
-    let canonical_vault = std::fs::canonicalize(vault_dir)
-        .map_err(|error| GraphError::Io(format!("resolve vault directory: {error}")))?;
-    let lock = super::private_state::acquire_output_lock(&canonical_vault.join(VAULT_LOCK_STEM))?;
-    Ok((canonical_vault, lock))
+    let canonical_directory = std::fs::canonicalize(directory)
+        .map_err(|error| GraphError::Io(format!("resolve generated directory: {error}")))?;
+    let lock = super::private_state::acquire_output_lock(
+        &canonical_directory.join(GENERATED_DIRECTORY_LOCK_STEM),
+    )?;
+    Ok((canonical_directory, lock))
 }
 
 /// Synchronizes generated notes exactly while preserving every unowned/user-authored file.
 fn sync_generated_vault(vault_dir: &Path, rendered: &[(String, String)]) -> Result<()> {
     std::fs::create_dir_all(vault_dir).map_err(|error| GraphError::Io(error.to_string()))?;
-    let (canonical_vault, _vault_lock) = acquire_vault_lock(vault_dir)?;
+    let (canonical_vault, _directory_lock) = acquire_generated_directory_lock(vault_dir)?;
     let vault_dir = canonical_vault.as_path();
     let prior_owned = generated_vault_ownership(vault_dir)?;
     let mut current_names = HashSet::with_capacity(rendered.len());
@@ -1315,6 +1317,8 @@ pub(super) fn sync_generated_wiki(
     claim_unowned: bool,
 ) -> Result<()> {
     std::fs::create_dir_all(wiki_dir).map_err(|error| GraphError::Io(error.to_string()))?;
+    let (canonical_wiki, _directory_lock) = acquire_generated_directory_lock(wiki_dir)?;
+    let wiki_dir = canonical_wiki.as_path();
     let prior_owned = generated_wiki_ownership(wiki_dir, claim_unowned)?;
     let mut current_names: HashSet<String> = HashSet::with_capacity(rendered.len());
     for (filename, _) in rendered {
@@ -2401,18 +2405,26 @@ mod tests {
     }
 
     #[test]
-    fn vault_sync_uses_a_vault_scoped_lock() {
-        let vault = TempDir::new().unwrap();
-        let (_, _lock) = super::acquire_vault_lock(vault.path()).unwrap();
-        let error = sync_generated_vault(
-            vault.path(),
+    fn generated_syncs_share_a_directory_scoped_lock() {
+        let directory = TempDir::new().unwrap();
+        let (_, _lock) = super::acquire_generated_directory_lock(directory.path()).unwrap();
+        let vault_error = sync_generated_vault(
+            directory.path(),
             &[("generated.md".to_owned(), "generated".to_owned())],
         )
         .unwrap_err();
+        let wiki_error = sync_generated_wiki(
+            directory.path(),
+            &[("index.md".to_owned(), "generated".to_owned())],
+            false,
+        )
+        .unwrap_err();
 
-        assert_eq!(error.kind(), "guard");
-        assert!(!vault.path().join("generated.md").exists());
-        assert!(!vault.path().join(super::VAULT_MANIFEST).exists());
+        assert_eq!(vault_error.kind(), "guard");
+        assert_eq!(wiki_error.kind(), "guard");
+        assert!(!directory.path().join("generated.md").exists());
+        assert!(!directory.path().join("index.md").exists());
+        assert!(!directory.path().join(super::VAULT_MANIFEST).exists());
     }
 
     #[test]
@@ -3388,7 +3400,11 @@ mod tests {
         assert!(wiki.join(super::WIKI_MANIFEST).exists());
         for entry in fs::read_dir(&wiki).unwrap() {
             let entry = entry.unwrap();
-            if entry.file_name() == super::WIKI_MANIFEST {
+            if !entry
+                .file_name()
+                .to_str()
+                .is_some_and(super::generated_wiki_filename)
+            {
                 continue;
             }
             let content = fs::read_to_string(entry.path()).unwrap();

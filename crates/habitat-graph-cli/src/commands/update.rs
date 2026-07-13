@@ -312,7 +312,8 @@ fn prepare_update_transaction(
     Ok((state, legacy, identity_lock, lock))
 }
 
-const UPDATE_JOURNAL_SCHEMA: &str = "habitat-graph.update-journal.v1";
+const LEGACY_UPDATE_JOURNAL_SCHEMA: &str = "habitat-graph.update-journal.v1";
+const UPDATE_JOURNAL_SCHEMA: &str = "habitat-graph.update-journal.v2";
 
 struct UpdateJournal {
     before_public_generation: Option<String>,
@@ -322,7 +323,6 @@ struct UpdateJournal {
     origin_lineage: Option<String>,
     before_private_checksum: Option<String>,
     after_private_checksum: String,
-    public_graph: Graph,
     state_graph: Graph,
 }
 
@@ -330,7 +330,6 @@ impl UpdateJournal {
     fn new(
         out: &Path,
         state_path: &Path,
-        public_graph: &Graph,
         state_graph: Graph,
         before_private_checksum: Option<&str>,
     ) -> Result<Self> {
@@ -346,7 +345,7 @@ impl UpdateJournal {
             state_path,
             "update transaction preparation",
         )?;
-        let public_json = habitat_graph_export::to_node_link(public_graph)?;
+        let public_json = habitat_graph_export::to_node_link(&state_graph)?;
         let origin = super::private_state::context_identity_for_output(&out.join("graph.json"))?;
         let journal = Self {
             before_public_generation: current_public_generation(&out.join("graph.json"))?,
@@ -356,7 +355,6 @@ impl UpdateJournal {
             origin_lineage: origin.as_ref().map(|identity| identity.lineage.clone()),
             before_private_checksum: before_private_checksum.map(str::to_owned),
             after_private_checksum: private_graph_generation(&state_graph)?,
-            public_graph: public_graph.clone(),
             state_graph,
         };
         if journal.origin_context != super::private_state::state_context_key(state_path) {
@@ -397,8 +395,6 @@ fn current_public_generation(path: &Path) -> Result<Option<String>> {
 }
 
 fn write_update_journal(state_path: &Path, journal: &UpdateJournal) -> Result<()> {
-    let public_graph = serde_json::to_value(&journal.public_graph)
-        .map_err(|error| GraphError::Schema(format!("update journal serialize: {error}")))?;
     let state_graph = serde_json::to_value(&journal.state_graph)
         .map_err(|error| GraphError::Schema(format!("update journal serialize: {error}")))?;
     let bytes = serde_json::to_vec_pretty(&serde_json::json!({
@@ -410,7 +406,6 @@ fn write_update_journal(state_path: &Path, journal: &UpdateJournal) -> Result<()
         "origin_lineage": journal.origin_lineage,
         "before_private_checksum": journal.before_private_checksum,
         "after_private_checksum": journal.after_private_checksum,
-        "public_graph": public_graph,
         "state_graph": state_graph,
     }))
     .map_err(|error| GraphError::Schema(format!("update journal serialize: {error}")))?;
@@ -455,7 +450,11 @@ fn load_update_journal(path: &Path) -> Result<UpdateJournal> {
         .ok_or_else(|| GraphError::Io("read update journal: file disappeared".to_owned()))?;
     let value: serde_json::Value = serde_json::from_str(&text)
         .map_err(|error| GraphError::Schema(format!("update journal parse: {error}")))?;
-    if value["schema"] != UPDATE_JOURNAL_SCHEMA {
+    let schema = value["schema"].as_str();
+    if !matches!(
+        schema,
+        Some(LEGACY_UPDATE_JOURNAL_SCHEMA | UPDATE_JOURNAL_SCHEMA)
+    ) {
         return Err(GraphError::Schema(format!(
             "unsupported update journal schema: {:?}",
             value["schema"]
@@ -483,14 +482,24 @@ fn load_update_journal(path: &Path) -> Result<UpdateJournal> {
         before_private_checksum: journal_generation(&value, "before_private_checksum", true)?,
         after_private_checksum: journal_generation(&value, "after_private_checksum", false)?
             .ok_or_else(|| GraphError::Schema("update journal checksum missing".to_owned()))?,
-        public_graph: journal_graph(&value["public_graph"], "public_graph")?,
         state_graph: journal_graph(&value["state_graph"], "state_graph")?,
     };
+    if schema == Some(LEGACY_UPDATE_JOURNAL_SCHEMA) {
+        let mut legacy_public_graph = journal_graph(&value["public_graph"], "public_graph")?;
+        legacy_public_graph.manifest = journal.state_graph.manifest.clone();
+        if legacy_public_graph != journal.state_graph {
+            return Err(GraphError::Schema(
+                "update journal graph mismatch".to_owned(),
+            ));
+        }
+    }
     let intended_public = habitat_graph_serve::from_node_link(&journal.after_public_json)?;
+    let rendered_public = habitat_graph_export::to_node_link(&journal.state_graph)?;
     if intended_public.schema != SCHEMA_VERSION
         || private_graph_generation(&journal.state_graph)? != journal.after_private_checksum
         || super::private_state::generation(journal.after_public_json.as_bytes())
             != journal.after_public_generation
+        || rendered_public != journal.after_public_json
     {
         return Err(GraphError::Schema(
             "update journal generation mismatch".to_owned(),
@@ -592,10 +601,10 @@ fn commit_update_journal(
     )?;
     super::extract::write_public_artifacts(
         out,
-        &journal.public_graph,
+        &journal.state_graph,
         super::extract::ExtractOpts::default(),
     )?;
-    let public_json = habitat_graph_export::to_node_link(&journal.public_graph)?;
+    let public_json = habitat_graph_export::to_node_link(&journal.state_graph)?;
     let public_graph = habitat_graph_serve::from_node_link(&public_json)?;
     let state_json = super::private_state::serialize(
         &journal.state_graph,
@@ -769,7 +778,7 @@ fn write_artifacts(
 ) -> Result<()> {
     let mut sidecar = graph.clone();
     sidecar.manifest = current_manifest;
-    let journal = UpdateJournal::new(out, sidecar_path, graph, sidecar, before_private_checksum)?;
+    let journal = UpdateJournal::new(out, sidecar_path, sidecar, before_private_checksum)?;
     write_update_journal(sidecar_path, &journal)?;
     commit_update_journal(
         out,
@@ -1921,6 +1930,73 @@ mod tests {
     }
 
     #[test]
+    fn update_journal_stores_one_graph_bound_to_its_public_projection() {
+        let src = TempDir::new().unwrap();
+        let out = TempDir::new().unwrap();
+        mk_file(src.path(), "lib.rs", "fn journal_node() {}");
+        let graph = habitat_graph_build::assemble(
+            habitat_graph_extract::extract_files(&[src.path().join("lib.rs")]).unwrap(),
+        )
+        .sorted();
+        let (state_path, _) = super::prepare_private_state(out.path()).unwrap();
+        let journal = super::UpdateJournal::new(out.path(), &state_path, graph, None).unwrap();
+        super::write_update_journal(&state_path, &journal).unwrap();
+        let journal_path = super::super::private_state::update_journal_path(&state_path).unwrap();
+        let mut value: serde_json::Value =
+            serde_json::from_str(&fs::read_to_string(&journal_path).unwrap()).unwrap();
+
+        assert_eq!(value["schema"], super::UPDATE_JOURNAL_SCHEMA);
+        assert!(value.get("public_graph").is_none());
+        assert!(super::load_update_journal(&journal_path).is_ok());
+
+        value["state_graph"]["nodes"][0]["source_file"] =
+            serde_json::Value::String("tampered.rs".to_owned());
+        let tampered = super::journal_graph(&value["state_graph"], "state_graph").unwrap();
+        value["after_private_checksum"] =
+            serde_json::Value::String(super::private_graph_generation(&tampered).unwrap());
+        fs::write(&journal_path, serde_json::to_vec_pretty(&value).unwrap()).unwrap();
+
+        let error = super::load_update_journal(&journal_path)
+            .err()
+            .expect("tampered journal must fail");
+        assert_eq!(error.kind(), "schema");
+        assert!(error.to_string().contains("generation mismatch"));
+    }
+
+    #[test]
+    fn legacy_update_journal_rejects_divergent_duplicate_graphs() {
+        let src = TempDir::new().unwrap();
+        let out = TempDir::new().unwrap();
+        mk_file(src.path(), "lib.rs", "fn legacy_journal_node() {}");
+        let graph = habitat_graph_build::assemble(
+            habitat_graph_extract::extract_files(&[src.path().join("lib.rs")]).unwrap(),
+        )
+        .sorted();
+        let (state_path, _) = super::prepare_private_state(out.path()).unwrap();
+        let journal = super::UpdateJournal::new(out.path(), &state_path, graph, None).unwrap();
+        super::write_update_journal(&state_path, &journal).unwrap();
+        let journal_path = super::super::private_state::update_journal_path(&state_path).unwrap();
+        let mut value: serde_json::Value =
+            serde_json::from_str(&fs::read_to_string(&journal_path).unwrap()).unwrap();
+        value["schema"] = serde_json::Value::String(super::LEGACY_UPDATE_JOURNAL_SCHEMA.to_owned());
+        value["public_graph"] = value["state_graph"].clone();
+        value["public_graph"]["manifest"]["tool_version"] =
+            serde_json::Value::String("allowed manifest difference".to_owned());
+        fs::write(&journal_path, serde_json::to_vec_pretty(&value).unwrap()).unwrap();
+        assert!(super::load_update_journal(&journal_path).is_ok());
+
+        value["public_graph"]["nodes"][0]["source_file"] =
+            serde_json::Value::String("divergent.rs".to_owned());
+        fs::write(&journal_path, serde_json::to_vec_pretty(&value).unwrap()).unwrap();
+
+        let error = super::load_update_journal(&journal_path)
+            .err()
+            .expect("divergent legacy journal must fail");
+        assert_eq!(error.kind(), "schema");
+        assert!(error.to_string().contains("graph mismatch"));
+    }
+
+    #[test]
     fn update_commit_rechecks_context_after_journal_creation() {
         let repo = TempDir::new().unwrap();
         init_git(repo.path());
@@ -1928,8 +2004,7 @@ mod tests {
         let out = repo.path().join("public");
         let (state_path, legacy_state_path) = super::prepare_private_state(&out).unwrap();
         let graph = Graph::new();
-        let journal =
-            super::UpdateJournal::new(&out, &state_path, &graph, graph.clone(), None).unwrap();
+        let journal = super::UpdateJournal::new(&out, &state_path, graph, None).unwrap();
         super::write_update_journal(&state_path, &journal).unwrap();
         let journal_path = super::super::private_state::update_journal_path(&state_path).unwrap();
 
@@ -1968,14 +2043,9 @@ mod tests {
         let pending = habitat_graph_build::merge(remote_graph, stored.graph.clone()).sorted();
         let mut state_graph = pending.clone();
         state_graph.manifest = stored.graph.manifest;
-        let journal = super::UpdateJournal::new(
-            out.path(),
-            &state_path,
-            &pending,
-            state_graph,
-            Some(&before_checksum),
-        )
-        .unwrap();
+        let journal =
+            super::UpdateJournal::new(out.path(), &state_path, state_graph, Some(&before_checksum))
+                .unwrap();
         super::write_update_journal(&state_path, &journal).unwrap();
         fs::write(
             out.path().join("graph.json"),
@@ -2009,7 +2079,6 @@ mod tests {
         let journal = super::UpdateJournal::new(
             out.path(),
             &state_path,
-            &stored.graph,
             pending_state,
             Some(&before_checksum),
         )
@@ -2066,7 +2135,6 @@ mod tests {
             let journal = super::UpdateJournal::new(
                 &out,
                 &origin_state,
-                &stored.graph,
                 pending_state,
                 include_before_checksum.then_some(before_checksum.as_str()),
             )

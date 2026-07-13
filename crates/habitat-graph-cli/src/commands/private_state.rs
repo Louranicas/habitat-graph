@@ -286,7 +286,7 @@ impl Drop for OutputTransactionLock {
 
 pub(super) fn acquire_output_lock(state_path: &Path) -> Result<OutputTransactionLock> {
     let lock_path = output_lock_path(state_path)?;
-    acquire_lock_path(&lock_path)
+    acquire_lock_path(&lock_path, None)
 }
 
 pub(super) fn acquire_output_identity_lock(output: &Path) -> Result<OutputTransactionLock> {
@@ -304,10 +304,16 @@ pub(super) fn acquire_output_identity_lock(output: &Path) -> Result<OutputTransa
         .filter(|parent| !parent.as_os_str().is_empty())
         .unwrap_or_else(|| Path::new("."));
     let parent = resolve_output_directory(parent)?;
-    acquire_lock_path(&parent.join(OUTPUT_IDENTITY_LOCK))
+    let filename = output
+        .file_name()
+        .ok_or_else(|| GraphError::Io("output path has no filename".to_owned()))?;
+    acquire_lock_path(
+        &parent.join(OUTPUT_IDENTITY_LOCK),
+        Some(&parent.join(filename)),
+    )
 }
 
-fn acquire_lock_path(lock_path: &Path) -> Result<OutputTransactionLock> {
+fn acquire_lock_path(lock_path: &Path, output: Option<&Path>) -> Result<OutputTransactionLock> {
     if let Some(parent) = lock_path
         .parent()
         .filter(|parent| !parent.as_os_str().is_empty())
@@ -373,9 +379,6 @@ fn acquire_lock_path(lock_path: &Path) -> Result<OutputTransactionLock> {
                 "output transaction lock changed while being opened".to_owned(),
             ));
         }
-        #[cfg(unix)]
-        file.set_permissions(std::fs::Permissions::from_mode(0o600))
-            .map_err(|error| GraphError::Io(format!("harden output transaction lock: {error}")))?;
         match file.try_lock() {
             Ok(()) => {}
             Err(std::fs::TryLockError::WouldBlock) => {
@@ -399,11 +402,37 @@ fn acquire_lock_path(lock_path: &Path) -> Result<OutputTransactionLock> {
                 "output transaction lock changed while being opened".to_owned(),
             ));
         }
+        ensure_lock_does_not_alias_output(&opened_metadata, output)?;
+        #[cfg(unix)]
+        file.set_permissions(std::fs::Permissions::from_mode(0o600))
+            .map_err(|error| GraphError::Io(format!("harden output transaction lock: {error}")))?;
         return Ok(OutputTransactionLock { file });
     }
     Err(GraphError::Guard(
         "output transaction lock changed while being opened".to_owned(),
     ))
+}
+
+fn ensure_lock_does_not_alias_output(
+    lock_metadata: &std::fs::Metadata,
+    output: Option<&Path>,
+) -> Result<()> {
+    let Some(output) = output else {
+        return Ok(());
+    };
+    match std::fs::symlink_metadata(output) {
+        Ok(metadata) if metadata.file_type().is_file() && same_file(lock_metadata, &metadata) => {
+            Err(GraphError::Guard(format!(
+                "output path aliases its transaction lock: {}",
+                output.display()
+            )))
+        }
+        Ok(_) => Ok(()),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(error) => Err(GraphError::Io(format!(
+            "inspect output path for transaction locking: {error}"
+        ))),
+    }
 }
 
 fn output_lock_path(state_path: &Path) -> Result<PathBuf> {
@@ -3713,6 +3742,32 @@ mod tests {
             assert!(error.to_string().contains("reserved"));
             assert!(!output.exists());
         }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn output_identity_lock_rejects_hard_linked_outputs_without_chmod() {
+        use std::os::unix::fs::PermissionsExt as _;
+
+        let root = TempDir::new().unwrap();
+        let lock = root.path().join(super::OUTPUT_IDENTITY_LOCK);
+        let output = root.path().join("graph.json");
+        fs::write(&lock, "public graph").unwrap();
+        fs::set_permissions(&lock, fs::Permissions::from_mode(0o644)).unwrap();
+        fs::hard_link(&lock, &output).unwrap();
+
+        let error = super::acquire_output_identity_lock(&output).unwrap_err();
+
+        assert_eq!(error.kind(), "guard");
+        assert!(error.to_string().contains("aliases"));
+        assert_eq!(
+            fs::metadata(&lock).unwrap().permissions().mode() & 0o777,
+            0o644
+        );
+        assert_eq!(
+            fs::metadata(&output).unwrap().permissions().mode() & 0o777,
+            0o644
+        );
     }
 
     #[cfg(unix)]
