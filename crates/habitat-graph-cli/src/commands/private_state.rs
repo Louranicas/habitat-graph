@@ -909,7 +909,7 @@ fn pending_transaction_paths(path: &Path, suffix: &str) -> Result<Vec<PathBuf>> 
     let mut paths = BTreeSet::new();
     for candidate in state_context_candidates(path)? {
         for (member, member_suffix) in family_members(&candidate)? {
-            if member_suffix.starts_with(suffix) {
+            if member_suffix == suffix {
                 paths.insert(member);
             }
         }
@@ -1128,12 +1128,7 @@ fn context_member_key<'a>(filename: &'a str, prefix: &str) -> Option<&'a str> {
         return None;
     }
     let suffix = rest.get(64..)?.strip_prefix(".json")?;
-    (suffix.is_empty()
-        || suffix.starts_with(SNAPSHOT_SEPARATOR)
-        || suffix.starts_with(ADD_JOURNAL_SUFFIX)
-        || suffix.starts_with(UPDATE_JOURNAL_SUFFIX)
-        || suffix.starts_with(MIGRATION_CONFLICT_SEPARATOR))
-    .then_some(context)
+    is_family_member_suffix(suffix).then_some(context)
 }
 
 fn prune_contexts(path: &Path) -> Result<()> {
@@ -1149,9 +1144,9 @@ fn prune_contexts(path: &Path) -> Result<()> {
         let keep = candidate == path
             || has_migration_conflicts(candidate)?
             || members.iter().any(|(_, suffix)| {
-                suffix.contains(ADD_JOURNAL_SUFFIX)
-                    || suffix.contains(UPDATE_JOURNAL_SUFFIX)
-                    || suffix.contains(MIGRATION_CONFLICT_SEPARATOR)
+                suffix == ADD_JOURNAL_SUFFIX
+                    || suffix == UPDATE_JOURNAL_SUFFIX
+                    || is_migration_conflict_suffix(suffix)
             });
         let mut modified = std::time::SystemTime::UNIX_EPOCH;
         for (member, _) in &members {
@@ -1254,7 +1249,7 @@ pub(super) fn migrate(legacy: &Path, current: &Path, context: &str) -> Result<()
 fn migrate_family(legacy: &Path, current: &Path, context: &str) -> Result<()> {
     let mut first_error = None;
     for (source, suffix) in family_members(legacy)? {
-        let result = if suffix.contains(MIGRATION_CONFLICT_SEPARATOR) {
+        let result = if is_migration_conflict_suffix(&suffix) {
             preserve_migration_conflict(&source, current, context)
         } else {
             let filename = current
@@ -1324,17 +1319,33 @@ fn family_members(path: &Path) -> Result<Vec<(PathBuf, String)>> {
         let Some(suffix) = filename.strip_prefix(base.as_ref()) else {
             continue;
         };
-        if suffix.is_empty()
-            || suffix.starts_with(SNAPSHOT_SEPARATOR)
-            || suffix.starts_with(ADD_JOURNAL_SUFFIX)
-            || suffix.starts_with(UPDATE_JOURNAL_SUFFIX)
-            || suffix.starts_with(MIGRATION_CONFLICT_SEPARATOR)
-        {
+        if is_family_member_suffix(suffix) {
             members.push((entry.path(), suffix.to_owned()));
         }
     }
     members.sort_unstable_by(|left, right| left.0.cmp(&right.0));
     Ok(members)
+}
+
+fn is_family_member_suffix(suffix: &str) -> bool {
+    is_primary_family_member_suffix(suffix) || is_migration_conflict_suffix(suffix)
+}
+
+fn is_primary_family_member_suffix(suffix: &str) -> bool {
+    suffix.is_empty()
+        || suffix == ADD_JOURNAL_SUFFIX
+        || suffix == UPDATE_JOURNAL_SUFFIX
+        || suffix
+            .strip_prefix(SNAPSHOT_SEPARATOR)
+            .is_some_and(is_generation)
+}
+
+fn is_migration_conflict_suffix(suffix: &str) -> bool {
+    suffix
+        .rsplit_once(MIGRATION_CONFLICT_SEPARATOR)
+        .is_some_and(|(member, generation)| {
+            is_primary_family_member_suffix(member) && is_generation(generation)
+        })
 }
 
 fn family_base_path(path: &Path) -> PathBuf {
@@ -1554,7 +1565,7 @@ fn ensure_no_migration_conflicts(path: &Path) -> Result<()> {
 
 fn ensure_no_family_conflicts(path: &Path) -> Result<()> {
     for (member, suffix) in family_members(path)? {
-        if suffix.contains(MIGRATION_CONFLICT_SEPARATOR) {
+        if is_migration_conflict_suffix(&suffix) {
             return Err(GraphError::Guard(format!(
                 "unresolved private state migration conflict: {}",
                 member.display()
@@ -2955,6 +2966,79 @@ mod tests {
             "legacy journal"
         );
         assert!(super::path_for_output(&output, &legacy).is_err());
+    }
+
+    #[test]
+    fn family_cleanup_preserves_prefix_lookalikes() {
+        let root = TempDir::new().unwrap();
+        let state = root.path().join("state.json");
+        let generation = super::generation(b"owned generation");
+        let conflict_generation = super::generation(b"conflict generation");
+        let snapshot_suffix = format!("{SNAPSHOT_SEPARATOR}{generation}");
+        let owned = [
+            state.clone(),
+            sibling(&state, &snapshot_suffix),
+            sibling(&state, ADD_JOURNAL_SUFFIX),
+            sibling(&state, super::UPDATE_JOURNAL_SUFFIX),
+            sibling(
+                &state,
+                &format!("{}{generation}", super::MIGRATION_CONFLICT_SEPARATOR),
+            ),
+            sibling(
+                &state,
+                &format!(
+                    "{snapshot_suffix}{}{conflict_generation}",
+                    super::MIGRATION_CONFLICT_SEPARATOR
+                ),
+            ),
+            sibling(
+                &state,
+                &format!(
+                    "{ADD_JOURNAL_SUFFIX}{}{conflict_generation}",
+                    super::MIGRATION_CONFLICT_SEPARATOR
+                ),
+            ),
+        ];
+        let lookalikes = [
+            sibling(&state, &format!("{SNAPSHOT_SEPARATOR}{generation}.backup")),
+            sibling(&state, &format!("{ADD_JOURNAL_SUFFIX}.backup")),
+            sibling(&state, &format!("{}.backup", super::UPDATE_JOURNAL_SUFFIX)),
+            sibling(
+                &state,
+                &format!("{}{generation}.backup", super::MIGRATION_CONFLICT_SEPARATOR),
+            ),
+        ];
+        for path in owned.iter().chain(&lookalikes) {
+            fs::write(path, "state").unwrap();
+        }
+
+        super::remove_family(&state, "test private state").unwrap();
+
+        assert!(owned.iter().all(|path| !path.exists()));
+        assert!(lookalikes.iter().all(|path| path.exists()));
+    }
+
+    #[test]
+    fn context_discovery_ignores_family_prefix_lookalikes() {
+        let root = TempDir::new().unwrap();
+        let key = super::generation(b"output");
+        let current_context = super::generation(b"current context");
+        let unrelated_context = super::generation(b"unrelated context");
+        let current = root.path().join(format!(
+            "{key}{}{current_context}.json",
+            super::CONTEXT_SEPARATOR
+        ));
+        let lookalike = root.path().join(format!(
+            "{key}{}{unrelated_context}.json{ADD_JOURNAL_SUFFIX}.backup",
+            super::CONTEXT_SEPARATOR
+        ));
+        fs::write(&current, "state").unwrap();
+        fs::write(lookalike, "backup").unwrap();
+
+        assert_eq!(
+            super::context_state_candidates(&current).unwrap(),
+            vec![current]
+        );
     }
 
     #[test]
