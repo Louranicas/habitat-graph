@@ -5,7 +5,7 @@
 //! deleting or overwriting unowned files. Obsidian vault sync uses the same fail-closed ownership
 //! rule, including conservative recognition of the exact legacy generated-note layout.
 
-use std::collections::{BTreeMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::fmt::Write as _;
 use std::path::{Component, Path, PathBuf};
 
@@ -110,6 +110,12 @@ struct GeneratedVaultNode {
     id: u32,
     community: Option<u32>,
     label: String,
+    links: Vec<GeneratedVaultLink>,
+}
+
+struct GeneratedVaultLink {
+    relation: String,
+    target: String,
 }
 
 fn valid_legacy_yaml_string(value: &str) -> bool {
@@ -167,8 +173,7 @@ fn parse_generated_vault_node_note(content: &str) -> Option<GeneratedVaultNode> 
     }
     let line = lines.next()?.strip_prefix("line: ")?;
     canonical_legacy_number::<u32>(line)?;
-    let degree = lines.next()?.strip_prefix("degree: ")?;
-    canonical_legacy_number::<u64>(degree)?;
+    let degree = canonical_legacy_number::<usize>(lines.next()?.strip_prefix("degree: ")?)?;
 
     let mut tags = format!("tags: [hg/node, crate/{krate}, lang/{lang}");
     if let Some(community) = community {
@@ -191,19 +196,33 @@ fn parse_generated_vault_node_note(content: &str) -> Option<GeneratedVaultNode> 
     if !lines.next()?.is_empty() || lines.next()? != "## Links" {
         return None;
     }
-    for link in lines {
-        let (_, target) = link
-            .strip_prefix("- ")
-            .and_then(|link| link.split_once(":: [["))?;
-        if !target.ends_with("]]") {
-            return None;
-        }
+    let parsed_links: Vec<_> = lines
+        .map(parse_generated_vault_link)
+        .collect::<Option<_>>()?;
+    if parsed_links.len() != degree {
+        return None;
     }
 
     Some(GeneratedVaultNode {
         id,
         community,
         label,
+        links: parsed_links,
+    })
+}
+
+fn parse_generated_vault_link(line: &str) -> Option<GeneratedVaultLink> {
+    let (relation, target) = line.strip_prefix("- ")?.split_once(":: [[")?;
+    if relation
+        .chars()
+        .any(|character| matches!(character, '[' | ']' | ':'))
+        || display_safe(relation) != relation
+    {
+        return None;
+    }
+    Some(GeneratedVaultLink {
+        relation: relation.to_owned(),
+        target: target.strip_suffix("]]")?.to_owned(),
     })
 }
 
@@ -380,6 +399,37 @@ fn legacy_vault_filenames_match(notes: &[(String, GeneratedVaultNode)]) -> bool 
     decoded_any && legacy_vault_allocated_filenames_match(notes, &raw_stems)
 }
 
+fn legacy_vault_links_match(notes: &[(String, GeneratedVaultNode)]) -> bool {
+    let mut ids_by_label = HashMap::with_capacity(notes.len());
+    for (_, note) in notes {
+        if ids_by_label.insert(note.label.as_str(), note.id).is_some() {
+            return false;
+        }
+    }
+
+    let mut reciprocal = BTreeMap::new();
+    for (_, note) in notes {
+        for link in &note.links {
+            let Some(&target) = ids_by_label.get(link.target.as_str()) else {
+                return false;
+            };
+            if note.id == target {
+                continue;
+            }
+            let (low, high, direction) = if note.id < target {
+                (note.id, target, 0_usize)
+            } else {
+                (target, note.id, 1_usize)
+            };
+            let counts = reciprocal
+                .entry((low, high, link.relation.as_str()))
+                .or_insert([0_usize; 2]);
+            counts[direction] = counts[direction].saturating_add(1);
+        }
+    }
+    reciprocal.values().all(|counts| counts[0] == counts[1])
+}
+
 fn generated_vault_moc_section_matches(
     links: &[&str],
     community: Option<u32>,
@@ -410,6 +460,7 @@ fn is_generated_vault_moc(content: &str, notes: &[(String, GeneratedVaultNode)])
     let mut seen_ids = HashSet::with_capacity(notes.len());
     if notes.iter().any(|(_, note)| !seen_ids.insert(note.id))
         || !legacy_vault_filenames_match(notes)
+        || !legacy_vault_links_match(notes)
     {
         return false;
     }
@@ -1552,12 +1603,27 @@ mod tests {
     }
 
     fn legacy_vault_note(id: u32, community: Option<u32>, label: &str) -> String {
+        legacy_vault_note_with_links(id, community, label, &[])
+    }
+
+    fn legacy_vault_note_with_links(
+        id: u32,
+        community: Option<u32>,
+        label: &str,
+        links: &[&str],
+    ) -> String {
         let community_field =
             community.map_or_else(String::new, |value| format!("community: {value}\n"));
         let community_tag =
             community.map_or_else(String::new, |value| format!(", community/{value}"));
+        let degree = links.len();
+        let links = if links.is_empty() {
+            String::new()
+        } else {
+            format!("{}\n", links.join("\n"))
+        };
         format!(
-            "---\nid: {id}\n{community_field}crate: test\nlang: rust\nfile: \"lib.rs\"\nline: 1\ndegree: 0\ntags: [hg/node, crate/test, lang/rust{community_tag}]\n---\n\n# {label}\n\n> `lib.rs:1` · crate `test` · degree 0\n\n## Links\n"
+            "---\nid: {id}\n{community_field}crate: test\nlang: rust\nfile: \"lib.rs\"\nline: 1\ndegree: {degree}\ntags: [hg/node, crate/test, lang/rust{community_tag}]\n---\n\n# {label}\n\n> `lib.rs:1` · crate `test` · degree {degree}\n\n## Links\n{links}"
         )
     }
 
@@ -1826,18 +1892,90 @@ mod tests {
 
     #[test]
     fn legacy_vault_ownership_requires_the_exact_generated_layout() {
-        let valid = "---\nid: 1\ncommunity: 2\ncrate: test\nlang: rust\nfile: \"lib.rs\"\nline: 3\ndegree: 4\ntags: [hg/node, crate/test, lang/rust, community/2]\n---\n\n# generated\n\n> `lib.rs:3` · crate `test` · degree 4\n\n## Links\n";
+        let valid = "---\nid: 1\ncommunity: 2\ncrate: test\nlang: rust\nfile: \"lib.rs\"\nline: 3\ndegree: 0\ntags: [hg/node, crate/test, lang/rust, community/2]\n---\n\n# generated\n\n> `lib.rs:3` · crate `test` · degree 0\n\n## Links\n";
         assert!(super::parse_generated_vault_node_note(valid).is_some());
 
         for invalid in [
             valid.replacen("crate: test\nlang: rust", "lang: rust\ncrate: test", 1),
             valid.replacen("line: 3", "line: many", 1),
             valid.replacen("line: 3", "line: 03", 1),
-            valid.replacen("degree: 4", "degree: many", 1),
+            valid.replacen("degree: 0", "degree: many", 1),
             valid.replacen("tags: [hg/node,", "tags: [hg/notebook,", 1),
         ] {
             assert!(super::parse_generated_vault_node_note(&invalid).is_none());
         }
+
+        let inconsistent_degree =
+            legacy_vault_note_with_links(1, None, "generated", &["- calls:: [[target]]"])
+                .replace("degree: 1", "degree: 2");
+        assert!(super::parse_generated_vault_node_note(&inconsistent_degree).is_none());
+    }
+
+    #[test]
+    fn legacy_vault_ownership_requires_complete_reciprocal_links() {
+        let vault = TempDir::new().unwrap();
+        fs::write(
+            vault.path().join("One.md"),
+            legacy_vault_note_with_links(
+                1,
+                None,
+                "One",
+                &["- calls:: [[Two]]", "- calls:: [[Two]]"],
+            ),
+        )
+        .unwrap();
+        fs::write(
+            vault.path().join("Two.md"),
+            legacy_vault_note_with_links(2, None, "Two", &["- calls:: [[One]]"]),
+        )
+        .unwrap();
+        fs::write(
+            vault.path().join("_MOC.md"),
+            "# Map of Content\n\n## Unclustered\n\n- [[One]]\n- [[Two]]\n",
+        )
+        .unwrap();
+
+        assert!(super::generated_vault_ownership(vault.path())
+            .unwrap()
+            .is_empty());
+
+        fs::write(
+            vault.path().join("Two.md"),
+            legacy_vault_note_with_links(
+                2,
+                None,
+                "Two",
+                &["- calls:: [[One]]", "- calls:: [[One]]"],
+            ),
+        )
+        .unwrap();
+        assert_eq!(
+            super::generated_vault_ownership(vault.path()).unwrap(),
+            std::collections::HashSet::from([
+                "One.md".to_owned(),
+                "Two.md".to_owned(),
+                "_MOC.md".to_owned(),
+            ])
+        );
+    }
+
+    #[test]
+    fn legacy_vault_ownership_rejects_links_outside_the_note_set() {
+        let vault = TempDir::new().unwrap();
+        fs::write(
+            vault.path().join("One.md"),
+            legacy_vault_note_with_links(1, None, "One", &["- calls:: [[Missing]]"]),
+        )
+        .unwrap();
+        fs::write(
+            vault.path().join("_MOC.md"),
+            "# Map of Content\n\n## Unclustered\n\n- [[One]]\n",
+        )
+        .unwrap();
+
+        assert!(super::generated_vault_ownership(vault.path())
+            .unwrap()
+            .is_empty());
     }
 
     #[test]
@@ -1898,9 +2036,10 @@ mod tests {
             .collect();
         for (index, (raw, displayed)) in raw_labels.iter().zip(&displayed_labels).enumerate() {
             let filename = format!("{}.md", super::legacy_vault_filename_stem(raw));
+            let id = u32::try_from(index).expect("label fixture index fits u32") + 1;
             fs::write(
                 vault.path().join(filename),
-                legacy_vault_note(index as u32 + 1, None, displayed),
+                legacy_vault_note(id, None, displayed),
             )
             .unwrap();
         }
