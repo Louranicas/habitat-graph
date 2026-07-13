@@ -10,4 +10,4 @@
 pub mod ast;
 pub mod registry;
 
-pub use registry::{extract_files, registered_extractors, Extractor};
+pub use registry::{extract_files, extract_inputs, registered_extractors, Extractor};

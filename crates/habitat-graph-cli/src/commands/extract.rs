@@ -1291,15 +1291,11 @@ pub(super) fn write_public_artifacts(out: &Path, graph: &Graph, opts: ExtractOpt
 pub(super) fn write_full_build_private_state(
     state_path: &Path,
     graph: &Graph,
-    files: &[PathBuf],
+    inputs: &[(PathBuf, Vec<u8>)],
 ) -> Result<()> {
-    let inputs = files
-        .iter()
-        .map(|path| habitat_graph_source::read_local(path, 0).map(|bytes| (path.clone(), bytes)))
-        .collect::<Result<Vec<_>>>()?;
     let mut private_graph = graph.clone();
     private_graph.manifest =
-        habitat_graph_source::build_manifest(&inputs, env!("CARGO_PKG_VERSION"));
+        habitat_graph_source::build_manifest(inputs, env!("CARGO_PKG_VERSION"));
     let public_json = habitat_graph_export::to_node_link(graph)?;
     let public_graph = habitat_graph_serve::from_node_link(&public_json)?;
     let state_json = super::private_state::serialize(
@@ -1308,6 +1304,21 @@ pub(super) fn write_full_build_private_state(
         &super::private_state::semantic_generation(&public_graph)?,
     )?;
     super::private_state::write_state(state_path, &state_json)
+}
+
+pub(super) fn capture_inputs(files: &[PathBuf]) -> Result<Vec<(PathBuf, Vec<u8>)>> {
+    files
+        .iter()
+        .map(|path| habitat_graph_source::read_local(path, 0).map(|bytes| (path.clone(), bytes)))
+        .collect()
+}
+
+pub(super) fn build_full_graph(inputs: &[(PathBuf, Vec<u8>)]) -> Result<Graph> {
+    let extractions = habitat_graph_extract::extract_inputs(inputs)?;
+    let mut graph = habitat_graph_build::assemble(extractions);
+    graph.communities =
+        habitat_graph_analyze::detect_communities(&habitat_graph_analyze::trusted_subgraph(&graph));
+    Ok(graph.sorted())
 }
 
 /// Inner pipeline: detect → extract → build → analyze → export → write.
@@ -1327,20 +1338,8 @@ fn run_inner(
 ) -> Result<(usize, usize, usize)> {
     // Detect all Rust source files under `dir`, honoring .gitignore.
     let files = habitat_graph_source::detect(dir, &["rs"])?;
-
-    // Extract raw nodes and edges from each file (parallel, tree-sitter).
-    let extractions = habitat_graph_extract::extract_files(&files)?;
-
-    // Intern labels, resolve edges, dedup, and sort into a canonical graph.
-    let mut graph = habitat_graph_build::assemble(extractions);
-
-    // Attach Leiden communities before the final sort pass. F12: cluster on the TRUSTED subgraph
-    // only — INFERRED/AMBIGUOUS edges must not inflate degree or merge communities.
-    graph.communities =
-        habitat_graph_analyze::detect_communities(&habitat_graph_analyze::trusted_subgraph(&graph));
-
-    // Re-sort to canonicalize the community list (idempotent on nodes/edges).
-    let graph = graph.sorted();
+    let inputs = capture_inputs(&files)?;
+    let graph = build_full_graph(&inputs)?;
 
     std::fs::create_dir_all(out).map_err(|error| GraphError::Io(error.to_string()))?;
     let legacy_state = out.join(".habitat-graph-state.json");
@@ -1353,7 +1352,7 @@ fn run_inner(
     {
         super::private_state::ensure_no_pending_add_journals(&state_path)?;
         super::private_state::ensure_no_pending_update_journals(&state_path)?;
-        write_full_build_private_state(&state_path, &graph, &files)?;
+        write_full_build_private_state(&state_path, &graph, &inputs)?;
     }
     #[cfg(not(unix))]
     super::private_state::remove_unsupported_family(&state_path)?;
@@ -1451,6 +1450,34 @@ mod tests {
         assert!(!private.contains(first));
         assert!(private.contains(second));
         assert!(private.contains("added"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn full_build_graph_and_manifest_share_captured_inputs() {
+        let src = TempDir::new().unwrap();
+        let out = TempDir::new().unwrap();
+        let source = src.path().join("lib.rs");
+        fs::write(&source, "fn captured_version() {}").unwrap();
+        let inputs = super::capture_inputs(std::slice::from_ref(&source)).unwrap();
+        fs::write(&source, "fn later_version() {}").unwrap();
+
+        let graph = super::build_full_graph(&inputs).unwrap();
+        let state_path = out.path().join("private-state.json");
+        super::write_full_build_private_state(&state_path, &graph, &inputs).unwrap();
+
+        assert!(graph
+            .nodes
+            .iter()
+            .any(|node| node.label == "captured_version"));
+        assert!(!graph.nodes.iter().any(|node| node.label == "later_version"));
+        let stored = super::super::private_state::read(&state_path, "test private state")
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            stored.graph.manifest,
+            habitat_graph_source::build_manifest(&inputs, env!("CARGO_PKG_VERSION"))
+        );
     }
 
     #[cfg(not(unix))]

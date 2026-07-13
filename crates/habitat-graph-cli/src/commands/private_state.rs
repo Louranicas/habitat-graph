@@ -736,6 +736,18 @@ pub(super) fn write_state(path: &Path, bytes: &[u8]) -> Result<()> {
             }
         }
     }
+    if let Some(replacement_generation) = replacement.public_generation.as_deref() {
+        let snapshot = snapshot_path(path, replacement_generation)?;
+        if let Some(snapshot_state) = read(&snapshot, "private state snapshot")? {
+            if snapshot_state.public_generation.as_deref() != Some(replacement_generation) {
+                return Err(GraphError::Guard(format!(
+                    "private state snapshot generation is invalid: {}",
+                    snapshot.display()
+                )));
+            }
+            remove(&snapshot, "private state snapshot")?;
+        }
+    }
     write(path, bytes)?;
     prune_snapshots(path)?;
     prune_contexts(path)
@@ -2456,6 +2468,62 @@ mod tests {
         assert_eq!(
             restored.graph.manifest.tool_version,
             "first-private-lineage"
+        );
+    }
+
+    #[test]
+    fn recurring_public_generation_replaces_its_stale_snapshot() {
+        let root = TempDir::new().unwrap();
+        let path = root.path().join("state.json");
+        let first_generation = super::generation(b"first public graph");
+        let second_generation = super::generation(b"second public graph");
+        let semantic = super::semantic_generation(&Graph::new()).unwrap();
+
+        for (lineage, generation) in [
+            ("first-private-lineage", &first_generation),
+            ("second-private-lineage", &second_generation),
+            ("recurring-private-lineage", &first_generation),
+        ] {
+            let mut graph = Graph::new();
+            graph.manifest.tool_version = lineage.to_owned();
+            super::write_state(
+                &path,
+                &super::serialize(&graph, generation, &semantic).unwrap(),
+            )
+            .unwrap();
+        }
+
+        let current = super::load_matching(
+            &path,
+            Some(&first_generation),
+            Some(&semantic),
+            "test private state",
+        )
+        .unwrap()
+        .unwrap();
+        assert_eq!(
+            current.graph.manifest.tool_version,
+            "recurring-private-lineage"
+        );
+
+        let mut final_graph = Graph::new();
+        final_graph.manifest.tool_version = "final-private-lineage".to_owned();
+        super::write_state(
+            &path,
+            &super::serialize(&final_graph, &second_generation, &semantic).unwrap(),
+        )
+        .unwrap();
+        let restored = super::load_matching(
+            &path,
+            Some(&first_generation),
+            Some(&semantic),
+            "test private state",
+        )
+        .unwrap()
+        .unwrap();
+        assert_eq!(
+            restored.graph.manifest.tool_version,
+            "recurring-private-lineage"
         );
     }
 

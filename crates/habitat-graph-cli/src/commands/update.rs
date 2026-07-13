@@ -178,16 +178,15 @@ fn run_inner(dir: &Path, out: &Path) -> Result<()> {
         .map(String::as_str)
         .collect();
 
-    let to_extract: Vec<PathBuf> = files
-        .iter()
-        .filter(|p| {
-            let cow = p.to_string_lossy();
+    let to_extract: Vec<(PathBuf, Vec<u8>)> = current_inputs
+        .into_iter()
+        .filter(|(path, _)| {
+            let cow = path.to_string_lossy();
             to_extract_set.contains(cow.as_ref())
         })
-        .cloned()
         .collect();
 
-    let new_extractions = habitat_graph_extract::extract_files(&to_extract)?;
+    let new_extractions = habitat_graph_extract::extract_inputs(&to_extract)?;
     let new_partial = habitat_graph_build::assemble(new_extractions);
 
     // ── Prune prior graph (drop stale-file nodes + dangling edges) ───────────────
@@ -695,9 +694,6 @@ fn try_load_prior(sidecar_path: &Path, public: Option<&PublicOutput>) -> Result<
 /// Reads every file in `files`, runs the full pipeline
 /// (extract → assemble → analyze → export), and writes all artifacts plus fresh private state.
 ///
-/// Files are read twice: once internally by `extract_files` for AST parsing, and once here to
-/// compute the `blake3` content hashes for the private-state manifest.
-///
 /// # Errors
 ///
 /// Returns a [`GraphError`] on extraction, analysis, export, or IO failure.
@@ -707,16 +703,14 @@ fn do_full_build(
     sidecar_path: &Path,
     legacy_sidecar_path: &Path,
 ) -> Result<()> {
-    // Run the full pipeline (extract_files reads files internally).
-    let extractions = habitat_graph_extract::extract_files(files)?;
+    let inputs = read_inputs(files)?;
+    let extractions = habitat_graph_extract::extract_inputs(&inputs)?;
     let mut graph = habitat_graph_build::assemble(extractions);
     // F12: cluster on the TRUSTED subgraph only (INFERRED/AMBIGUOUS edges excluded).
     graph.communities =
         habitat_graph_analyze::detect_communities(&habitat_graph_analyze::trusted_subgraph(&graph));
     let graph = graph.sorted();
 
-    // Compute the sidecar manifest (second pass over the same files for content hashes).
-    let inputs = read_inputs(files)?;
     let manifest = habitat_graph_source::build_manifest(&inputs, env!("CARGO_PKG_VERSION"));
 
     let n = graph.nodes.len();

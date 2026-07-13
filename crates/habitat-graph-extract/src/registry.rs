@@ -88,6 +88,30 @@ pub fn extract_files(files: &[PathBuf]) -> Result<Vec<Extraction>> {
         .collect()
 }
 
+/// Extracts every captured file in `inputs`, dispatching by extension, in parallel.
+///
+/// Inputs with no matching extractor are skipped (not an error). Returns one
+/// [`Extraction`] per extracted input.
+///
+/// # Errors
+/// Returns the first [`GraphError`](habitat_graph_core::GraphError) encountered during parsing.
+pub fn extract_inputs(inputs: &[(PathBuf, Vec<u8>)]) -> Result<Vec<Extraction>> {
+    let extractors = registered_extractors();
+    inputs
+        .par_iter()
+        .filter_map(|(path, bytes)| {
+            let ext = path
+                .extension()
+                .and_then(|e| e.to_str())
+                .map(str::to_lowercase)?;
+            let extractor = extractors
+                .iter()
+                .find(|e| e.extensions().contains(&ext.as_str()))?;
+            Some(extractor.extract(path, bytes))
+        })
+        .collect()
+}
+
 #[cfg(test)]
 mod tests {
     use std::fs;
@@ -96,7 +120,7 @@ mod tests {
     use habitat_graph_core::{Extraction, GraphError};
     use tempfile::TempDir;
 
-    use super::{extract_files, registered_extractors};
+    use super::{extract_files, extract_inputs, registered_extractors};
 
     // ── helpers ──────────────────────────────────────────────────────────────────
 
@@ -375,6 +399,20 @@ mod tests {
             "source_file {:?} must contain the filename 'traced.rs'",
             node.source_file
         );
+    }
+
+    #[test]
+    fn extract_inputs_uses_captured_bytes() {
+        let dir = TempDir::new().unwrap();
+        let path = write_file(&dir, "captured.rs", "fn before_capture() {}");
+        let inputs = vec![(path.clone(), fs::read(&path).unwrap())];
+        fs::write(&path, "fn after_capture() {}").unwrap();
+
+        let result = extract_inputs(&inputs).unwrap();
+        let labels = sorted_labels(&result);
+
+        assert!(labels.iter().any(|label| label == "before_capture"));
+        assert!(!labels.iter().any(|label| label == "after_capture"));
     }
 
     #[test]

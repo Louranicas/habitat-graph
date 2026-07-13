@@ -90,19 +90,13 @@ pub fn rebuild(dir: &Path, out: &Path) -> Result<usize> {
 
     // Detect source files (all extractor-supported extensions).
     let files = habitat_graph_source::detect(dir, &["rs", "ts", "tsx", "js", "jsx", "go", "py"])?;
-
-    let extractions = habitat_graph_extract::extract_files(&files)?;
-    let mut graph = habitat_graph_build::assemble(extractions);
-
-    // Re-run community detection on the trusted subgraph (consistent with F12).
-    graph.communities =
-        habitat_graph_analyze::detect_communities(&habitat_graph_analyze::trusted_subgraph(&graph));
-    let graph = graph.sorted();
+    let inputs = super::extract::capture_inputs(&files)?;
+    let graph = super::extract::build_full_graph(&inputs)?;
 
     let n = graph.nodes.len();
 
     #[cfg(unix)]
-    super::extract::write_full_build_private_state(&state_path, &graph, &files)?;
+    super::extract::write_full_build_private_state(&state_path, &graph, &inputs)?;
     super::extract::write_public_artifacts(out, &graph, super::extract::ExtractOpts::default())?;
 
     Ok(n)
