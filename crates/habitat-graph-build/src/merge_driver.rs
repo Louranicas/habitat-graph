@@ -34,8 +34,7 @@
 use std::collections::{HashMap, HashSet};
 
 use habitat_graph_core::{
-    display_safe, project_public_relation, redact_public_text, Community, CommunityId, Edge, Graph,
-    Manifest, Node, NodeId,
+    project_public_relation, Community, CommunityId, Edge, Graph, Manifest, Node, NodeId,
 };
 
 use crate::merge_identity::{
@@ -222,94 +221,7 @@ fn ambiguous_projected_node_ids(
         }
     }
 
-    let signatures = [
-        projected_node_signatures(base),
-        projected_node_signatures(ours),
-        projected_node_signatures(theirs),
-    ];
-    for (id, base_signature) in &signatures[0] {
-        let (Some(ours_signature), Some(theirs_signature)) =
-            (signatures[1].get(id), signatures[2].get(id))
-        else {
-            continue;
-        };
-        if ours_signature == theirs_signature {
-            continue;
-        }
-        if ours_signature != base_signature {
-            ambiguous[0].insert(*id);
-        }
-        if theirs_signature != base_signature {
-            ambiguous[1].insert(*id);
-        }
-    }
     ambiguous
-}
-
-#[derive(Eq, PartialEq)]
-struct ProjectedNodeSignature {
-    label: String,
-    source_file: String,
-    source_line: u32,
-    incident_edges: Vec<(u8, NodeId, String, habitat_graph_core::Confidence)>,
-    communities: Vec<CommunityId>,
-}
-
-fn projected_node_signatures(graph: &Graph) -> HashMap<NodeId, ProjectedNodeSignature> {
-    let mut signatures: HashMap<_, _> = graph
-        .nodes
-        .iter()
-        .filter(|node| habitat_graph_core::is_canonical_redaction_marker(&node.label))
-        .map(|node| {
-            let source_file = redact_public_text(&node.source_file);
-            (
-                node.id,
-                ProjectedNodeSignature {
-                    label: node.label.clone(),
-                    source_file: display_safe(source_file.as_ref()),
-                    source_line: node.source_location.start_line,
-                    incident_edges: Vec::new(),
-                    communities: Vec::new(),
-                },
-            )
-        })
-        .collect();
-
-    for edge in &graph.edges {
-        let relation = project_public_relation(&edge.relation);
-        if edge.source == edge.target {
-            if let Some(signature) = signatures.get_mut(&edge.source) {
-                signature
-                    .incident_edges
-                    .push((0, edge.source, relation, edge.confidence));
-            }
-            continue;
-        }
-        if let Some(signature) = signatures.get_mut(&edge.source) {
-            signature
-                .incident_edges
-                .push((1, edge.target, relation.clone(), edge.confidence));
-        }
-        if let Some(signature) = signatures.get_mut(&edge.target) {
-            signature
-                .incident_edges
-                .push((2, edge.source, relation, edge.confidence));
-        }
-    }
-
-    for community in &graph.communities {
-        for member in &community.members {
-            if let Some(signature) = signatures.get_mut(member) {
-                signature.communities.push(community.id);
-            }
-        }
-    }
-    for signature in signatures.values_mut() {
-        signature.incident_edges.sort_unstable();
-        signature.communities.sort_unstable();
-        signature.communities.dedup();
-    }
-    signatures
 }
 
 #[derive(Clone, Copy)]
@@ -1941,39 +1853,87 @@ mod tests {
     }
 
     #[test]
-    fn same_slot_projected_replacement_requires_matching_provenance() {
+    fn projected_node_one_sided_source_change_preserves_identity() {
         let marker = "[REDACTED:api_key]";
         let base = nodes_graph(&[(10, marker), (20, "Safe")]);
         let mut ours = base.clone();
-        ours.nodes
+        let ours_node = ours
+            .nodes
             .iter_mut()
             .find(|node| node.id == NodeId::new(10))
-            .unwrap()
-            .source_file = "replacement.rs".to_owned();
+            .unwrap();
+        ours_node.source_file = "moved.rs".to_owned();
+        ours_node.source_location = Span::new(20, 30, 4, 5);
         let theirs = base.clone();
 
         let merged = merge3(&base, &ours, &theirs);
-        assert_eq!(node_labels(&merged), vec!["Safe"]);
+        let projected = merged
+            .nodes
+            .iter()
+            .find(|node| node.id == NodeId::new(10))
+            .unwrap();
+        assert_eq!(projected.label, marker);
+        assert_eq!(projected.source_file, "moved.rs");
+        assert_eq!(projected.source_location, Span::new(20, 30, 4, 5));
     }
 
     #[test]
-    fn same_slot_projected_replacement_cannot_inherit_topology() {
+    fn projected_node_one_sided_topology_change_is_merged() {
         let marker = "[REDACTED:api_key]";
         let mut base = nodes_graph(&[(10, marker), (20, "Safe")]);
         base.edges.push(edge(10, 20, "base-edge"));
         base.communities.push(community(1, "base", &[10]));
         let mut ours = nodes_graph(&[(10, marker), (20, "Safe")]);
-        ours.edges.push(edge(10, 20, "replacement-edge"));
-        ours.communities.push(community(2, "replacement", &[10]));
+        ours.edges.push(edge(10, 20, "new-edge"));
+        ours.communities.push(community(2, "new", &[10]));
         let theirs = base.clone();
 
         let merged = merge3(&base, &ours, &theirs);
-        assert_eq!(node_labels(&merged), vec!["Safe"]);
-        assert!(merged.edges.is_empty());
+        assert_eq!(node_labels(&merged), vec!["Safe", marker]);
+        assert_eq!(merged.edges.len(), 1);
+        assert_eq!(merged.edges[0].source, NodeId::new(10));
+        assert_eq!(merged.edges[0].relation, "new-edge");
+        let new_community = merged
+            .communities
+            .iter()
+            .find(|community| community.label == "new")
+            .unwrap();
+        assert_eq!(new_community.members, vec![NodeId::new(10)]);
         assert!(merged
             .communities
             .iter()
-            .all(|community| community.members.is_empty()));
+            .all(|community| community.label != "base"));
+    }
+
+    #[test]
+    fn projected_node_one_sided_edge_addition_is_merged() {
+        let marker = "[REDACTED:api_key]";
+        let base = nodes_graph(&[(10, marker), (20, "Safe")]);
+        let mut ours = base.clone();
+        ours.edges.push(edge(10, 20, "calls"));
+        let theirs = base.clone();
+
+        let merged = merge3(&base, &ours, &theirs);
+        assert_eq!(node_labels(&merged), vec!["Safe", marker]);
+        assert_eq!(merged.edges.len(), 1);
+        assert_eq!(merged.edges[0].source, NodeId::new(10));
+        assert_eq!(merged.edges[0].relation, "calls");
+    }
+
+    #[test]
+    fn projected_node_one_sided_edge_confidence_change_is_merged() {
+        let marker = "[REDACTED:api_key]";
+        let mut base = nodes_graph(&[(10, marker), (20, "Safe")]);
+        base.edges.push(edge(10, 20, "calls"));
+        let mut ours = base.clone();
+        ours.edges[0].confidence = Confidence::Ambiguous;
+        let theirs = base.clone();
+
+        let merged = merge3(&base, &ours, &theirs);
+        assert_eq!(node_labels(&merged), vec!["Safe", marker]);
+        assert_eq!(merged.edges.len(), 1);
+        assert_eq!(merged.edges[0].source, NodeId::new(10));
+        assert_eq!(merged.edges[0].confidence, Confidence::Ambiguous);
     }
 
     #[test]
