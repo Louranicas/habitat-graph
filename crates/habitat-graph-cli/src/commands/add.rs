@@ -54,7 +54,8 @@ const PRIVATE_STATE_SUFFIX: &str = ".habitat-graph-state.json";
 const SHARED_PRIVATE_STATE: &str = ".habitat-graph-state.json";
 const LEGACY_ADD_JOURNAL_SCHEMA: &str = "habitat-graph.add-journal.v1";
 const UNSCOPED_ADD_JOURNAL_SCHEMA: &str = "habitat-graph.add-journal.v2";
-const ADD_JOURNAL_SCHEMA: &str = "habitat-graph.add-journal.v3";
+const CONTEXT_ADD_JOURNAL_SCHEMA: &str = "habitat-graph.add-journal.v3";
+const ADD_JOURNAL_SCHEMA: &str = "habitat-graph.add-journal.v4";
 
 // ── Extension inference ───────────────────────────────────────────────────────
 
@@ -307,7 +308,6 @@ pub fn merge_into_output(new_graph: Graph, out: &Path) -> Result<()> {
         public_prior.graph.as_ref(),
         &before_private_checksum,
         &merged,
-        &json,
     )?;
     commit_add_transaction(
         &out,
@@ -424,6 +424,7 @@ fn load_private_state(
 struct AddJournal {
     before_public: Option<Graph>,
     after_public: Graph,
+    recorded_after_public_generation: Option<String>,
     legacy_generations: Option<(Option<String>, String)>,
     origin_context: Option<String>,
     origin_lineage: Option<String>,
@@ -489,7 +490,6 @@ fn write_add_journal(
     before_public: Option<&Graph>,
     before_private_checksum: &str,
     graph: &Graph,
-    public_json: &str,
 ) -> Result<()> {
     if !super::private_state::is_generation(before_private_checksum) {
         return Err(GraphError::Schema(
@@ -499,7 +499,9 @@ fn write_add_journal(
     let graph_value: serde_json::Value = serde_json::from_str(&graph.to_json()?)
         .map_err(|error| GraphError::Schema(format!("add journal graph serialize: {error}")))?;
     let before_public = before_public.map(public_graph_state);
-    let after_public = public_graph_state(&habitat_graph_serve::from_node_link(public_json)?);
+    let public_json = habitat_graph_export::to_node_link(graph)?;
+    let after_public_generation = content_generation(&public_json);
+    let after_private_checksum = private_graph_generation(graph)?;
     let origin = super::private_state::context_identity_for_output(out)?;
     if origin.as_ref().map(|identity| identity.key.as_str())
         != super::private_state::state_context_key(state_path).as_deref()
@@ -516,12 +518,11 @@ fn write_add_journal(
     let bytes = serde_json::to_vec_pretty(&serde_json::json!({
         "schema": ADD_JOURNAL_SCHEMA,
         "before_public": before_public,
-        "after_public": after_public,
+        "after_public_generation": after_public_generation,
         "origin_context": origin.as_ref().map(|identity| identity.key.as_str()),
         "origin_lineage": origin.as_ref().map(|identity| identity.lineage.as_str()),
         "before_private_checksum": before_private_checksum,
-        "public_checksum": content_generation(public_json),
-        "public_json": public_json,
+        "after_private_checksum": after_private_checksum,
         "graph": graph_value,
     }))
     .map_err(|error| GraphError::Schema(format!("add journal serialize: {error}")))?;
@@ -593,7 +594,9 @@ fn load_add_journal(path: &Path) -> Result<Option<AddJournal>> {
         .map_err(|error| GraphError::Schema(format!("add journal parse: {error}")))?;
     let schema = value["schema"].as_str();
     let legacy_generation = match schema {
-        Some(ADD_JOURNAL_SCHEMA | UNSCOPED_ADD_JOURNAL_SCHEMA) => false,
+        Some(ADD_JOURNAL_SCHEMA | CONTEXT_ADD_JOURNAL_SCHEMA | UNSCOPED_ADD_JOURNAL_SCHEMA) => {
+            false
+        }
         Some(LEGACY_ADD_JOURNAL_SCHEMA) => true,
         _ => {
             return Err(GraphError::Schema(format!(
@@ -608,9 +611,11 @@ fn load_add_journal(path: &Path) -> Result<Option<AddJournal>> {
             .ok_or_else(|| GraphError::Schema("add journal missing `graph`".to_owned()))?,
         "graph",
     )?;
-    let (origin_context, origin_lineage, before_private_checksum) = if schema
-        == Some(ADD_JOURNAL_SCHEMA)
-    {
+    let context_scoped = matches!(
+        schema,
+        Some(ADD_JOURNAL_SCHEMA | CONTEXT_ADD_JOURNAL_SCHEMA)
+    );
+    let (origin_context, origin_lineage, before_private_checksum) = if context_scoped {
         let origin_context = parse_optional_journal_generation(&value, "origin_context")?;
         let origin_lineage = parse_optional_journal_generation(&value, "origin_lineage")?;
         if origin_context.is_some() != origin_lineage.is_some() {
@@ -629,8 +634,24 @@ fn load_add_journal(path: &Path) -> Result<Option<AddJournal>> {
     } else {
         (None, None, None)
     };
+    if schema == Some(ADD_JOURNAL_SCHEMA) {
+        let after_private_checksum = value["after_private_checksum"]
+            .as_str()
+            .filter(|checksum| super::private_state::is_generation(checksum))
+            .ok_or_else(|| {
+                GraphError::Schema("add journal `after_private_checksum` is invalid".to_owned())
+            })?;
+        if private_graph_generation(&graph)? != after_private_checksum {
+            return Err(GraphError::Schema(
+                "add journal private generation mismatch".to_owned(),
+            ));
+        }
+    }
 
-    let (before_public, after_public, legacy_generations, public_json) = if legacy_generation {
+    let public_json = habitat_graph_export::to_node_link(&graph)?;
+    let after_public = public_graph_state(&habitat_graph_serve::from_node_link(&public_json)?);
+    let (before_public, recorded_after_public_generation, legacy_generations) = if legacy_generation
+    {
         let before = match value.get("before_public") {
             Some(serde_json::Value::Null) => None,
             Some(serde_json::Value::String(generation)) => Some(generation.clone()),
@@ -646,9 +667,7 @@ fn load_add_journal(path: &Path) -> Result<Option<AddJournal>> {
                 GraphError::Schema("legacy add journal `after_public` must be a string".to_owned())
             })?
             .to_owned();
-        let public_json = habitat_graph_export::to_node_link(&graph)?;
-        let after_public = public_graph_state(&habitat_graph_serve::from_node_link(&public_json)?);
-        (None, after_public, Some((before, after)), public_json)
+        (None, None, Some((before, after)))
     } else {
         let before_public = match value.get("before_public") {
             Some(serde_json::Value::Null) => None,
@@ -662,32 +681,46 @@ fn load_add_journal(path: &Path) -> Result<Option<AddJournal>> {
                 ))
             }
         };
-        let after_public = public_graph_state(&parse_journal_graph(
-            value.get("after_public").ok_or_else(|| {
-                GraphError::Schema("add journal missing `after_public`".to_owned())
-            })?,
-            "after_public",
-        )?);
-        let public_json = value["public_json"]
-            .as_str()
-            .ok_or_else(|| {
+        let recorded_after_public_generation = if schema == Some(ADD_JOURNAL_SCHEMA) {
+            value["after_public_generation"]
+                .as_str()
+                .filter(|generation| super::private_state::is_generation(generation))
+                .ok_or_else(|| {
+                    GraphError::Schema(
+                        "add journal `after_public_generation` is invalid".to_owned(),
+                    )
+                })?
+                .to_owned()
+        } else {
+            let stored_after_public = public_graph_state(&parse_journal_graph(
+                value.get("after_public").ok_or_else(|| {
+                    GraphError::Schema("add journal missing `after_public`".to_owned())
+                })?,
+                "after_public",
+            )?);
+            let stored_public_json = value["public_json"].as_str().ok_or_else(|| {
                 GraphError::Schema("add journal `public_json` must be a string".to_owned())
-            })?
-            .to_owned();
-        let checksum = value["public_checksum"].as_str().ok_or_else(|| {
-            GraphError::Schema("add journal `public_checksum` must be a string".to_owned())
-        })?;
-        let stored_public = public_graph_state(&habitat_graph_serve::from_node_link(&public_json)?);
-        if content_generation(&public_json) != checksum || stored_public != after_public {
-            return Err(GraphError::Schema(
-                "add journal public generation mismatch".to_owned(),
-            ));
-        }
-        (before_public, after_public, None, public_json)
+            })?;
+            let checksum = value["public_checksum"].as_str().ok_or_else(|| {
+                GraphError::Schema("add journal `public_checksum` must be a string".to_owned())
+            })?;
+            let stored_public =
+                public_graph_state(&habitat_graph_serve::from_node_link(stored_public_json)?);
+            if content_generation(stored_public_json) != checksum
+                || stored_public != stored_after_public
+            {
+                return Err(GraphError::Schema(
+                    "add journal public generation mismatch".to_owned(),
+                ));
+            }
+            checksum.to_owned()
+        };
+        (before_public, Some(recorded_after_public_generation), None)
     };
     Ok(Some(AddJournal {
         before_public,
         after_public,
+        recorded_after_public_generation,
         legacy_generations,
         origin_context,
         origin_lineage,
@@ -699,7 +732,9 @@ fn load_add_journal(path: &Path) -> Result<Option<AddJournal>> {
 
 fn add_journal_matches_public(journal: &AddJournal, public: &PublicOutput) -> bool {
     let current_state = public.graph.as_ref().map(public_graph_state);
-    let current_matches_intended = current_state.as_ref() == Some(&journal.after_public);
+    let current_matches_intended = current_state.as_ref() == Some(&journal.after_public)
+        || journal.recorded_after_public_generation.as_deref()
+            == public.content_generation.as_deref();
     let current_matches_prior = if let Some((before, after)) = &journal.legacy_generations {
         let current = public.content_generation.as_deref();
         current == Some(after.as_str()) || current == before.as_deref()
@@ -1502,7 +1537,6 @@ mod tests {
         let failed_add =
             extract_from_bytes(b"fn api_key_pending() {}", "rs").expect("extract pending");
         let pending = habitat_graph_build::merge(failed_add, original).sorted();
-        let pending_json = habitat_graph_export::to_node_link(&pending).expect("render pending");
         let state_path = super::private_state_path(&out).expect("state path");
         let before_graph =
             habitat_graph_serve::from_node_link(&public_before).expect("parse original graph");
@@ -1512,7 +1546,6 @@ mod tests {
             Some(&before_graph),
             &private_checksum(&state_path),
             &pending,
-            &pending_json,
         )
         .expect("write interrupted transaction");
 
@@ -1547,7 +1580,6 @@ mod tests {
             original,
         )
         .sorted();
-        let pending_json = habitat_graph_export::to_node_link(&pending).unwrap();
         let state_path = super::private_state_path(&out).unwrap();
         super::write_add_journal(
             &out,
@@ -1555,7 +1587,6 @@ mod tests {
             Some(&before_graph),
             &private_checksum(&state_path),
             &pending,
-            &pending_json,
         )
         .unwrap();
 
@@ -1580,7 +1611,6 @@ mod tests {
             original,
         )
         .sorted();
-        let pending_json = habitat_graph_export::to_node_link(&pending).unwrap();
         let state_path = super::private_state_path(&out).unwrap();
         super::write_add_journal(
             &out,
@@ -1588,7 +1618,6 @@ mod tests {
             Some(&before_graph),
             &private_checksum(&state_path),
             &pending,
-            &pending_json,
         )
         .unwrap();
 
@@ -1615,7 +1644,6 @@ mod tests {
         let failed_add =
             extract_from_bytes(b"fn api_key_pending() {}", "rs").expect("extract pending");
         let pending = habitat_graph_build::merge(failed_add, original).sorted();
-        let pending_json = habitat_graph_export::to_node_link(&pending).unwrap();
         let old_state_path = super::private_state_path(&out).unwrap();
         super::write_add_journal(
             &out,
@@ -1623,7 +1651,6 @@ mod tests {
             Some(&before_graph),
             &private_checksum(&old_state_path),
             &pending,
-            &pending_json,
         )
         .unwrap();
 
@@ -1649,19 +1676,11 @@ mod tests {
         fs::create_dir_all(out.parent().unwrap()).unwrap();
         let state_path = super::private_state_path(&out).unwrap();
         let graph = Graph::new();
-        let public_json = habitat_graph_export::to_node_link(&graph).unwrap();
         let before_checksum = super::super::private_state::generation(b"before");
 
         commit_git(&d, "second");
-        let error = super::write_add_journal(
-            &out,
-            &state_path,
-            None,
-            &before_checksum,
-            &graph,
-            &public_json,
-        )
-        .unwrap_err();
+        let error = super::write_add_journal(&out, &state_path, None, &before_checksum, &graph)
+            .unwrap_err();
 
         assert_eq!(error.kind(), "guard");
         assert!(error.to_string().contains("Git context changed"));
@@ -1686,15 +1705,7 @@ mod tests {
         )
         .unwrap();
         let before_checksum = super::private_graph_generation(&graph).unwrap();
-        super::write_add_journal(
-            &out,
-            &state_path,
-            None,
-            &before_checksum,
-            &graph,
-            &public_json,
-        )
-        .unwrap();
+        super::write_add_journal(&out, &state_path, None, &before_checksum, &graph).unwrap();
         let journal_path = super::add_journal_path(&state_path).unwrap();
 
         commit_git(&d, "second");
@@ -1728,14 +1739,12 @@ mod tests {
             original,
         )
         .sorted();
-        let pending_json = habitat_graph_export::to_node_link(&pending).unwrap();
         super::write_add_journal(
             &out,
             &legacy_state,
             Some(&before_graph),
             &private_checksum(&legacy_state),
             &pending,
-            &pending_json,
         )
         .unwrap();
 
@@ -1787,7 +1796,6 @@ mod tests {
             None,
             &super::private_graph_generation(&Graph::new()).unwrap(),
             &pending,
-            &pending_public,
         )
         .unwrap();
 
@@ -1830,14 +1838,12 @@ mod tests {
             stored.graph,
         )
         .sorted();
-        let pending_json = habitat_graph_export::to_node_link(&pending).unwrap();
         super::write_add_journal(
             &out,
             &state_path,
             Some(&before_graph),
             &before_checksum,
             &pending,
-            &pending_json,
         )
         .unwrap();
 
@@ -1876,7 +1882,6 @@ mod tests {
             original,
         )
         .sorted();
-        let pending_json = habitat_graph_export::to_node_link(&pending).unwrap();
         let alpha_state = super::private_state_path(&out).unwrap();
         super::write_add_journal(
             &out,
@@ -1884,7 +1889,6 @@ mod tests {
             Some(&before_graph),
             &private_checksum(&alpha_state),
             &pending,
-            &pending_json,
         )
         .unwrap();
 
@@ -1917,7 +1921,6 @@ mod tests {
             original,
         )
         .sorted();
-        let pending_json = habitat_graph_export::to_node_link(&pending).unwrap();
         let origin_state = super::private_state_path(&out).unwrap();
         super::write_add_journal(
             &out,
@@ -1925,7 +1928,6 @@ mod tests {
             Some(&before_graph),
             &private_checksum(&origin_state),
             &pending,
-            &pending_json,
         )
         .unwrap();
 
@@ -1954,7 +1956,7 @@ mod tests {
     }
 
     #[test]
-    fn journal_recovery_uses_the_stored_public_projection_bytes() {
+    fn journal_recovery_renders_public_projection_from_checked_graph() {
         let d = tdir();
         let out = d.join("g.json");
         let original = extract_from_bytes(b"fn original() {}", "rs").expect("extract original");
@@ -1964,7 +1966,6 @@ mod tests {
         let added = extract_from_bytes(b"fn pending() {}", "rs").expect("extract pending");
         let pending = habitat_graph_build::merge(added, original).sorted();
         let canonical = habitat_graph_export::to_node_link(&pending).expect("render pending");
-        let stored_projection = format!("{canonical}\n");
         let state_path = super::private_state_path(&out).expect("state path");
         let before_graph =
             habitat_graph_serve::from_node_link(&public_before).expect("parse original graph");
@@ -1974,16 +1975,28 @@ mod tests {
             Some(&before_graph),
             &private_checksum(&state_path),
             &pending,
-            &stored_projection,
         )
         .expect("write interrupted transaction");
+        let journal_path = super::add_journal_path(&state_path).unwrap();
+        let mut journal: serde_json::Value =
+            serde_json::from_str(&fs::read_to_string(&journal_path).unwrap()).unwrap();
+        assert_eq!(journal["schema"], super::ADD_JOURNAL_SCHEMA);
+        assert_eq!(
+            journal["after_private_checksum"],
+            super::private_graph_generation(&pending).unwrap()
+        );
+        assert!(journal.get("public_json").is_none());
+        assert!(journal.get("after_public").is_none());
+        journal["public_json"] = serde_json::json!("stale projection bytes");
+        journal["after_public"] = serde_json::to_value(&before_graph).unwrap();
+        fs::write(&journal_path, serde_json::to_vec_pretty(&journal).unwrap()).unwrap();
 
         let mut public = super::load_public_output(&out).expect("load public graph");
         super::recover_add_journal(&out, &state_path, &mut public).expect("recover journal");
 
-        assert_eq!(fs::read_to_string(&out).unwrap(), stored_projection);
+        assert_eq!(fs::read_to_string(&out).unwrap(), canonical);
         assert!(fs::read_to_string(&state_path).unwrap().contains("pending"));
-        assert!(!super::add_journal_path(&state_path).unwrap().exists());
+        assert!(!journal_path.exists());
     }
 
     #[test]
@@ -2006,7 +2019,6 @@ mod tests {
             Some(&before_graph),
             &private_checksum(&state_path),
             &pending,
-            &intended,
         )
         .expect("write interrupted transaction");
         fs::write(&out, format!("{intended}\n")).expect("write equivalent public graph");
@@ -2050,15 +2062,25 @@ mod tests {
         shifted["label"] = serde_json::json!("[REDACTED:api_key]");
         let stored_projection = serde_json::to_string_pretty(&stored_value).unwrap();
         let state_path = super::private_state_path(&out).expect("state path");
-        super::write_add_journal(
-            &out,
-            &state_path,
-            Some(&before_graph),
-            &private_checksum(&state_path),
-            &pending,
-            &stored_projection,
+        let stored_public = habitat_graph_serve::from_node_link(&stored_projection).unwrap();
+        let graph_value: serde_json::Value =
+            serde_json::from_str(&pending.to_json().unwrap()).unwrap();
+        let journal = serde_json::json!({
+            "schema": super::CONTEXT_ADD_JOURNAL_SCHEMA,
+            "before_public": super::public_graph_state(&before_graph),
+            "after_public": super::public_graph_state(&stored_public),
+            "origin_context": null,
+            "origin_lineage": null,
+            "before_private_checksum": private_checksum(&state_path),
+            "public_checksum": super::content_generation(&stored_projection),
+            "public_json": stored_projection,
+            "graph": graph_value,
+        });
+        super::super::private_state::write(
+            &super::add_journal_path(&state_path).unwrap(),
+            &serde_json::to_vec_pretty(&journal).unwrap(),
         )
-        .expect("write interrupted transaction");
+        .expect("write legacy interrupted transaction");
 
         let next = extract_from_bytes(b"fn after_retry() {}", "rs").expect("extract next");
         merge_into_output(next, &out).expect("recover and merge next");
@@ -2069,6 +2091,45 @@ mod tests {
         let public = fs::read_to_string(&out).unwrap();
         assert!(public.contains("policy_shifted"));
         assert!(public.contains("after_retry"));
+    }
+
+    #[test]
+    fn journal_recovery_rejects_a_changed_raw_graph() {
+        let d = tdir();
+        let out = d.join("g.json");
+        let original = extract_from_bytes(b"fn original() {}", "rs").expect("extract original");
+        merge_into_output(original.clone(), &out).expect("write original");
+
+        let public_before = fs::read_to_string(&out).expect("read original public graph");
+        let before_graph =
+            habitat_graph_serve::from_node_link(&public_before).expect("parse original graph");
+        let pending = habitat_graph_build::merge(
+            extract_from_bytes(b"fn pending() {}", "rs").expect("extract pending"),
+            original,
+        )
+        .sorted();
+        let state_path = super::private_state_path(&out).expect("state path");
+        super::write_add_journal(
+            &out,
+            &state_path,
+            Some(&before_graph),
+            &private_checksum(&state_path),
+            &pending,
+        )
+        .expect("write interrupted transaction");
+        let journal_path = super::add_journal_path(&state_path).unwrap();
+        let mut journal: serde_json::Value =
+            serde_json::from_str(&fs::read_to_string(&journal_path).unwrap()).unwrap();
+        journal["graph"]["nodes"][0]["label"] = serde_json::json!("changed after checksum");
+        fs::write(&journal_path, serde_json::to_vec_pretty(&journal).unwrap()).unwrap();
+
+        let mut public = super::load_public_output(&out).expect("load public graph");
+        let error = super::recover_add_journal(&out, &state_path, &mut public).unwrap_err();
+
+        assert_eq!(error.kind(), "schema");
+        assert!(error.to_string().contains("private generation mismatch"));
+        assert_eq!(fs::read_to_string(&out).unwrap(), public_before);
+        assert!(journal_path.exists());
     }
 
     #[test]
@@ -2083,7 +2144,6 @@ mod tests {
 
         let added = extract_from_bytes(b"fn pending() {}", "rs").expect("extract pending");
         let pending = habitat_graph_build::merge(added, original).sorted();
-        let pending_json = habitat_graph_export::to_node_link(&pending).expect("render pending");
         let state_path = super::private_state_path(&out).expect("state path");
         super::write_add_journal(
             &out,
@@ -2091,7 +2151,6 @@ mod tests {
             Some(&before_graph),
             &private_checksum(&state_path),
             &pending,
-            &pending_json,
         )
         .expect("write interrupted transaction");
 

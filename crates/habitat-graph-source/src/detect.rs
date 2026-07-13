@@ -28,15 +28,37 @@ const MAX_GIT_MARKER_LINE_BYTES: u64 = 4096;
 pub fn detect(root: &Path, extensions: &[&str]) -> Result<Vec<PathBuf>> {
     // Lower-case every caller-supplied extension key once, outside the per-entry loop.
     let lowered: Vec<String> = extensions.iter().map(|e| e.to_lowercase()).collect();
+    let canonical_root = std::fs::canonicalize(root).map_err(|error| {
+        GraphError::Io(format!(
+            "resolve detection root {}: {error}",
+            root.display()
+        ))
+    })?;
 
     let mut paths: Vec<PathBuf> = Vec::new();
     let mut walker = ignore::WalkBuilder::new(root);
-    if !has_git_ancestor(root) {
-        walker
-            .require_git(false)
-            .parents(false)
-            .git_global(false)
-            .git_exclude(false);
+    match git_ancestor(&canonical_root) {
+        None => {
+            walker
+                .require_git(false)
+                .parents(false)
+                .git_global(false)
+                .git_exclude(false);
+        }
+        Some(metadata) => {
+            walker.current_dir(metadata.root);
+            if let Some(exclude) = metadata.manual_exclude {
+                walker.git_exclude(false);
+                if exclude.is_file() {
+                    if let Some(error) = walker.add_ignore(&exclude) {
+                        return Err(GraphError::Io(format!(
+                            "load Git exclude {}: {error}",
+                            exclude.display()
+                        )));
+                    }
+                }
+            }
+        }
     }
 
     for entry in walker.build() {
@@ -58,32 +80,83 @@ pub fn detect(root: &Path, extensions: &[&str]) -> Result<Vec<PathBuf>> {
     Ok(paths)
 }
 
-fn has_git_ancestor(root: &Path) -> bool {
-    let absolute = std::path::absolute(root).unwrap_or_else(|_| root.to_path_buf());
-    absolute
-        .ancestors()
-        .any(|ancestor| is_git_metadata(&ancestor.join(".git")))
+struct GitMetadata {
+    root: PathBuf,
+    manual_exclude: Option<PathBuf>,
 }
 
-fn is_git_metadata(path: &Path) -> bool {
+fn git_ancestor(root: &Path) -> Option<GitMetadata> {
+    root.ancestors()
+        .find_map(|ancestor| git_metadata(&ancestor.join(".git")))
+}
+
+fn git_metadata(path: &Path) -> Option<GitMetadata> {
     if path.is_dir() {
-        path.join("HEAD").is_file()
+        path.join("HEAD").is_file().then_some(GitMetadata {
+            root: path.parent().unwrap_or_else(|| Path::new("")).to_path_buf(),
+            manual_exclude: None,
+        })
     } else if path.is_file() {
-        gitdir_marker(path)
-            .map(|gitdir| {
-                if gitdir.is_absolute() {
-                    gitdir
-                } else {
-                    path.parent().unwrap_or_else(|| Path::new("")).join(gitdir)
-                }
-            })
-            .is_some_and(|gitdir| gitdir.is_dir() && gitdir.join("HEAD").is_file())
+        let marker = gitdir_marker(path)?;
+        let gitdir = if marker.path.is_absolute() {
+            marker.path
+        } else {
+            path.parent()
+                .unwrap_or_else(|| Path::new(""))
+                .join(marker.path)
+        };
+        if !gitdir.is_dir() || !gitdir.join("HEAD").is_file() {
+            return None;
+        }
+        let common_dir = git_common_dir(&gitdir)?;
+        Some(GitMetadata {
+            root: path.parent().unwrap_or_else(|| Path::new("")).to_path_buf(),
+            manual_exclude: (marker.non_utf8 || common_dir.non_utf8)
+                .then(|| common_dir.path.join("info/exclude")),
+        })
     } else {
-        false
+        None
     }
 }
 
-fn gitdir_marker(path: &Path) -> Option<PathBuf> {
+fn git_common_dir(gitdir: &Path) -> Option<NativePath> {
+    let marker = gitdir.join("commondir");
+    if !marker.exists() {
+        return Some(NativePath {
+            path: gitdir.to_path_buf(),
+            non_utf8: false,
+        });
+    }
+    let common = native_path_line(&marker)?;
+    Some(NativePath {
+        path: if common.path.is_absolute() {
+            common.path
+        } else {
+            gitdir.join(common.path)
+        },
+        non_utf8: common.non_utf8,
+    })
+}
+
+fn gitdir_marker(path: &Path) -> Option<NativePath> {
+    let line = bounded_first_line(path)?;
+    let gitdir = trim_ascii_whitespace(line.strip_prefix(b"gitdir:")?);
+    if gitdir.is_empty() {
+        return None;
+    }
+    native_path_from_bytes(gitdir)
+}
+
+fn native_path_line(path: &Path) -> Option<NativePath> {
+    let line = bounded_first_line(path)?;
+    if line.is_empty() {
+        None
+    } else {
+        native_path_from_bytes(&line)
+    }
+}
+
+fn bounded_first_line(path: &Path) -> Option<Vec<u8>> {
     let file = std::fs::File::open(path).ok()?;
     let mut line = Vec::new();
     let mut reader = std::io::BufReader::new(file).take(MAX_GIT_MARKER_LINE_BYTES + 1);
@@ -91,11 +164,44 @@ fn gitdir_marker(path: &Path) -> Option<PathBuf> {
     if line.is_empty() || line.len() as u64 > MAX_GIT_MARKER_LINE_BYTES {
         return None;
     }
-    let line = std::str::from_utf8(&line).ok()?.trim();
-    line.strip_prefix("gitdir:")
-        .map(str::trim)
-        .filter(|gitdir| !gitdir.is_empty())
-        .map(PathBuf::from)
+    Some(trim_ascii_whitespace(&line).to_vec())
+}
+
+fn trim_ascii_whitespace(mut bytes: &[u8]) -> &[u8] {
+    while bytes.first().is_some_and(u8::is_ascii_whitespace) {
+        bytes = &bytes[1..];
+    }
+    while bytes.last().is_some_and(u8::is_ascii_whitespace) {
+        bytes = &bytes[..bytes.len() - 1];
+    }
+    bytes
+}
+
+#[cfg(unix)]
+fn native_path_from_bytes(bytes: &[u8]) -> Option<NativePath> {
+    use std::os::unix::ffi::OsStringExt as _;
+
+    if bytes.contains(&0) {
+        None
+    } else {
+        Some(NativePath {
+            path: std::ffi::OsString::from_vec(bytes.to_vec()).into(),
+            non_utf8: std::str::from_utf8(bytes).is_err(),
+        })
+    }
+}
+
+#[cfg(not(unix))]
+fn native_path_from_bytes(bytes: &[u8]) -> Option<NativePath> {
+    std::str::from_utf8(bytes).ok().map(|path| NativePath {
+        path: PathBuf::from(path),
+        non_utf8: false,
+    })
+}
+
+struct NativePath {
+    path: PathBuf,
+    non_utf8: bool,
 }
 
 #[cfg(test)]
@@ -387,6 +493,24 @@ mod tests {
     }
 
     #[test]
+    fn lexical_repository_ancestor_does_not_change_non_git_scan() {
+        let sandbox = TempDir::new().unwrap();
+        let repository = sandbox.path().join("repository");
+        fs::create_dir_all(repository.join(".git")).unwrap();
+        fs::write(repository.join(".git/HEAD"), "ref: refs/heads/main\n").unwrap();
+        fs::create_dir(repository.join("pivot")).unwrap();
+        let staged = sandbox.path().join("staged");
+        fs::create_dir(&staged).unwrap();
+        fs::write(staged.join("visible.rs"), b"").unwrap();
+        fs::write(sandbox.path().join(".ignore"), "visible.rs\n").unwrap();
+
+        let lexical_root = repository.join("pivot/../../staged");
+        let got = detect(&lexical_root, &["rs"]).unwrap();
+
+        assert_eq!(filenames(&got), vec!["visible.rs"]);
+    }
+
+    #[test]
     fn git_scan_still_inherits_repository_gitignore() {
         let repository = TempDir::new().unwrap();
         fs::create_dir_all(repository.path().join(".git")).unwrap();
@@ -464,6 +588,36 @@ mod tests {
 
         let got = detect(&repository.path().join("src"), &["rs"]).unwrap();
         assert!(got.is_empty());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn non_utf8_worktree_pointer_enables_repository_ignores() {
+        use std::os::unix::ffi::{OsStrExt as _, OsStringExt as _};
+
+        let repository = TempDir::new().unwrap();
+        let gitdir_name = std::ffi::OsString::from_vec(b".git-data-\xff".to_vec());
+        let common_dir = repository.path().join(&gitdir_name);
+        let gitdir = common_dir.join("worktrees/linked");
+        fs::create_dir_all(common_dir.join("info")).unwrap();
+        fs::create_dir_all(&gitdir).unwrap();
+        fs::write(gitdir.join("HEAD"), "ref: refs/heads/main\n").unwrap();
+        fs::write(gitdir.join("commondir"), "../..\n").unwrap();
+        fs::write(common_dir.join("info/exclude"), "/src/excluded.rs\n").unwrap();
+        let mut marker = b"gitdir: ".to_vec();
+        marker.extend_from_slice(gitdir_name.as_os_str().as_bytes());
+        marker.extend_from_slice(b"/worktrees/linked");
+        marker.push(b'\n');
+        fs::write(repository.path().join(".git"), marker).unwrap();
+        fs::create_dir(repository.path().join("src")).unwrap();
+        fs::write(repository.path().join("src/ignored.rs"), b"").unwrap();
+        fs::write(repository.path().join("src/excluded.rs"), b"").unwrap();
+        fs::write(repository.path().join("src/kept.rs"), b"").unwrap();
+        fs::write(repository.path().join(".gitignore"), "ignored.rs\n").unwrap();
+
+        let got = detect(&repository.path().join("src"), &["rs"]).unwrap();
+
+        assert_eq!(filenames(&got), vec!["kept.rs"]);
     }
 
     #[test]
