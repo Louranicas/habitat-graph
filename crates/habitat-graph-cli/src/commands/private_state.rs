@@ -290,6 +290,15 @@ pub(super) fn acquire_output_lock(state_path: &Path) -> Result<OutputTransaction
 }
 
 pub(super) fn acquire_output_identity_lock(output: &Path) -> Result<OutputTransactionLock> {
+    if output
+        .file_name()
+        .and_then(OsStr::to_str)
+        .is_some_and(|name| name.eq_ignore_ascii_case(OUTPUT_IDENTITY_LOCK))
+    {
+        return Err(GraphError::Guard(format!(
+            "output filename is reserved for transaction locking: {OUTPUT_IDENTITY_LOCK}"
+        )));
+    }
     let parent = output
         .parent()
         .filter(|parent| !parent.as_os_str().is_empty())
@@ -3687,6 +3696,23 @@ mod tests {
         assert_eq!(error.kind(), "guard");
         drop(first);
         super::acquire_output_identity_lock(&upper).unwrap();
+    }
+
+    #[test]
+    fn output_identity_lock_rejects_reserved_output_names() {
+        let root = TempDir::new().unwrap();
+
+        for filename in [
+            super::OUTPUT_IDENTITY_LOCK,
+            ".HABITAT-GRAPH.OUTPUT-IDENTITY-LOCK",
+        ] {
+            let output = root.path().join(filename);
+            let error = super::acquire_output_identity_lock(&output).unwrap_err();
+
+            assert_eq!(error.kind(), "guard");
+            assert!(error.to_string().contains("reserved"));
+            assert!(!output.exists());
+        }
     }
 
     #[cfg(unix)]
