@@ -286,7 +286,20 @@ impl Drop for OutputTransactionLock {
 
 pub(super) fn acquire_output_lock(state_path: &Path) -> Result<OutputTransactionLock> {
     let lock_path = output_lock_path(state_path)?;
-    acquire_lock_path(&lock_path, None)
+    acquire_lock_path(&lock_path, None, None)
+}
+
+pub(super) fn acquire_signed_output_lock(
+    state_path: &Path,
+    signature: &[u8],
+) -> Result<OutputTransactionLock> {
+    if signature.is_empty() {
+        return Err(GraphError::Guard(
+            "output transaction lock signature must not be empty".to_owned(),
+        ));
+    }
+    let lock_path = output_lock_path(state_path)?;
+    acquire_lock_path(&lock_path, None, Some(signature))
 }
 
 pub(super) fn acquire_output_identity_lock(output: &Path) -> Result<OutputTransactionLock> {
@@ -310,10 +323,15 @@ pub(super) fn acquire_output_identity_lock(output: &Path) -> Result<OutputTransa
     acquire_lock_path(
         &parent.join(OUTPUT_IDENTITY_LOCK),
         Some(&parent.join(filename)),
+        None,
     )
 }
 
-fn acquire_lock_path(lock_path: &Path, output: Option<&Path>) -> Result<OutputTransactionLock> {
+fn acquire_lock_path(
+    lock_path: &Path,
+    output: Option<&Path>,
+    signature: Option<&[u8]>,
+) -> Result<OutputTransactionLock> {
     if let Some(parent) = lock_path
         .parent()
         .filter(|parent| !parent.as_os_str().is_empty())
@@ -351,7 +369,7 @@ fn acquire_lock_path(lock_path: &Path, output: Option<&Path>) -> Result<OutputTr
             use std::os::unix::fs::OpenOptionsExt as _;
             options.mode(0o600).custom_flags(libc::O_NOFOLLOW);
         }
-        let file = match options.open(lock_path) {
+        let mut file = match options.open(lock_path) {
             Ok(file) => file,
             Err(error)
                 if matches!(
@@ -403,6 +421,15 @@ fn acquire_lock_path(lock_path: &Path, output: Option<&Path>) -> Result<OutputTr
             ));
         }
         ensure_lock_does_not_alias_output(&opened_metadata, output)?;
+        if let Some(signature) = signature {
+            ensure_lock_signature(
+                &mut file,
+                &opened_metadata,
+                lock_path,
+                signature,
+                prior_metadata.is_none(),
+            )?;
+        }
         #[cfg(unix)]
         file.set_permissions(std::fs::Permissions::from_mode(0o600))
             .map_err(|error| GraphError::Io(format!("harden output transaction lock: {error}")))?;
@@ -411,6 +438,43 @@ fn acquire_lock_path(lock_path: &Path, output: Option<&Path>) -> Result<OutputTr
     Err(GraphError::Guard(
         "output transaction lock changed while being opened".to_owned(),
     ))
+}
+
+fn ensure_lock_signature(
+    file: &mut std::fs::File,
+    metadata: &std::fs::Metadata,
+    lock_path: &Path,
+    signature: &[u8],
+    initialize: bool,
+) -> Result<()> {
+    if initialize {
+        std::io::Write::write_all(file, signature)
+            .map_err(|error| GraphError::Io(format!("sign output transaction lock: {error}")))?;
+        file.sync_all()
+            .map_err(|error| GraphError::Io(format!("sync output transaction lock: {error}")))?;
+        return Ok(());
+    }
+
+    let expected_length = u64::try_from(signature.len())
+        .map_err(|_| GraphError::Io("output transaction lock signature is too long".to_owned()))?;
+    if metadata.len() != expected_length {
+        return Err(GraphError::Guard(format!(
+            "output transaction lock is not owned by habitat-graph: {}",
+            lock_path.display()
+        )));
+    }
+    std::io::Seek::seek(file, std::io::SeekFrom::Start(0))
+        .map_err(|error| GraphError::Io(format!("seek output transaction lock: {error}")))?;
+    let mut actual = vec![0; signature.len()];
+    std::io::Read::read_exact(file, &mut actual)
+        .map_err(|error| GraphError::Io(format!("read output transaction lock: {error}")))?;
+    if actual != signature {
+        return Err(GraphError::Guard(format!(
+            "output transaction lock is not owned by habitat-graph: {}",
+            lock_path.display()
+        )));
+    }
+    Ok(())
 }
 
 fn ensure_lock_does_not_alias_output(
@@ -3966,6 +4030,46 @@ mod tests {
         assert_eq!(error.kind(), "guard");
         drop(first);
         super::acquire_output_lock(&state).unwrap();
+    }
+
+    #[test]
+    fn signed_output_transaction_lock_initializes_and_reuses_signature() {
+        let root = TempDir::new().unwrap();
+        let state = root.path().join("generated-directory");
+        let signature = b"habitat-graph.test-lock.v1\n";
+        let first = super::acquire_signed_output_lock(&state, signature).unwrap();
+        let lock_path = super::output_lock_path(&state).unwrap();
+
+        assert_eq!(fs::read(&lock_path).unwrap(), signature);
+        assert!(super::acquire_signed_output_lock(&state, signature).is_err());
+        drop(first);
+        super::acquire_signed_output_lock(&state, signature).unwrap();
+        assert_eq!(fs::read(lock_path).unwrap(), signature);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn signed_output_transaction_lock_rejects_unowned_file_without_hardening_it() {
+        use std::os::unix::fs::PermissionsExt as _;
+
+        let root = TempDir::new().unwrap();
+        let state = root.path().join("generated-directory");
+        let lock_path = super::output_lock_path(&state).unwrap();
+        fs::write(&lock_path, "user lock").unwrap();
+        fs::set_permissions(&lock_path, fs::Permissions::from_mode(0o644)).unwrap();
+
+        let error = super::acquire_signed_output_lock(
+            &state,
+            b"habitat-graph.generated-directory-lock.v1\n",
+        )
+        .unwrap_err();
+
+        assert_eq!(error.kind(), "guard");
+        assert_eq!(fs::read_to_string(&lock_path).unwrap(), "user lock");
+        assert_eq!(
+            fs::metadata(lock_path).unwrap().permissions().mode() & 0o777,
+            0o644
+        );
     }
 
     #[cfg(unix)]

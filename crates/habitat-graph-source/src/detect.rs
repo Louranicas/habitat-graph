@@ -26,6 +26,15 @@ const MAX_GIT_MARKER_LINE_BYTES: u64 = 4096;
 /// Returns [`GraphError::Io`] wrapping the underlying walk diagnostic if `root` cannot be
 /// traversed (e.g. the path does not exist or permission is denied).
 pub fn detect(root: &Path, extensions: &[&str]) -> Result<Vec<PathBuf>> {
+    let global_exclude = ignore::gitignore::gitconfig_excludes_path();
+    detect_with_global_exclude(root, extensions, global_exclude.as_deref())
+}
+
+fn detect_with_global_exclude(
+    root: &Path,
+    extensions: &[&str],
+    global_exclude: Option<&Path>,
+) -> Result<Vec<PathBuf>> {
     // Lower-case every caller-supplied extension key once, outside the per-entry loop.
     let lowered: Vec<String> = extensions.iter().map(|e| e.to_lowercase()).collect();
     let canonical_root = std::fs::canonicalize(root).map_err(|error| {
@@ -48,13 +57,18 @@ pub fn detect(root: &Path, extensions: &[&str]) -> Result<Vec<PathBuf>> {
         Some(metadata) => {
             walker.current_dir(metadata.root);
             if let Some(exclude) = metadata.manual_exclude {
-                walker.git_exclude(false);
-                if exclude.is_file() {
-                    if let Some(error) = walker.add_ignore(&exclude) {
-                        return Err(GraphError::Io(format!(
-                            "load Git exclude {}: {error}",
-                            exclude.display()
-                        )));
+                walker.git_global(false).git_exclude(false);
+                for (context, path) in [
+                    ("global Git exclude", global_exclude),
+                    ("Git exclude", Some(exclude.as_path())),
+                ] {
+                    if let Some(path) = path.filter(|path| path.is_file()) {
+                        if let Some(error) = walker.add_ignore(path) {
+                            return Err(GraphError::Io(format!(
+                                "load {context} {}: {error}",
+                                path.display()
+                            )));
+                        }
                     }
                 }
             }
@@ -592,7 +606,7 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
-    fn non_utf8_worktree_pointer_enables_repository_ignores() {
+    fn non_utf8_worktree_pointer_preserves_git_ignore_precedence() {
         use std::os::unix::ffi::{OsStrExt as _, OsStringExt as _};
 
         let repository = TempDir::new().unwrap();
@@ -603,7 +617,17 @@ mod tests {
         fs::create_dir_all(&gitdir).unwrap();
         fs::write(gitdir.join("HEAD"), "ref: refs/heads/main\n").unwrap();
         fs::write(gitdir.join("commondir"), "../..\n").unwrap();
-        fs::write(common_dir.join("info/exclude"), "/src/excluded.rs\n").unwrap();
+        fs::write(
+            common_dir.join("info/exclude"),
+            concat!(
+                "/src/excluded.rs\n",
+                "!/src/info-unignored.rs\n",
+                "/src/info-only.rs\n",
+                "/src/gitignore-unignored.rs\n",
+                "!/src/gitignore-only.rs\n",
+            ),
+        )
+        .unwrap();
         let mut marker = b"gitdir: ".to_vec();
         marker.extend_from_slice(gitdir_name.as_os_str().as_bytes());
         marker.extend_from_slice(b"/worktrees/linked");
@@ -612,12 +636,39 @@ mod tests {
         fs::create_dir(repository.path().join("src")).unwrap();
         fs::write(repository.path().join("src/ignored.rs"), b"").unwrap();
         fs::write(repository.path().join("src/excluded.rs"), b"").unwrap();
+        fs::write(repository.path().join("src/global-only.rs"), b"").unwrap();
+        fs::write(repository.path().join("src/info-unignored.rs"), b"").unwrap();
+        fs::write(repository.path().join("src/info-only.rs"), b"").unwrap();
+        fs::write(repository.path().join("src/gitignore-unignored.rs"), b"").unwrap();
+        fs::write(repository.path().join("src/gitignore-only.rs"), b"").unwrap();
         fs::write(repository.path().join("src/kept.rs"), b"").unwrap();
-        fs::write(repository.path().join(".gitignore"), "ignored.rs\n").unwrap();
+        fs::write(
+            repository.path().join(".gitignore"),
+            "ignored.rs\n!gitignore-unignored.rs\ngitignore-only.rs\n",
+        )
+        .unwrap();
+        let global_exclude = repository.path().join("global-ignore");
+        fs::write(
+            &global_exclude,
+            concat!(
+                "/src/global-only.rs\n",
+                "/src/info-unignored.rs\n",
+                "!/src/info-only.rs\n",
+            ),
+        )
+        .unwrap();
 
-        let got = detect(&repository.path().join("src"), &["rs"]).unwrap();
+        let got = super::detect_with_global_exclude(
+            &repository.path().join("src"),
+            &["rs"],
+            Some(&global_exclude),
+        )
+        .unwrap();
 
-        assert_eq!(filenames(&got), vec!["kept.rs"]);
+        assert_eq!(
+            filenames(&got),
+            vec!["gitignore-unignored.rs", "info-unignored.rs", "kept.rs"]
+        );
     }
 
     #[test]

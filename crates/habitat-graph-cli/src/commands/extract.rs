@@ -27,6 +27,7 @@ const OPTIONAL_ARTIFACT_MANIFEST: &str = ".habitat-graph-artifacts.json";
 const OPTIONAL_ARTIFACT_MANIFEST_SCHEMA: &str = "habitat-graph.artifact-manifest.v1";
 const OPTIONAL_ARTIFACTS: &[&str] = &["graph.svg", "graph.graphml", "graph.cypher"];
 const GENERATED_DIRECTORY_LOCK_STEM: &str = ".habitat-graph-vault";
+const GENERATED_DIRECTORY_LOCK_SIGNATURE: &[u8] = b"habitat-graph.generated-directory-lock.v1\n";
 
 /// Optional PB exporter artifacts to emit alongside the always-written core artifacts.
 ///
@@ -806,8 +807,9 @@ fn acquire_generated_directory_lock(
 ) -> Result<(PathBuf, super::private_state::OutputTransactionLock)> {
     let canonical_directory = std::fs::canonicalize(directory)
         .map_err(|error| GraphError::Io(format!("resolve generated directory: {error}")))?;
-    let lock = super::private_state::acquire_output_lock(
+    let lock = super::private_state::acquire_signed_output_lock(
         &canonical_directory.join(GENERATED_DIRECTORY_LOCK_STEM),
+        GENERATED_DIRECTORY_LOCK_SIGNATURE,
     )?;
     Ok((canonical_directory, lock))
 }
@@ -2424,6 +2426,36 @@ mod tests {
         assert_eq!(wiki_error.kind(), "guard");
         assert!(!directory.path().join("generated.md").exists());
         assert!(!directory.path().join("index.md").exists());
+        assert!(!directory.path().join(super::VAULT_MANIFEST).exists());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn generated_sync_rejects_unowned_directory_lock_without_mutating_it() {
+        use std::os::unix::fs::PermissionsExt as _;
+
+        let directory = TempDir::new().unwrap();
+        let lock_path = directory.path().join(format!(
+            "{}{}",
+            super::GENERATED_DIRECTORY_LOCK_STEM,
+            ".output-lock"
+        ));
+        fs::write(&lock_path, "user lock").unwrap();
+        fs::set_permissions(&lock_path, fs::Permissions::from_mode(0o644)).unwrap();
+
+        let error = sync_generated_vault(
+            directory.path(),
+            &[("generated.md".to_owned(), "generated".to_owned())],
+        )
+        .unwrap_err();
+
+        assert_eq!(error.kind(), "guard");
+        assert_eq!(fs::read_to_string(&lock_path).unwrap(), "user lock");
+        assert_eq!(
+            fs::metadata(&lock_path).unwrap().permissions().mode() & 0o777,
+            0o644
+        );
+        assert!(!directory.path().join("generated.md").exists());
         assert!(!directory.path().join(super::VAULT_MANIFEST).exists());
     }
 
