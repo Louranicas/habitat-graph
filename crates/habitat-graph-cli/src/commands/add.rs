@@ -489,6 +489,12 @@ fn write_add_journal(
     let before_public = before_public.map(public_graph_state);
     let after_public = public_graph_state(&habitat_graph_serve::from_node_link(public_json)?);
     let origin = super::private_state::context_identity_for_output(out)?;
+    let state_context = super::private_state::state_context_key(state_path);
+    if origin.as_ref().map(|identity| identity.key.as_str()) != state_context.as_deref() {
+        return Err(GraphError::Guard(
+            "Git context changed while preparing add transaction".to_owned(),
+        ));
+    }
     let bytes = serde_json::to_vec_pretty(&serde_json::json!({
         "schema": ADD_JOURNAL_SCHEMA,
         "before_public": before_public,
@@ -1586,6 +1592,34 @@ mod tests {
         assert!(private.contains("api_key_pending"));
         assert!(private.contains("after_retry"));
         assert!(!super::add_journal_path(&old_state_path).unwrap().exists());
+    }
+
+    #[test]
+    fn add_journal_rejects_git_context_rotation_before_creation() {
+        let d = tdir();
+        init_git(&d);
+        commit_git(&d, "first");
+        let out = d.join("public/graph.json");
+        fs::create_dir_all(out.parent().unwrap()).unwrap();
+        let state_path = super::private_state_path(&out).unwrap();
+        let graph = Graph::new();
+        let public_json = habitat_graph_export::to_node_link(&graph).unwrap();
+        let before_checksum = super::super::private_state::generation(b"before");
+
+        commit_git(&d, "second");
+        let error = super::write_add_journal(
+            &out,
+            &state_path,
+            None,
+            &before_checksum,
+            &graph,
+            &public_json,
+        )
+        .unwrap_err();
+
+        assert_eq!(error.kind(), "guard");
+        assert!(error.to_string().contains("Git context changed"));
+        assert!(!super::add_journal_path(&state_path).unwrap().exists());
     }
 
     #[test]

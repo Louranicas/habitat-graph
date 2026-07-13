@@ -1368,7 +1368,7 @@ fn run_inner(
         super::private_state::ensure_no_pending_update_journals(state_path)?;
     }
     #[cfg(not(unix))]
-    super::private_state::remove_unsupported_family(state_path)?;
+    super::private_state::remove_unsupported_state(&out.join("graph.json"), &legacy_state)?;
 
     // Detect all Rust source files under `dir`, honoring .gitignore.
     let files = habitat_graph_source::detect(dir, &["rs"])?;

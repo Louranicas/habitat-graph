@@ -90,7 +90,7 @@ pub fn rebuild(dir: &Path, out: &Path) -> Result<usize> {
         super::private_state::ensure_no_pending_update_journals(state_path)?;
     }
     #[cfg(not(unix))]
-    super::private_state::remove_unsupported_family(state_path)?;
+    super::private_state::remove_unsupported_state(&out.join("graph.json"), &legacy_state)?;
 
     // Detect source files (all extractor-supported extensions).
     let files = habitat_graph_source::detect(dir, &["rs", "ts", "tsx", "js", "jsx", "go", "py"])?;

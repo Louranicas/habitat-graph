@@ -197,22 +197,25 @@ fn ambiguous_projected_node_ids(
 ) -> [HashSet<NodeId>; 2] {
     let base_groups = projected_collision_groups(base);
     let side_projected = [projected_probe_ranges(ours), projected_probe_ranges(theirs)];
+    let side_ids: [Vec<HashSet<NodeId>>; 2] =
+        std::array::from_fn(|index| intersecting_probe_ids(&base_groups, &side_projected[index]));
 
     let mut ambiguous = [HashSet::new(), HashSet::new()];
-    for (projected_slots, candidates) in base_groups {
-        let side_ids: [HashSet<NodeId>; 2] = std::array::from_fn(|index| {
-            side_projected[index]
-                .iter()
-                .filter(|(_, side_candidates)| candidates.intersects(*side_candidates))
-                .map(|(id, _)| *id)
-                .collect::<HashSet<_>>()
-        });
-        if side_ids.iter().any(|ids| !projected_slots.is_subset(ids)) {
-            for (ambiguous, ids) in ambiguous.iter_mut().zip(side_ids) {
-                if projected_slots.is_subset(&ids) {
-                    ambiguous.extend(ids.into_iter().filter(|id| projected_slots.contains(id)));
+    for (group_index, (projected_slots, _)) in base_groups.into_iter().enumerate() {
+        if side_ids
+            .iter()
+            .any(|ids| !projected_slots.is_subset(&ids[group_index]))
+        {
+            for (ambiguous, ids) in ambiguous.iter_mut().zip(&side_ids) {
+                let ids = &ids[group_index];
+                if projected_slots.is_subset(ids) {
+                    ambiguous.extend(
+                        ids.iter()
+                            .filter(|id| projected_slots.contains(id))
+                            .copied(),
+                    );
                 } else {
-                    ambiguous.extend(ids);
+                    ambiguous.extend(ids.iter().copied());
                 }
             }
         }
@@ -226,22 +229,94 @@ struct ProbeRange {
     end: u32,
 }
 
-impl ProbeRange {
-    fn intersects(self, other: Self) -> bool {
-        let segments = |range: Self| {
-            if range.start <= range.end {
-                [(range.start, range.end), (1, 0)]
-            } else {
-                [(range.start, u32::MAX), (0, range.end)]
-            }
-        };
-        segments(self).iter().any(|left| {
-            left.0 <= left.1
-                && segments(other)
-                    .iter()
-                    .any(|right| right.0 <= right.1 && left.0 <= right.1 && right.0 <= left.1)
-        })
+#[derive(Clone, Copy)]
+enum ProbeEventKind {
+    BaseStart(usize),
+    SideStart(NodeId),
+    BaseEnd(usize),
+    SideEnd(NodeId),
+}
+
+impl ProbeEventKind {
+    fn order(self) -> u8 {
+        match self {
+            Self::BaseStart(_) => 0,
+            Self::SideStart(_) => 1,
+            Self::BaseEnd(_) => 2,
+            Self::SideEnd(_) => 3,
+        }
     }
+}
+
+#[derive(Clone, Copy)]
+struct ProbeEvent {
+    position: u32,
+    kind: ProbeEventKind,
+}
+
+fn probe_range_segments(range: ProbeRange) -> [Option<(u32, u32)>; 2] {
+    if range.start <= range.end {
+        [Some((range.start, range.end)), None]
+    } else {
+        [Some((range.start, u32::MAX)), Some((0, range.end))]
+    }
+}
+
+fn intersecting_probe_ids(
+    base_groups: &[(HashSet<NodeId>, ProbeRange)],
+    side_ranges: &[(NodeId, ProbeRange)],
+) -> Vec<HashSet<NodeId>> {
+    let mut events = Vec::with_capacity((base_groups.len() + side_ranges.len()) * 4);
+    for (index, (_, range)) in base_groups.iter().enumerate() {
+        for (start, end) in probe_range_segments(*range).into_iter().flatten() {
+            events.push(ProbeEvent {
+                position: start,
+                kind: ProbeEventKind::BaseStart(index),
+            });
+            events.push(ProbeEvent {
+                position: end,
+                kind: ProbeEventKind::BaseEnd(index),
+            });
+        }
+    }
+    for (id, range) in side_ranges {
+        for (start, end) in probe_range_segments(*range).into_iter().flatten() {
+            events.push(ProbeEvent {
+                position: start,
+                kind: ProbeEventKind::SideStart(*id),
+            });
+            events.push(ProbeEvent {
+                position: end,
+                kind: ProbeEventKind::SideEnd(*id),
+            });
+        }
+    }
+    events.sort_unstable_by_key(|event| (event.position, event.kind.order()));
+
+    let mut matches = vec![HashSet::new(); base_groups.len()];
+    let mut active_bases = HashSet::new();
+    let mut active_sides = HashSet::new();
+    for event in events {
+        match event.kind {
+            ProbeEventKind::BaseStart(index) => {
+                matches[index].extend(active_sides.iter().copied());
+                active_bases.insert(index);
+            }
+            ProbeEventKind::SideStart(id) => {
+                for index in &active_bases {
+                    matches[*index].insert(id);
+                }
+                active_sides.insert(id);
+            }
+            ProbeEventKind::BaseEnd(index) => {
+                active_bases.remove(&index);
+            }
+            ProbeEventKind::SideEnd(id) => {
+                active_sides.remove(&id);
+            }
+        }
+    }
+    matches
 }
 
 fn projected_collision_groups(graph: &Graph) -> Vec<(HashSet<NodeId>, ProbeRange)> {
@@ -766,12 +841,14 @@ fn merge_manifest(ours: &Manifest, theirs: &Manifest) -> Manifest {
 
 #[cfg(test)]
 mod tests {
+    use std::collections::HashSet;
+
     use habitat_graph_core::{
         content_id, project_public_relation, Community, CommunityId, Confidence, Edge, Graph,
         InputRecord, Node, NodeId, Span,
     };
 
-    use super::merge3;
+    use super::{intersecting_probe_ids, merge3, ProbeRange};
 
     // ── Test helpers ──────────────────────────────────────────────────────────
 
@@ -1668,6 +1745,86 @@ mod tests {
             1
         );
         assert_eq!(merged.edges.len(), 1);
+    }
+
+    #[test]
+    fn probe_range_sweep_handles_many_sparse_projected_groups() {
+        let base_groups: Vec<_> = (0..4096)
+            .map(|index| {
+                let id = NodeId::new(index * 2);
+                (
+                    HashSet::from([id]),
+                    ProbeRange {
+                        start: id.get(),
+                        end: id.get(),
+                    },
+                )
+            })
+            .collect();
+        let side_ranges: Vec<_> = base_groups
+            .iter()
+            .map(|(ids, range)| (*ids.iter().next().unwrap(), *range))
+            .collect();
+
+        let matches = intersecting_probe_ids(&base_groups, &side_ranges);
+
+        assert_eq!(matches.len(), base_groups.len());
+        for (ids, (expected, _)) in matches.iter().zip(&base_groups) {
+            assert_eq!(ids, expected);
+        }
+    }
+
+    #[test]
+    fn probe_range_sweep_matches_wrapping_interval_intersections() {
+        let base_groups = vec![
+            (HashSet::new(), ProbeRange { start: 2, end: 6 }),
+            (
+                HashSet::new(),
+                ProbeRange {
+                    start: u32::MAX - 2,
+                    end: 1,
+                },
+            ),
+            (HashSet::new(), ProbeRange { start: 20, end: 20 }),
+        ];
+        let side_ranges = vec![
+            (NodeId::new(100), ProbeRange { start: 6, end: 9 }),
+            (NodeId::new(101), ProbeRange { start: 0, end: 0 }),
+            (
+                NodeId::new(102),
+                ProbeRange {
+                    start: u32::MAX,
+                    end: 3,
+                },
+            ),
+            (NodeId::new(103), ProbeRange { start: 20, end: 20 }),
+        ];
+        let intersects = |left: ProbeRange, right: ProbeRange| {
+            let segments = |range: ProbeRange| {
+                if range.start <= range.end {
+                    vec![(range.start, range.end)]
+                } else {
+                    vec![(range.start, u32::MAX), (0, range.end)]
+                }
+            };
+            segments(left).iter().any(|left| {
+                segments(right)
+                    .iter()
+                    .any(|right| left.0 <= right.1 && right.0 <= left.1)
+            })
+        };
+        let expected: Vec<HashSet<NodeId>> = base_groups
+            .iter()
+            .map(|(_, base_range)| {
+                side_ranges
+                    .iter()
+                    .filter(|(_, side_range)| intersects(*base_range, *side_range))
+                    .map(|(id, _)| *id)
+                    .collect()
+            })
+            .collect();
+
+        assert_eq!(intersecting_probe_ids(&base_groups, &side_ranges), expected);
     }
 
     #[test]

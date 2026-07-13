@@ -11,7 +11,7 @@
 //! originating context, lineage, public generations, and private checksums before retrying them.
 
 use std::collections::{BTreeSet, HashMap, HashSet};
-use std::ffi::OsString;
+use std::ffi::{OsStr, OsString};
 use std::io::{BufRead as _, Read as _};
 use std::path::{Path, PathBuf};
 
@@ -102,7 +102,7 @@ fn path_for_output_with_expiration(
     allow_expired: bool,
 ) -> Result<(PathBuf, Option<ContextIdentity>)> {
     #[cfg(not(unix))]
-    remove_family(legacy, "unsupported legacy private state")?;
+    remove_unsupported_state(output, legacy)?;
 
     let canonical_output = resolve_output_file(output)?;
     let canonical_parent = canonical_output
@@ -869,7 +869,8 @@ fn snapshot_candidates(path: &Path) -> Result<Vec<PathBuf>> {
     let filename = path
         .file_name()
         .ok_or_else(|| GraphError::Io("private state path has no filename".to_owned()))?;
-    let prefix = format!("{}{SNAPSHOT_SEPARATOR}", filename.to_string_lossy());
+    let mut prefix = OsString::from(filename);
+    prefix.push(SNAPSHOT_SEPARATOR);
     let entries = match std::fs::read_dir(parent) {
         Ok(entries) => entries,
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
@@ -884,8 +885,7 @@ fn snapshot_candidates(path: &Path) -> Result<Vec<PathBuf>> {
         let entry = entry
             .map_err(|error| GraphError::Io(format!("list private state snapshots: {error}")))?;
         let filename = entry.file_name();
-        let filename = filename.to_string_lossy();
-        if filename.strip_prefix(&prefix).is_some_and(is_generation) {
+        if native_filename_suffix(&filename, &prefix).is_some_and(|suffix| is_generation(&suffix)) {
             candidates.push(entry.path());
         }
     }
@@ -1394,9 +1394,34 @@ fn remove_family(path: &Path, context: &str) -> Result<()> {
     Ok(())
 }
 
+#[cfg(any(test, not(unix)))]
+fn remove_state_families_for_output(output: &Path, legacy: &Path) -> Result<()> {
+    remove_family(legacy, "unsupported legacy private state")?;
+    let output = resolve_output_file(output)?;
+    let parent = output
+        .parent()
+        .ok_or_else(|| GraphError::Io("output path has no parent".to_owned()))?;
+    let Some(git_dir) = find_git_dir(parent)? else {
+        return Ok(());
+    };
+    let state_dir = git_dir.join("habitat-graph").join("state");
+    let key = output_key(&output);
+    let unscoped = state_dir.join(format!("{key}.json"));
+    remove_family(&unscoped, "unsupported Git private state")?;
+
+    let context_probe = state_dir.join(format!(
+        "{key}{CONTEXT_SEPARATOR}{}.json",
+        generation(b"unsupported context probe")
+    ));
+    for candidate in context_state_candidates(&context_probe)? {
+        remove_family(&candidate, "unsupported Git private state")?;
+    }
+    Ok(())
+}
+
 #[cfg(not(unix))]
-pub(super) fn remove_unsupported_family(path: &Path) -> Result<()> {
-    remove_family(path, "unsupported private state")
+pub(super) fn remove_unsupported_state(output: &Path, legacy: &Path) -> Result<()> {
+    remove_state_families_for_output(output, legacy)
 }
 
 fn family_members(path: &Path) -> Result<Vec<(PathBuf, String)>> {
@@ -1406,8 +1431,7 @@ fn family_members(path: &Path) -> Result<Vec<(PathBuf, String)>> {
         .unwrap_or_else(|| Path::new("."));
     let base = path
         .file_name()
-        .ok_or_else(|| GraphError::Io("private state path has no filename".to_owned()))?
-        .to_string_lossy();
+        .ok_or_else(|| GraphError::Io("private state path has no filename".to_owned()))?;
     let entries = match std::fs::read_dir(parent) {
         Ok(entries) => entries,
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
@@ -1422,16 +1446,51 @@ fn family_members(path: &Path) -> Result<Vec<(PathBuf, String)>> {
         let entry =
             entry.map_err(|error| GraphError::Io(format!("list private state family: {error}")))?;
         let filename = entry.file_name();
-        let filename = filename.to_string_lossy();
-        let Some(suffix) = filename.strip_prefix(base.as_ref()) else {
+        let Some(suffix) = native_filename_suffix(&filename, base) else {
             continue;
         };
-        if is_family_member_suffix(suffix) {
-            members.push((entry.path(), suffix.to_owned()));
+        if is_family_member_suffix(&suffix) {
+            members.push((entry.path(), suffix));
         }
     }
     members.sort_unstable_by(|left, right| left.0.cmp(&right.0));
     Ok(members)
+}
+
+fn native_filename_suffix(filename: &OsStr, base: &OsStr) -> Option<String> {
+    #[cfg(unix)]
+    {
+        use std::os::unix::ffi::OsStrExt as _;
+
+        let filename = filename.as_bytes();
+        let base = base.as_bytes();
+        if filename.starts_with(base) {
+            std::str::from_utf8(&filename[base.len()..])
+                .ok()
+                .map(str::to_owned)
+        } else {
+            None
+        }
+    }
+    #[cfg(windows)]
+    {
+        use std::os::windows::ffi::OsStrExt as _;
+
+        let filename: Vec<u16> = filename.encode_wide().collect();
+        let base: Vec<u16> = base.encode_wide().collect();
+        if filename.starts_with(&base) {
+            String::from_utf16(&filename[base.len()..]).ok()
+        } else {
+            None
+        }
+    }
+    #[cfg(not(any(unix, windows)))]
+    {
+        filename
+            .to_str()?
+            .strip_prefix(base.to_str()?)
+            .map(str::to_owned)
+    }
 }
 
 fn is_family_member_suffix(suffix: &str) -> bool {
@@ -3166,6 +3225,84 @@ mod tests {
 
         assert!(owned.iter().all(|path| !path.exists()));
         assert!(lookalikes.iter().all(|path| path.exists()));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn family_discovery_preserves_lossy_filename_lookalikes() {
+        use std::os::unix::ffi::OsStringExt as _;
+
+        let root = TempDir::new().unwrap();
+        let state = root
+            .path()
+            .join(OsString::from_vec(b"state-\xff.json".to_vec()));
+        let generation = super::generation(b"owned snapshot");
+        let snapshot_suffix = format!("{SNAPSHOT_SEPARATOR}{generation}");
+        let snapshot = sibling(&state, &snapshot_suffix);
+        let journal = sibling(&state, ADD_JOURNAL_SUFFIX);
+        let lossy = root
+            .path()
+            .join(state.file_name().unwrap().to_string_lossy().as_ref());
+        let lossy_snapshot = sibling(&lossy, &snapshot_suffix);
+        let lossy_journal = sibling(&lossy, ADD_JOURNAL_SUFFIX);
+        for path in [
+            &state,
+            &snapshot,
+            &journal,
+            &lossy,
+            &lossy_snapshot,
+            &lossy_journal,
+        ] {
+            fs::write(path, "state").unwrap();
+        }
+
+        assert_eq!(
+            super::snapshot_candidates(&state).unwrap(),
+            vec![snapshot.clone()]
+        );
+        super::remove_family(&state, "test private state").unwrap();
+
+        assert!(!state.exists());
+        assert!(!snapshot.exists());
+        assert!(!journal.exists());
+        assert!(lossy.exists());
+        assert!(lossy_snapshot.exists());
+        assert!(lossy_journal.exists());
+    }
+
+    #[test]
+    fn output_scoped_cleanup_removes_legacy_and_git_state_families() {
+        let root = TempDir::new().unwrap();
+        let git_dir = create_git(root.path(), "ref: refs/heads/main\n");
+        let output_dir = root.path().join("public");
+        fs::create_dir_all(&output_dir).unwrap();
+        let output = output_dir.join("graph.json");
+        let output = super::resolve_output_file(&output).unwrap();
+        let legacy = output_dir.join(".habitat-graph-state.json");
+        let state_dir = git_dir.join("habitat-graph/state");
+        fs::create_dir_all(&state_dir).unwrap();
+        let key = super::output_key(&output);
+        let generation = super::generation(b"snapshot");
+        let context = super::generation(b"context");
+        let unscoped = state_dir.join(format!("{key}.json"));
+        let scoped = state_dir.join(format!("{key}{}{context}.json", super::CONTEXT_SEPARATOR));
+        let unrelated = state_dir.join(format!("{}.json", super::generation(b"other output")));
+        let owned = [
+            legacy.clone(),
+            sibling(&legacy, ADD_JOURNAL_SUFFIX),
+            unscoped.clone(),
+            sibling(&unscoped, &format!("{SNAPSHOT_SEPARATOR}{generation}")),
+            scoped.clone(),
+            sibling(&scoped, super::UPDATE_JOURNAL_SUFFIX),
+        ];
+        for path in owned.iter().chain(std::iter::once(&unrelated)) {
+            fs::write(path, "raw state").unwrap();
+        }
+
+        super::remove_state_families_for_output(&output, &legacy).unwrap();
+
+        assert!(owned.iter().all(|path| !path.exists()));
+        assert!(unrelated.exists());
     }
 
     #[test]
