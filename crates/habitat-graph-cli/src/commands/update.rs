@@ -435,9 +435,8 @@ fn journal_graph(value: &serde_json::Value, field: &str) -> Result<Graph> {
 }
 
 fn load_update_journal(path: &Path) -> Result<UpdateJournal> {
-    super::private_state::ensure(path)?;
-    let text = std::fs::read_to_string(path)
-        .map_err(|error| GraphError::Io(format!("read update journal: {error}")))?;
+    let text = super::private_state::read_text(path, "update journal")?
+        .ok_or_else(|| GraphError::Io("read update journal: file disappeared".to_owned()))?;
     let value: serde_json::Value = serde_json::from_str(&text)
         .map_err(|error| GraphError::Schema(format!("update journal parse: {error}")))?;
     if value["schema"] != UPDATE_JOURNAL_SCHEMA {

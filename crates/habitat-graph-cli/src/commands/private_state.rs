@@ -389,26 +389,19 @@ pub(super) fn matches_public(
 }
 
 pub(super) fn read(path: &Path, context: &str) -> Result<Option<StoredGraph>> {
-    let metadata = match std::fs::symlink_metadata(path) {
-        Ok(metadata) => metadata,
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
-        Err(error) => {
-            return Err(GraphError::Io(format!(
-                "inspect {context} {}: {error}",
-                path.display()
-            )))
-        }
+    read_text(path, context)?
+        .map(|text| parse(&text))
+        .transpose()
+}
+
+pub(super) fn read_text(path: &Path, context: &str) -> Result<Option<String>> {
+    let Some(mut file) = open_private_file(path, context)? else {
+        return Ok(None);
     };
-    if !metadata.file_type().is_file() {
-        return Err(GraphError::Guard(format!(
-            "{context} is not a regular file: {}",
-            path.display()
-        )));
-    }
-    ensure(path)?;
-    let text = std::fs::read_to_string(path)
+    let mut text = String::new();
+    file.read_to_string(&mut text)
         .map_err(|error| GraphError::Io(format!("read {context}: {error}")))?;
-    parse(&text).map(Some)
+    Ok(Some(text))
 }
 
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
@@ -716,19 +709,22 @@ pub(super) fn write_state(path: &Path, bytes: &[u8]) -> Result<()> {
     let text = std::str::from_utf8(bytes)
         .map_err(|error| GraphError::Schema(format!("private state serialize: {error}")))?;
     let replacement = parse(text)?;
-    let existing = match read(path, "private state") {
-        Ok(existing) => existing,
+    let existing = match read_text(path, "private state") {
+        Ok(Some(text)) => match parse(&text) {
+            Ok(existing) => Some((existing, text)),
+            Err(error) if error.kind() == "schema" => None,
+            Err(error) => return Err(error),
+        },
+        Ok(None) => None,
         Err(error) if error.kind() == "schema" => None,
         Err(error) => return Err(error),
     };
-    if let Some(existing) = existing {
+    if let Some((existing, existing_text)) = existing {
         if existing != replacement && existing.public_generation != replacement.public_generation {
             if let Some(existing_generation) = existing.public_generation.as_deref() {
-                let existing_bytes = std::fs::read(path)
-                    .map_err(|error| GraphError::Io(format!("read private state: {error}")))?;
                 let snapshot = snapshot_path(path, existing_generation)?;
                 match read(&snapshot, "private state snapshot")? {
-                    None => write(&snapshot, &existing_bytes)?,
+                    None => write(&snapshot, existing_text.as_bytes())?,
                     Some(snapshot_state) if snapshot_state == existing => {}
                     Some(_) => {
                         return Err(GraphError::Guard(format!(
@@ -1944,16 +1940,47 @@ fn output_key(path: &Path) -> String {
 
 #[cfg(unix)]
 fn harden_directory(path: &Path) -> Result<()> {
-    let metadata = std::fs::symlink_metadata(path)
+    let expected = std::fs::symlink_metadata(path)
         .map_err(|error| GraphError::Io(format!("inspect private state directory: {error}")))?;
-    if !metadata.file_type().is_dir() {
+    if !expected.file_type().is_dir() {
         return Err(GraphError::Guard(format!(
             "private state directory is not a directory: {}",
             path.display()
         )));
     }
-    std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o700))
-        .map_err(|error| GraphError::Io(format!("harden private state directory: {error}")))
+    let mut options = std::fs::OpenOptions::new();
+    options.read(true);
+    {
+        use std::os::unix::fs::OpenOptionsExt as _;
+        options.custom_flags(libc::O_DIRECTORY | libc::O_NOFOLLOW);
+    }
+    let directory = options
+        .open(path)
+        .map_err(|error| GraphError::Io(format!("open private state directory: {error}")))?;
+    let opened = directory
+        .metadata()
+        .map_err(|error| GraphError::Io(format!("inspect private state directory: {error}")))?;
+    if !opened.file_type().is_dir() || !same_file(&expected, &opened) {
+        return Err(GraphError::Guard(format!(
+            "private state directory changed while being opened: {}",
+            path.display()
+        )));
+    }
+    directory
+        .set_permissions(std::fs::Permissions::from_mode(0o700))
+        .map_err(|error| GraphError::Io(format!("harden private state directory: {error}")))?;
+    let current = std::fs::symlink_metadata(path).map_err(|error| {
+        GraphError::Guard(format!(
+            "private state directory changed while being opened: {error}"
+        ))
+    })?;
+    if !current.file_type().is_dir() || !same_file(&opened, &current) {
+        return Err(GraphError::Guard(format!(
+            "private state directory changed while being opened: {}",
+            path.display()
+        )));
+    }
+    Ok(())
 }
 
 #[cfg(unix)]
@@ -1986,20 +2013,66 @@ fn harden_directory(_path: &Path) -> Result<()> {
 }
 
 #[cfg(unix)]
-pub(super) fn ensure(path: &Path) -> Result<()> {
-    let metadata = match std::fs::symlink_metadata(path) {
+fn open_private_file(path: &Path, context: &str) -> Result<Option<std::fs::File>> {
+    let expected = match std::fs::symlink_metadata(path) {
         Ok(metadata) => metadata,
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
-        Err(error) => return Err(GraphError::Io(format!("inspect private state: {error}"))),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(error) => {
+            return Err(GraphError::Io(format!(
+                "inspect {context} {}: {error}",
+                path.display()
+            )))
+        }
     };
-    if !metadata.file_type().is_file() {
+    if !expected.file_type().is_file() {
         return Err(GraphError::Guard(format!(
-            "private state is not a regular file: {}",
+            "{context} is not a regular file: {}",
             path.display()
         )));
     }
-    std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600))
-        .map_err(|error| GraphError::Io(format!("harden private state: {error}")))
+    let mut options = std::fs::OpenOptions::new();
+    options.read(true);
+    {
+        use std::os::unix::fs::OpenOptionsExt as _;
+        options.custom_flags(libc::O_NOFOLLOW);
+    }
+    let file = options
+        .open(path)
+        .map_err(|error| GraphError::Io(format!("open {context}: {error}")))?;
+    let opened = file
+        .metadata()
+        .map_err(|error| GraphError::Io(format!("inspect opened {context}: {error}")))?;
+    if !opened.file_type().is_file() || !same_file(&expected, &opened) {
+        return Err(GraphError::Guard(format!(
+            "{context} changed while being opened: {}",
+            path.display()
+        )));
+    }
+    file.set_permissions(std::fs::Permissions::from_mode(0o600))
+        .map_err(|error| GraphError::Io(format!("harden {context}: {error}")))?;
+    let current = std::fs::symlink_metadata(path).map_err(|error| {
+        GraphError::Guard(format!("{context} changed while being opened: {error}"))
+    })?;
+    if !current.file_type().is_file() || !same_file(&opened, &current) {
+        return Err(GraphError::Guard(format!(
+            "{context} changed while being opened: {}",
+            path.display()
+        )));
+    }
+    Ok(Some(file))
+}
+
+#[cfg(not(unix))]
+fn open_private_file(path: &Path, _context: &str) -> Result<Option<std::fs::File>> {
+    match std::fs::symlink_metadata(path) {
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
+        _ => ensure(path).map(|()| None),
+    }
+}
+
+#[cfg(unix)]
+pub(super) fn ensure(path: &Path) -> Result<()> {
+    open_private_file(path, "private state").map(|_| ())
 }
 
 #[cfg(not(unix))]
@@ -2226,6 +2299,49 @@ mod tests {
         assert_eq!(fs::read_to_string(&target).unwrap(), "unchanged");
         assert_eq!(
             fs::metadata(&target).unwrap().permissions().mode() & 0o777,
+            0o644
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn private_file_read_hardens_the_opened_file() {
+        use std::os::unix::fs::PermissionsExt as _;
+
+        let root = TempDir::new().unwrap();
+        let state = root.path().join("state.json");
+        fs::write(&state, "private contents").unwrap();
+        fs::set_permissions(&state, fs::Permissions::from_mode(0o644)).unwrap();
+
+        let text = super::read_text(&state, "test private state")
+            .unwrap()
+            .unwrap();
+
+        assert_eq!(text, "private contents");
+        assert_eq!(
+            fs::metadata(state).unwrap().permissions().mode() & 0o777,
+            0o600
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn private_file_read_rejects_symlinks_without_changing_the_target() {
+        use std::os::unix::fs::{symlink, PermissionsExt as _};
+
+        let root = TempDir::new().unwrap();
+        let state = root.path().join("state.json");
+        let target = root.path().join("target.json");
+        fs::write(&target, "private contents").unwrap();
+        fs::set_permissions(&target, fs::Permissions::from_mode(0o644)).unwrap();
+        symlink(&target, &state).unwrap();
+
+        let error = super::read_text(&state, "test private state").unwrap_err();
+
+        assert_eq!(error.kind(), "guard");
+        assert_eq!(fs::read_to_string(&target).unwrap(), "private contents");
+        assert_eq!(
+            fs::metadata(target).unwrap().permissions().mode() & 0o777,
             0o644
         );
     }

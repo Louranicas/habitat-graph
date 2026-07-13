@@ -513,11 +513,8 @@ fn parse_optional_journal_generation(
 
 #[allow(clippy::too_many_lines)]
 fn load_add_journal(path: &Path) -> Result<Option<AddJournal>> {
-    super::private_state::ensure(path)?;
-    let text = match std::fs::read_to_string(path) {
-        Ok(text) => text,
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
-        Err(error) => return Err(GraphError::Io(format!("read add journal: {error}"))),
+    let Some(text) = super::private_state::read_text(path, "add journal")? else {
+        return Ok(None);
     };
     let value: serde_json::Value = serde_json::from_str(&text)
         .map_err(|error| GraphError::Schema(format!("add journal parse: {error}")))?;
