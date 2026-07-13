@@ -45,7 +45,9 @@ fn detect_with_global_exclude(
     })?;
 
     let mut paths: Vec<PathBuf> = Vec::new();
-    let mut walker = ignore::WalkBuilder::new(root);
+    // Keep traversal and explicit Git matchers in the same canonical namespace. Otherwise an
+    // anchored `info/exclude` rule can miss a root spelled with `..` or through a symlink.
+    let mut walker = ignore::WalkBuilder::new(&canonical_root);
     match git_ancestor(&canonical_root) {
         None => {
             walker
@@ -606,6 +608,32 @@ mod tests {
         let got = detect(&repository.path().join("src"), &["rs"]).unwrap();
 
         assert_eq!(filenames(&got), vec!["kept.rs"]);
+    }
+
+    #[test]
+    fn linked_worktree_excludes_match_a_lexically_spelled_root() {
+        let repository = TempDir::new().unwrap();
+        let common_dir = repository.path().join(".git-data");
+        let gitdir = common_dir.join("worktrees/linked");
+        fs::create_dir_all(common_dir.join("info")).unwrap();
+        fs::create_dir_all(&gitdir).unwrap();
+        fs::write(gitdir.join("HEAD"), "ref: refs/heads/main\n").unwrap();
+        fs::write(gitdir.join("commondir"), "../..\n").unwrap();
+        fs::write(common_dir.join("info/exclude"), "/src/excluded.rs\n").unwrap();
+        fs::write(
+            repository.path().join(".git"),
+            "gitdir: .git-data/worktrees/linked\n",
+        )
+        .unwrap();
+        fs::create_dir(repository.path().join("src")).unwrap();
+        fs::write(repository.path().join("src/excluded.rs"), b"").unwrap();
+        fs::write(repository.path().join("src/kept.rs"), b"").unwrap();
+
+        let lexical_root = repository.path().join("src/../src");
+        let got = detect(&lexical_root, &["rs"]).unwrap();
+
+        assert_eq!(filenames(&got), vec!["kept.rs"]);
+        assert!(got.iter().all(|path| path.starts_with(repository.path())));
     }
 
     #[cfg(unix)]
