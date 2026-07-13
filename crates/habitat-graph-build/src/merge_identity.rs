@@ -98,14 +98,18 @@ pub(crate) fn node_identity_maps(
         }
     }
 
-    for group in candidates.into_values() {
+    for group in candidates.values() {
         if !group.iter().any(|candidate| candidate.marker) {
             continue;
         }
         let lineage_anchor = lineage_root
             .filter(|root| group.iter().any(|candidate| candidate.graph_index == *root));
+        let mut graph_indices = HashSet::with_capacity(group.len());
+        let unique_by_graph = group
+            .iter()
+            .all(|candidate| graph_indices.insert(candidate.graph_index));
 
-        if let Some(anchor) = lineage_anchor {
+        if let Some(anchor) = lineage_anchor.filter(|_| unique_by_graph) {
             let Some(anchor_assigned_id) = group
                 .iter()
                 .find(|candidate| candidate.graph_index == anchor)
@@ -129,8 +133,40 @@ pub(crate) fn node_identity_maps(
                     );
                 }
             }
+        } else if let Some(anchor) = lineage_anchor {
+            let anchor_candidates: HashMap<_, _> = group
+                .iter()
+                .filter(|candidate| candidate.graph_index == anchor)
+                .map(|candidate| (candidate.assigned_id, candidate))
+                .collect();
+            for candidate in group {
+                if let Some(anchor_candidate) = anchor_candidates
+                    .get(&candidate.assigned_id)
+                    .filter(|anchor_candidate| {
+                        candidate.marker || candidate.raw_label == anchor_candidate.raw_label
+                    })
+                {
+                    maps[candidate.graph_index].insert(
+                        candidate.assigned_id,
+                        NodeIdentity::Projected {
+                            assigned_id: anchor_candidate.assigned_id,
+                            content_id: candidate.content_id,
+                            provenance: anchor,
+                        },
+                    );
+                } else if candidate.marker {
+                    maps[candidate.graph_index].insert(
+                        candidate.assigned_id,
+                        NodeIdentity::Projected {
+                            assigned_id: candidate.assigned_id,
+                            content_id: candidate.content_id,
+                            provenance: candidate.graph_index,
+                        },
+                    );
+                }
+            }
         } else {
-            for candidate in group.into_iter().filter(|candidate| candidate.marker) {
+            for candidate in group.iter().filter(|candidate| candidate.marker) {
                 maps[candidate.graph_index].insert(
                     candidate.assigned_id,
                     NodeIdentity::Projected {
@@ -143,7 +179,176 @@ pub(crate) fn node_identity_maps(
         }
     }
 
+    if let Some(root) = lineage_root.filter(|root| *root < graphs.len()) {
+        bridge_legacy_projection_lineage(graphs, root, &candidates, &mut maps);
+    }
+
     maps
+}
+
+fn bridge_legacy_projection_lineage(
+    graphs: &[&Graph],
+    root: usize,
+    candidates: &HashMap<NodeId, Vec<ProjectionCandidate>>,
+    maps: &mut [NodeIdentityMap],
+) {
+    let probe_positions: Vec<_> = graphs
+        .iter()
+        .map(|graph| projection_probe_positions(graph))
+        .collect();
+    let mut root_anchors: HashMap<usize, Vec<(usize, &ProjectionCandidate)>> = HashMap::new();
+    for candidate in candidates.values().flatten().filter(|candidate| {
+        candidate.graph_index == root
+            && candidate.marker
+            && !graphs[root]
+                .node_content_ids
+                .contains_key(&candidate.assigned_id)
+    }) {
+        if let Some(&(group, position)) = probe_positions[root].get(&candidate.assigned_id) {
+            root_anchors
+                .entry(group)
+                .or_default()
+                .push((position, candidate));
+        }
+    }
+    for anchors in root_anchors.values_mut() {
+        anchors.sort_unstable_by_key(|(position, _)| *position);
+    }
+    let mut bridges = Vec::new();
+
+    for (&content_id, group) in candidates {
+        if group.iter().any(|candidate| candidate.graph_index == root) {
+            continue;
+        }
+
+        let mut side_candidates = Vec::with_capacity(graphs.len().saturating_sub(1));
+        let mut valid = true;
+        for graph_index in 0..graphs.len() {
+            if graph_index == root {
+                continue;
+            }
+            let mut matches = group
+                .iter()
+                .filter(|candidate| candidate.graph_index == graph_index);
+            let Some(candidate) = matches.next() else {
+                valid = false;
+                break;
+            };
+            if matches.next().is_some()
+                || !candidate.marker
+                || candidate.assigned_id == content_id
+                || graphs[graph_index]
+                    .node_content_ids
+                    .get(&candidate.assigned_id)
+                    != Some(&content_id)
+                || !follows_occupied_probe_chain(
+                    &probe_positions[graph_index],
+                    content_id,
+                    candidate.assigned_id,
+                )
+            {
+                valid = false;
+                break;
+            }
+            side_candidates.push(candidate);
+        }
+        if !valid {
+            continue;
+        }
+
+        let Some(&(root_group, content_position)) = probe_positions[root].get(&content_id) else {
+            continue;
+        };
+        let Some(anchors) = root_anchors.get(&root_group) else {
+            continue;
+        };
+        let first = anchors.partition_point(|(position, _)| *position <= content_position);
+        if anchors.len().saturating_sub(first) != 1 {
+            continue;
+        }
+        let anchor = anchors[first].1;
+        bridges.push((content_id, anchor, side_candidates));
+    }
+
+    let mut anchor_counts = HashMap::new();
+    for (_, anchor, _) in &bridges {
+        *anchor_counts.entry(anchor.assigned_id).or_insert(0_usize) += 1;
+    }
+    for (content_id, anchor, side_candidates) in bridges {
+        if anchor_counts.get(&anchor.assigned_id) != Some(&1) {
+            continue;
+        }
+        let identity = NodeIdentity::Projected {
+            assigned_id: anchor.assigned_id,
+            content_id,
+            provenance: root,
+        };
+        maps[root].insert(anchor.assigned_id, identity.clone());
+        for candidate in side_candidates {
+            maps[candidate.graph_index].insert(candidate.assigned_id, identity.clone());
+        }
+    }
+}
+
+fn follows_occupied_probe_chain(
+    positions: &HashMap<NodeId, (usize, usize)>,
+    content_id: NodeId,
+    assigned_id: NodeId,
+) -> bool {
+    match (positions.get(&content_id), positions.get(&assigned_id)) {
+        (Some((content_group, content_position)), Some((assigned_group, assigned_position))) => {
+            content_group == assigned_group && assigned_position > content_position
+        }
+        _ => false,
+    }
+}
+
+fn projection_probe_positions(graph: &Graph) -> HashMap<NodeId, (usize, usize)> {
+    occupied_collision_groups(graph)
+        .into_iter()
+        .enumerate()
+        .flat_map(|(group, ids)| {
+            ids.into_iter()
+                .enumerate()
+                .map(move |(position, id)| (id, (group, position)))
+        })
+        .collect()
+}
+
+pub(crate) fn occupied_collision_groups(graph: &Graph) -> Vec<Vec<NodeId>> {
+    let mut ids: Vec<_> = graph.nodes.iter().map(|node| node.id).collect();
+    ids.sort_unstable();
+    ids.dedup();
+    let mut groups: Vec<Vec<NodeId>> = Vec::new();
+    for id in ids {
+        if groups
+            .last()
+            .and_then(|group| group.last())
+            .is_some_and(|last| last.get() != u32::MAX && last.get() + 1 == id.get())
+        {
+            if let Some(group) = groups.last_mut() {
+                group.push(id);
+            }
+        } else {
+            groups.push(vec![id]);
+        }
+    }
+    if groups.len() > 1
+        && groups
+            .first()
+            .and_then(|group| group.first())
+            .is_some_and(|id| id.get() == 0)
+        && groups
+            .last()
+            .and_then(|group| group.last())
+            .is_some_and(|id| id.get() == u32::MAX)
+    {
+        let first = groups.remove(0);
+        if let Some(last) = groups.last_mut() {
+            last.extend(first);
+        }
+    }
+    groups
 }
 
 pub(crate) fn relation_identities(

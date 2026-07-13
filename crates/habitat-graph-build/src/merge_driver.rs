@@ -39,8 +39,8 @@ use habitat_graph_core::{
 
 use crate::merge_identity::{
     allocate_node_id, is_lossy_relation, node_id_to_identity_map, node_identity,
-    node_identity_maps, node_identity_set, relation_identities, NodeIdentity, NodeIdentityMap,
-    RelationIdentity,
+    node_identity_maps, node_identity_set, occupied_collision_groups, relation_identities,
+    NodeIdentity, NodeIdentityMap, RelationIdentity,
 };
 
 type EdgeKey = (NodeIdentity, NodeIdentity, RelationIdentity);
@@ -406,42 +406,6 @@ fn projected_node_ids(graph: &Graph) -> HashSet<NodeId> {
         .filter(|node| habitat_graph_core::is_canonical_redaction_marker(&node.label))
         .map(|node| node.id)
         .collect()
-}
-
-fn occupied_collision_groups(graph: &Graph) -> Vec<Vec<NodeId>> {
-    let mut ids: Vec<NodeId> = graph.nodes.iter().map(|node| node.id).collect();
-    ids.sort_unstable();
-    ids.dedup();
-    let mut groups: Vec<Vec<NodeId>> = Vec::new();
-    for id in ids {
-        if groups
-            .last()
-            .and_then(|group| group.last())
-            .is_some_and(|last| last.get() != u32::MAX && last.get() + 1 == id.get())
-        {
-            if let Some(group) = groups.last_mut() {
-                group.push(id);
-            }
-        } else {
-            groups.push(vec![id]);
-        }
-    }
-    if groups.len() > 1
-        && groups
-            .first()
-            .and_then(|group| group.first())
-            .is_some_and(|id| id.get() == 0)
-        && groups
-            .last()
-            .and_then(|group| group.last())
-            .is_some_and(|id| id.get() == u32::MAX)
-    {
-        let first = groups.remove(0);
-        if let Some(last) = groups.last_mut() {
-            last.extend(first);
-        }
-    }
-    groups
 }
 
 fn node_identity_set_excluding(
@@ -2110,6 +2074,92 @@ mod tests {
         assert_eq!(merged.edges.len(), 1);
         assert_eq!(merged.edges[0].relation, "secret-edge");
         assert_eq!(merged.edges[0].source, NodeId::new(10));
+    }
+
+    #[test]
+    fn colliding_projected_content_ids_preserve_distinct_slots_and_topology() {
+        let marker = "[REDACTED:api_key]";
+        let mut base = nodes_graph(&[
+            (10, marker),
+            (11, marker),
+            (20, "First target"),
+            (30, "Second target"),
+        ]);
+        base.node_content_ids
+            .insert(NodeId::new(11), NodeId::new(10));
+        base.edges.push(edge(10, 20, "first-edge"));
+        base.edges.push(edge(11, 30, "second-edge"));
+        let ours = base.clone();
+        let theirs = base.clone();
+
+        let merged = merge3(&base, &ours, &theirs);
+
+        assert_eq!(
+            merged
+                .nodes
+                .iter()
+                .filter(|node| node.label == marker)
+                .count(),
+            2
+        );
+        assert_eq!(merged.node_content_id(NodeId::new(11)), NodeId::new(10));
+        assert!(merged
+            .edges
+            .iter()
+            .any(|edge| edge.source == NodeId::new(10) && edge.relation == "first-edge"));
+        assert!(merged
+            .edges
+            .iter()
+            .any(|edge| edge.source == NodeId::new(11) && edge.relation == "second-edge"));
+    }
+
+    #[test]
+    fn legacy_displaced_projected_base_bridges_explicit_content_lineage() {
+        let marker = "[REDACTED:api_key]";
+        let content = content_id("Occupied");
+        let assigned = content.wrapping_add(1);
+        let target = content.wrapping_add(2);
+        let mut base = nodes_graph(&[(content, "Occupied"), (assigned, marker), (target, "Safe")]);
+        base.edges.push(edge(assigned, target, "secret-edge"));
+        let mut ours = base.clone();
+        ours.node_content_ids
+            .insert(NodeId::new(assigned), NodeId::new(content));
+        ours.nodes
+            .push(node(content.wrapping_add(3), "Ours addition"));
+        let mut theirs = base.clone();
+        theirs
+            .node_content_ids
+            .insert(NodeId::new(assigned), NodeId::new(content));
+        theirs
+            .nodes
+            .push(node(content.wrapping_add(4), "Theirs addition"));
+
+        let merged = merge3(&base, &ours, &theirs);
+
+        assert_eq!(
+            merged
+                .nodes
+                .iter()
+                .filter(|node| node.label == marker)
+                .count(),
+            1
+        );
+        assert_eq!(
+            merged.node_content_id(NodeId::new(assigned)),
+            NodeId::new(content)
+        );
+        assert!(merged
+            .edges
+            .iter()
+            .any(|edge| edge.source == NodeId::new(assigned) && edge.relation == "secret-edge"));
+        assert!(merged
+            .nodes
+            .iter()
+            .any(|node| node.label == "Ours addition"));
+        assert!(merged
+            .nodes
+            .iter()
+            .any(|node| node.label == "Theirs addition"));
     }
 
     #[test]
