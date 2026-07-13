@@ -480,6 +480,47 @@ mod tests {
         );
     }
 
+    #[test]
+    fn collision_lineage_survives_the_public_merge_boundary() {
+        let t = trio();
+        let marker = "[REDACTED:api_key]";
+        let mut base = Graph::new();
+        base.nodes = vec![node(9, "Occupied"), node(10, marker), node(20, "Safe")];
+        base.edges.push(Edge {
+            source: NodeId::new(10),
+            target: NodeId::new(20),
+            relation: "base-edge".to_owned(),
+            confidence: Confidence::Extracted,
+        });
+        let mut ours = base.clone();
+        ours.node_content_ids
+            .insert(NodeId::new(10), NodeId::new(9));
+        ours.edges[0].relation = "replacement-edge".to_owned();
+        let mut theirs = base.clone();
+        theirs.edges.push(Edge {
+            source: NodeId::new(10),
+            target: NodeId::new(20),
+            relation: "retained-edit".to_owned(),
+            confidence: Confidence::Extracted,
+        });
+        write_g(&t.base, &base);
+        write_g(&t.ours, &ours);
+        write_g(&t.theirs, &theirs);
+
+        assert_eq!(run_merge_driver(&t.base, &t.ours, &t.theirs), 0);
+        let merged = load_graph(&t.ours);
+
+        assert_eq!(merged.node_content_id(NodeId::new(10)), NodeId::new(9));
+        assert_eq!(
+            merged
+                .edges
+                .iter()
+                .map(|edge| edge.relation.as_str())
+                .collect::<Vec<_>>(),
+            vec!["replacement-edge"]
+        );
+    }
+
     // ── Error paths — every one returns exit code 1 ───────────────────────────
 
     #[test]

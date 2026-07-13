@@ -8,6 +8,8 @@
 //! owner-only incremental state; public `graph.json` is the redacted node-link projection emitted
 //! by `habitat-graph-export`, which preserves IDs and topology while replacing screened strings.
 
+use std::collections::BTreeMap;
+
 use serde::{Deserialize, Serialize};
 
 use crate::{CommunityId, Confidence, NodeId, Span};
@@ -80,6 +82,9 @@ pub struct Graph {
     pub schema: String,
     /// All nodes (canonically sorted by id after [`Graph::sorted`]).
     pub nodes: Vec<Node>,
+    /// Original content ids for nodes displaced by collision probing, keyed by assigned id.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub node_content_ids: BTreeMap<NodeId, NodeId>,
     /// All edges (canonically sorted by `(source, target, relation)`).
     pub edges: Vec<Edge>,
     /// Detected communities (sorted by id).
@@ -103,6 +108,7 @@ impl Default for Graph {
         Self {
             schema: SCHEMA_VERSION.to_owned(),
             nodes: Vec::new(),
+            node_content_ids: BTreeMap::new(),
             edges: Vec::new(),
             communities: Vec::new(),
             manifest: Manifest::default(),
@@ -121,6 +127,15 @@ impl Graph {
     #[must_use]
     pub fn counts(&self) -> (usize, usize, usize) {
         (self.nodes.len(), self.edges.len(), self.communities.len())
+    }
+
+    /// Returns the content id assigned before deterministic collision probing.
+    #[must_use]
+    pub fn node_content_id(&self, assigned: NodeId) -> NodeId {
+        self.node_content_ids
+            .get(&assigned)
+            .copied()
+            .unwrap_or(assigned)
     }
 
     /// Returns the graph with every collection in canonical (deterministic) order.
@@ -261,6 +276,7 @@ mod tests {
     fn json_roundtrip_preserves_graph() {
         let mut g = Graph::new();
         g.nodes.push(node(1, "a.rs"));
+        g.node_content_ids.insert(NodeId::new(1), NodeId::new(0));
         g.edges.push(edge(1, 1, "self", Confidence::Ambiguous));
         let g = g.sorted();
         let json = g.to_json().unwrap();

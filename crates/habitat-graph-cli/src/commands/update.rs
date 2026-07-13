@@ -800,6 +800,7 @@ fn prune_graph(mut graph: Graph, stale_files: &HashSet<&str>) -> Graph {
     graph
         .edges
         .retain(|e| kept.contains(&e.source) && kept.contains(&e.target));
+    graph.node_content_ids.retain(|id, _| kept.contains(id));
     // Communities are always re-run globally after the merge; clear to avoid stale data.
     graph.communities.clear();
     graph

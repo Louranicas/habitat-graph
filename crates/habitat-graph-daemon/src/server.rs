@@ -121,6 +121,7 @@ mod tests {
                 make_node(2, "beta"),
                 make_node(3, "orphan"),
             ],
+            node_content_ids: Default::default(),
             edges: vec![make_edge(1, 2)],
             communities: Vec::new(),
             manifest: Manifest::default(),

@@ -346,6 +346,7 @@ mod tests {
         let mut g = Graph {
             schema: SCHEMA_VERSION.to_owned(),
             nodes: vec![node(1, "Alpha"), node(2, "Beta"), node(3, "Gamma")],
+            node_content_ids: Default::default(),
             edges: vec![edge(1, 2, "calls"), edge(2, 3, "imports")],
             communities: Vec::new(),
             manifest: Manifest::default(),

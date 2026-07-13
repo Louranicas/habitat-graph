@@ -3,7 +3,8 @@
 use std::collections::HashMap;
 
 use habitat_graph_core::{
-    display_safe, sanitize_label, Graph, GraphError, NodeId, Result, SCHEMA_VERSION,
+    display_safe, is_canonical_redaction_marker, sanitize_label, Graph, GraphError, NodeId, Result,
+    SCHEMA_VERSION,
 };
 use serde_json::Value;
 
@@ -18,8 +19,9 @@ use crate::escape::{project_public_edges, redact_public_text};
 ///
 /// Each node entry:
 /// ```json
-/// { "id": <u32>, "label": <str>, "source_file": <str>,
-///   "source_location": "L<n>", "community": <u32 | null> }
+/// { "id": <u32>, "content_id": <optional u32 for displaced redacted nodes>,
+///   "label": <str>, "source_file": <str>, "source_location": "L<n>",
+///   "community": <u32 | null> }
 /// ```
 ///
 /// Each link entry:
@@ -69,13 +71,20 @@ pub fn to_node_link(graph: &Graph) -> Result<String> {
                 .map_or(Value::Null, Value::from);
             let redacted_label = redact_public_text(&node.label);
             let redacted_source_file = redact_public_text(&node.source_file);
-            serde_json::json!({
+            let mut value = serde_json::json!({
                 "id": node.id.get(),
                 "label": display_safe(&sanitize_label(&redacted_label)),
                 "source_file": display_safe(&redacted_source_file),
                 "source_location": format!("L{}", node.source_location.start_line),
                 "community": community,
-            })
+            });
+            let content_id = graph.node_content_id(node.id);
+            if content_id != node.id && is_canonical_redaction_marker(&redacted_label) {
+                if let Value::Object(fields) = &mut value {
+                    fields.insert("content_id".to_owned(), Value::from(content_id.get()));
+                }
+            }
+            value
         })
         .collect();
 
@@ -235,6 +244,19 @@ mod tests {
         let v = parse(&to_node_link(&g).unwrap());
         assert_eq!(v["nodes"].as_array().unwrap().len(), 2);
         assert_eq!(v["links"].as_array().unwrap().len(), 1);
+    }
+
+    #[test]
+    fn collision_displaced_node_emits_original_content_id() {
+        let mut g = Graph::new();
+        g.nodes
+            .push(node(2, "[REDACTED:api_key]", "src/alpha.rs", 10));
+        g.node_content_ids.insert(NodeId::new(2), NodeId::new(1));
+
+        let v = parse(&to_node_link(&g).unwrap());
+
+        assert_eq!(v["nodes"][0]["id"], 2);
+        assert_eq!(v["nodes"][0]["content_id"], 1);
     }
 
     // ── 9: source_location renders "L<n>" ────────────────────────────────────

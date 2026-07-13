@@ -171,6 +171,7 @@ mod tests {
         Graph {
             schema: SCHEMA_VERSION.to_owned(),
             nodes: node_ids.iter().copied().map(make_node).collect(),
+            node_content_ids: Default::default(),
             edges: edges
                 .iter()
                 .copied()

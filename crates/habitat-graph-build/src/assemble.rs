@@ -57,7 +57,11 @@ pub fn assemble(extractions: Vec<Extraction>) -> Graph {
             // The Entry API avoids a double-lookup: `entry` checks and potentially inserts in
             // one operation.  Occupied → duplicate label, skip silently.
             if let Entry::Vacant(slot) = interner.entry(raw_node.label.clone()) {
+                let content_id = NodeId::new(content_id(&raw_node.label));
                 let id = NodeId::new(assign_unique_content_id(&raw_node.label, &mut used_ids));
+                if id != content_id {
+                    graph.node_content_ids.insert(id, content_id);
+                }
                 slot.insert(id);
                 graph.nodes.push(Node {
                     id,

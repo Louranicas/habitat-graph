@@ -31,7 +31,7 @@
 //! The identity-interned output is passed through [`Graph::sorted`] so two runs on identical
 //! inputs produce byte-identical output (R4).
 
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet};
 
 use habitat_graph_core::{
     project_public_relation, Community, CommunityId, Edge, Graph, Manifest, Node, NodeId,
@@ -115,7 +115,7 @@ pub fn merge3(base: &Graph, ours: &Graph, theirs: &Graph) -> Graph {
     );
 
     // ── Phase 2: assign NodeIds; build identity → new_id map ──────────────────
-    let (merged_nodes, identity_to_new_id) = assign_node_ids(pre_nodes);
+    let (merged_nodes, node_content_ids, identity_to_new_id) = assign_node_ids(pre_nodes);
 
     // ── Phase 3: edge identity-key set for base-aware deletion ────────────────
     let base_edge_keys = edge_keys(base, &base_id_to_identity, 0);
@@ -179,6 +179,7 @@ pub fn merge3(base: &Graph, ours: &Graph, theirs: &Graph) -> Graph {
     Graph {
         schema: ours.schema.clone(),
         nodes: merged_nodes,
+        node_content_ids,
         edges: merged_edges,
         communities: merged_communities,
         manifest,
@@ -219,6 +220,34 @@ fn ambiguous_projected_node_ids(
                 }
             }
         }
+    }
+
+    let base_projected_ids = projected_node_ids(base);
+    let mut base_content_counts = HashMap::new();
+    for id in &base_projected_ids {
+        *base_content_counts
+            .entry(base.node_content_id(*id))
+            .or_insert(0_usize) += 1;
+    }
+    let base_explicit_content_ids: HashSet<_> = base_projected_ids
+        .iter()
+        .filter_map(|id| base.node_content_ids.get(id).copied())
+        .collect();
+    for (graph, ambiguous) in [ours, theirs].into_iter().zip(&mut ambiguous) {
+        let mut side_content_counts = HashMap::new();
+        for id in projected_node_ids(graph) {
+            *side_content_counts
+                .entry(graph.node_content_id(id))
+                .or_insert(0_usize) += 1;
+        }
+        ambiguous.retain(|id| {
+            let content_id = graph.node_content_id(*id);
+            let explicit = graph.node_content_ids.contains_key(id)
+                || base_explicit_content_ids.contains(&content_id);
+            !explicit
+                || base_content_counts.get(&content_id) != Some(&1)
+                || side_content_counts.get(&content_id) != Some(&1)
+        });
     }
 
     ambiguous
@@ -650,8 +679,15 @@ fn select_winning_nodes<'a>(
 }
 
 #[must_use]
-fn assign_node_ids(nodes: Vec<(NodeIdentity, Node)>) -> (Vec<Node>, HashMap<NodeIdentity, NodeId>) {
+fn assign_node_ids(
+    nodes: Vec<(NodeIdentity, Node)>,
+) -> (
+    Vec<Node>,
+    BTreeMap<NodeId, NodeId>,
+    HashMap<NodeIdentity, NodeId>,
+) {
     let mut identity_to_new_id = HashMap::with_capacity(nodes.len());
+    let mut node_content_ids = BTreeMap::new();
     let reserved_projected_ids: HashSet<u32> = nodes
         .iter()
         .filter_map(|(identity, _)| identity.projected_id())
@@ -662,12 +698,16 @@ fn assign_node_ids(nodes: Vec<(NodeIdentity, Node)>) -> (Vec<Node>, HashMap<Node
         .into_iter()
         .map(|(identity, mut node)| {
             let new_id = allocate_node_id(&identity, &mut used_ids, &reserved_projected_ids);
+            let content_id = identity.content_id();
+            if content_id != new_id {
+                node_content_ids.insert(new_id, content_id);
+            }
             identity_to_new_id.insert(identity, new_id);
             node.id = new_id;
             node
         })
         .collect();
-    (updated, identity_to_new_id)
+    (updated, node_content_ids, identity_to_new_id)
 }
 
 /// Merges edges from `ours` and `theirs` applying base-aware deletion and node-survival filtering.
@@ -1937,6 +1977,48 @@ mod tests {
     }
 
     #[test]
+    fn projected_same_slot_replacement_keeps_collision_lineage_distinct() {
+        let marker = "[REDACTED:api_key]";
+        let mut base = nodes_graph(&[(9, "Occupied"), (10, marker), (20, "Safe")]);
+        base.edges.push(edge(10, 20, "base-edge"));
+        let mut ours = nodes_graph(&[(9, "Occupied"), (10, marker), (20, "Safe")]);
+        ours.node_content_ids
+            .insert(NodeId::new(10), NodeId::new(9));
+        ours.edges.push(edge(10, 20, "replacement-edge"));
+        ours.communities.push(community(1, "replacement", &[10]));
+        let mut theirs = base.clone();
+        theirs.edges.push(edge(10, 20, "retained-edit"));
+        theirs
+            .communities
+            .push(community(2, "retained-edit", &[10]));
+
+        let merged = merge3(&base, &ours, &theirs);
+
+        assert_eq!(merged.node_content_id(NodeId::new(10)), NodeId::new(9));
+        assert_eq!(
+            merged
+                .edges
+                .iter()
+                .map(|edge| edge.relation.as_str())
+                .collect::<Vec<_>>(),
+            vec!["replacement-edge"]
+        );
+        assert_eq!(
+            merged
+                .communities
+                .iter()
+                .find(|community| community.label == "replacement")
+                .map(|community| community.members.as_slice()),
+            Some([NodeId::new(10)].as_slice())
+        );
+        assert!(merged
+            .communities
+            .iter()
+            .find(|community| community.label == "retained-edit")
+            .is_some_and(|community| community.members.is_empty()));
+    }
+
+    #[test]
     fn shared_projected_slot_does_not_prove_collision_lineage() {
         let marker = "[REDACTED:api_key]";
         let mut base = nodes_graph(&[(10, marker), (11, marker), (20, "Safe")]);
@@ -2009,6 +2091,25 @@ mod tests {
         let merged = merge3(&base, &ours, &theirs);
         assert_eq!(node_labels(&merged), vec!["New collision", "Safe"]);
         assert!(merged.edges.is_empty());
+    }
+
+    #[test]
+    fn explicit_content_lineage_preserves_a_displaced_projected_slot() {
+        let marker = "[REDACTED:api_key]";
+        let mut base = nodes_graph(&[(10, marker), (20, "Safe")]);
+        base.edges.push(edge(10, 20, "secret-edge"));
+        let mut ours = nodes_graph(&[(10, "New collision"), (11, marker), (20, "Safe")]);
+        ours.node_content_ids
+            .insert(NodeId::new(11), NodeId::new(10));
+        ours.edges.push(edge(11, 20, "secret-edge"));
+        let theirs = ours.clone();
+
+        let merged = merge3(&base, &ours, &theirs);
+
+        assert_eq!(node_labels(&merged), vec!["New collision", "Safe", marker]);
+        assert_eq!(merged.edges.len(), 1);
+        assert_eq!(merged.edges[0].relation, "secret-edge");
+        assert_eq!(merged.edges[0].source, NodeId::new(10));
     }
 
     #[test]

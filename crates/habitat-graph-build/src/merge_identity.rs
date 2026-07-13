@@ -10,21 +10,32 @@
 use std::collections::{HashMap, HashSet};
 
 use habitat_graph_core::{
-    content_id, is_canonical_redaction_marker, project_public_relation, redact_public_text, Edge,
-    Graph, Node, NodeId, PublicRelationProjector,
+    content_id as label_content_id, is_canonical_redaction_marker, project_public_relation,
+    redact_public_text, Edge, Graph, Node, NodeId, PublicRelationProjector,
 };
 
 #[derive(Clone, Debug, Eq, Hash, PartialEq)]
 pub(crate) enum NodeIdentity {
-    Projected(NodeId, usize),
+    Projected {
+        assigned_id: NodeId,
+        content_id: NodeId,
+        provenance: usize,
+    },
     Label(String),
 }
 
 impl NodeIdentity {
     pub(crate) const fn projected_id(&self) -> Option<NodeId> {
         match self {
-            Self::Projected(id, _) => Some(*id),
+            Self::Projected { assigned_id, .. } => Some(*assigned_id),
             Self::Label(_) => None,
+        }
+    }
+
+    pub(crate) fn content_id(&self) -> NodeId {
+        match self {
+            Self::Projected { content_id, .. } => *content_id,
+            Self::Label(label) => NodeId::new(label_content_id(label)),
         }
     }
 }
@@ -34,6 +45,8 @@ pub(crate) type NodeIdentityMap = HashMap<NodeId, NodeIdentity>;
 #[derive(Debug)]
 struct ProjectionCandidate {
     graph_index: usize,
+    assigned_id: NodeId,
+    content_id: NodeId,
     marker: bool,
     raw_label: Option<String>,
 }
@@ -71,18 +84,21 @@ pub(crate) fn node_identity_maps(
                 }
                 (false, Some(node.label.clone()))
             };
+            let content_id = graph.node_content_id(node.id);
             candidates
-                .entry(node.id)
+                .entry(content_id)
                 .or_default()
                 .push(ProjectionCandidate {
                     graph_index,
+                    assigned_id: node.id,
+                    content_id,
                     marker,
                     raw_label,
                 });
         }
     }
 
-    for (id, group) in candidates {
+    for group in candidates.into_values() {
         if !group.iter().any(|candidate| candidate.marker) {
             continue;
         }
@@ -90,19 +106,39 @@ pub(crate) fn node_identity_maps(
             .filter(|root| group.iter().any(|candidate| candidate.graph_index == *root));
 
         if let Some(anchor) = lineage_anchor {
+            let Some(anchor_assigned_id) = group
+                .iter()
+                .find(|candidate| candidate.graph_index == anchor)
+                .map(|candidate| candidate.assigned_id)
+            else {
+                continue;
+            };
             let anchor_raw_label = group
                 .iter()
                 .find(|candidate| candidate.graph_index == anchor)
                 .and_then(|candidate| candidate.raw_label.clone());
             for candidate in group {
                 if candidate.marker || candidate.raw_label == anchor_raw_label {
-                    maps[candidate.graph_index].insert(id, NodeIdentity::Projected(id, anchor));
+                    maps[candidate.graph_index].insert(
+                        candidate.assigned_id,
+                        NodeIdentity::Projected {
+                            assigned_id: anchor_assigned_id,
+                            content_id: candidate.content_id,
+                            provenance: anchor,
+                        },
+                    );
                 }
             }
         } else {
             for candidate in group.into_iter().filter(|candidate| candidate.marker) {
-                maps[candidate.graph_index]
-                    .insert(id, NodeIdentity::Projected(id, candidate.graph_index));
+                maps[candidate.graph_index].insert(
+                    candidate.assigned_id,
+                    NodeIdentity::Projected {
+                        assigned_id: candidate.assigned_id,
+                        content_id: candidate.content_id,
+                        provenance: candidate.graph_index,
+                    },
+                );
             }
         }
     }
@@ -152,8 +188,8 @@ pub(crate) fn allocate_node_id(
     reserved_projected_ids: &HashSet<u32>,
 ) -> NodeId {
     let (preferred, projected) = match identity {
-        NodeIdentity::Projected(id, _) => (id.get(), true),
-        NodeIdentity::Label(label) => (content_id(label), false),
+        NodeIdentity::Projected { assigned_id, .. } => (assigned_id.get(), true),
+        NodeIdentity::Label(label) => (label_content_id(label), false),
     };
     let mut raw = preferred;
     loop {

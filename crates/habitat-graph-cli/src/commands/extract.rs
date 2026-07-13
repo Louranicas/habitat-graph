@@ -118,17 +118,47 @@ struct GeneratedVaultLink {
     target: String,
 }
 
-fn valid_legacy_yaml_string(value: &str) -> bool {
+fn decode_legacy_yaml_string(value: &str) -> Option<String> {
+    let mut decoded = String::with_capacity(value.len());
     let mut characters = value.chars();
     while let Some(character) = characters.next() {
-        if character == '"' {
-            return false;
-        }
-        if character == '\\' && !matches!(characters.next(), Some('\\' | '"')) {
-            return false;
+        match character {
+            '"' => return None,
+            '\\' => decoded.push(match characters.next()? {
+                '\\' => '\\',
+                '"' => '"',
+                _ => return None,
+            }),
+            _ => decoded.push(character),
         }
     }
-    true
+    Some(decoded)
+}
+
+fn legacy_vault_crate(source_file: &str) -> String {
+    let parts: Vec<_> = source_file.split('/').collect();
+    let value = if parts.first() == Some(&"crates") && parts.len() >= 2 {
+        sanitize_label(parts[1])
+    } else if let Some(first) = parts.first().filter(|part| !part.is_empty()) {
+        sanitize_label(first)
+    } else {
+        "root".to_owned()
+    };
+    value
+        .chars()
+        .filter(|character| {
+            character.is_ascii_alphanumeric() || matches!(character, '.' | '_' | '-')
+        })
+        .collect()
+}
+
+fn legacy_vault_lang(source_file: &str) -> &'static str {
+    match source_file.rsplit('.').next() {
+        Some("rs") => "rust",
+        Some("py") => "python",
+        Some("js" | "ts" | "tsx" | "jsx") => "js",
+        _ => "other",
+    }
 }
 
 fn canonical_legacy_number<T>(value: &str) -> Option<T>
@@ -167,8 +197,9 @@ fn parse_generated_vault_node_note(content: &str) -> Option<GeneratedVaultNode> 
     if !matches!(lang, "rust" | "python" | "js" | "other") {
         return None;
     }
-    let file = lines.next()?.strip_prefix("file: \"")?.strip_suffix('"')?;
-    if !valid_legacy_yaml_string(file) {
+    let file =
+        decode_legacy_yaml_string(lines.next()?.strip_prefix("file: \"")?.strip_suffix('"')?)?;
+    if krate != legacy_vault_crate(&file) || lang != legacy_vault_lang(&file) {
         return None;
     }
     let line = lines.next()?.strip_prefix("line: ")?;
@@ -190,7 +221,10 @@ fn parse_generated_vault_node_note(content: &str) -> Option<GeneratedVaultNode> 
     }
     let location = lines.next()?;
     let location_suffix = format!(":{line}` · crate `{krate}` · degree {degree}");
-    if !location.starts_with("> `") || !location.ends_with(&location_suffix) {
+    let location_file = location
+        .strip_prefix("> `")?
+        .strip_suffix(&location_suffix)?;
+    if location_file != file {
         return None;
     }
     if !lines.next()?.is_empty() || lines.next()? != "## Links" {
@@ -465,7 +499,7 @@ fn is_generated_vault_moc(content: &str, notes: &[(String, GeneratedVaultNode)])
         return false;
     }
     if sections.is_empty() {
-        return false;
+        return notes.is_empty();
     }
 
     [false, true].into_iter().any(|filename_targets| {
@@ -929,6 +963,9 @@ fn parse_legacy_wiki_node(content: &str) -> Option<LegacyWikiNode> {
 
 fn parse_legacy_wiki_index(content: &str) -> Option<Vec<LegacyWikiLink>> {
     let lines = legacy_wiki_lines(content)?;
+    if lines == ["# Index", ""] {
+        return Some(Vec::new());
+    }
     if lines.len() < 3 || lines[0] != "# Index" || !lines[1].is_empty() {
         return None;
     }
@@ -1017,7 +1054,11 @@ fn legacy_generated_wiki_ownership(contents: &BTreeMap<String, String>) -> HashS
         }
     }
     if indexed.is_empty() {
-        return HashSet::new();
+        return if index_links.is_empty() && nodes.is_empty() {
+            HashSet::from(["index.md".to_owned()])
+        } else {
+            HashSet::new()
+        };
     }
 
     for filename in &indexed {
@@ -1623,7 +1664,7 @@ mod tests {
             format!("{}\n", links.join("\n"))
         };
         format!(
-            "---\nid: {id}\n{community_field}crate: test\nlang: rust\nfile: \"lib.rs\"\nline: 1\ndegree: {degree}\ntags: [hg/node, crate/test, lang/rust{community_tag}]\n---\n\n# {label}\n\n> `lib.rs:1` · crate `test` · degree {degree}\n\n## Links\n{links}"
+            "---\nid: {id}\n{community_field}crate: lib.rs\nlang: rust\nfile: \"lib.rs\"\nline: 1\ndegree: {degree}\ntags: [hg/node, crate/lib.rs, lang/rust{community_tag}]\n---\n\n# {label}\n\n> `lib.rs:1` · crate `lib.rs` · degree {degree}\n\n## Links\n{links}"
         )
     }
 
@@ -1857,7 +1898,7 @@ mod tests {
         let raw_label = "api_key_assignment_refused";
         mk_file(src.path(), "lib.rs", &format!("fn {raw_label}() {{}}"));
         let legacy = format!(
-            "---\nid: 193856898\ncrate: test\nlang: rust\nfile: \"lib.rs\"\nline: 1\ndegree: 0\ntags: [hg/node, crate/test, lang/rust]\n---\n\n# {raw_label}\n\n> `lib.rs:1` · crate `test` · degree 0\n\n## Links\n"
+            "---\nid: 193856898\ncrate: lib.rs\nlang: rust\nfile: \"lib.rs\"\nline: 1\ndegree: 0\ntags: [hg/node, crate/lib.rs, lang/rust]\n---\n\n# {raw_label}\n\n> `lib.rs:1` · crate `lib.rs` · degree 0\n\n## Links\n"
         );
         fs::write(vault.path().join(format!("{raw_label}.md")), legacy).unwrap();
         fs::write(
@@ -1892,18 +1933,29 @@ mod tests {
 
     #[test]
     fn legacy_vault_ownership_requires_the_exact_generated_layout() {
-        let valid = "---\nid: 1\ncommunity: 2\ncrate: test\nlang: rust\nfile: \"lib.rs\"\nline: 3\ndegree: 0\ntags: [hg/node, crate/test, lang/rust, community/2]\n---\n\n# generated\n\n> `lib.rs:3` · crate `test` · degree 0\n\n## Links\n";
+        let valid = "---\nid: 1\ncommunity: 2\ncrate: lib.rs\nlang: rust\nfile: \"lib.rs\"\nline: 3\ndegree: 0\ntags: [hg/node, crate/lib.rs, lang/rust, community/2]\n---\n\n# generated\n\n> `lib.rs:3` · crate `lib.rs` · degree 0\n\n## Links\n";
         assert!(super::parse_generated_vault_node_note(valid).is_some());
 
         for invalid in [
-            valid.replacen("crate: test\nlang: rust", "lang: rust\ncrate: test", 1),
+            valid.replacen("crate: lib.rs\nlang: rust", "lang: rust\ncrate: lib.rs", 1),
             valid.replacen("line: 3", "line: many", 1),
             valid.replacen("line: 3", "line: 03", 1),
             valid.replacen("degree: 0", "degree: many", 1),
             valid.replacen("tags: [hg/node,", "tags: [hg/notebook,", 1),
+            valid.replace("lib.rs:3`", "other.rs:3`"),
+            valid
+                .replace("crate: lib.rs", "crate: wrong")
+                .replace("crate/lib.rs", "crate/wrong")
+                .replace("crate `lib.rs`", "crate `wrong`"),
+            valid
+                .replace("lang: rust", "lang: other")
+                .replace("lang/rust", "lang/other"),
         ] {
             assert!(super::parse_generated_vault_node_note(&invalid).is_none());
         }
+
+        let escaped_path = "---\nid: 1\ncrate: foo\nlang: rust\nfile: \"crates/foo/src/a\\\"b.rs\"\nline: 3\ndegree: 0\ntags: [hg/node, crate/foo, lang/rust]\n---\n\n# generated\n\n> `crates/foo/src/a\"b.rs:3` · crate `foo` · degree 0\n\n## Links\n";
+        assert!(super::parse_generated_vault_node_note(escaped_path).is_some());
 
         let inconsistent_degree =
             legacy_vault_note_with_links(1, None, "generated", &["- calls:: [[target]]"])
@@ -2155,20 +2207,16 @@ mod tests {
     }
 
     #[test]
-    fn empty_legacy_vault_moc_requires_generated_note_corroboration() {
+    fn empty_legacy_vault_moc_migrates_without_legacy_notes() {
         let src = TempDir::new().unwrap();
         let out = TempDir::new().unwrap();
         let vault = TempDir::new().unwrap();
         mk_file(src.path(), "lib.rs", "fn generated() {}");
-        let user_moc = "# Map of Content\n";
-        fs::write(vault.path().join("_MOC.md"), user_moc).unwrap();
+        fs::write(vault.path().join("_MOC.md"), "# Map of Content\n").unwrap();
 
-        assert_eq!(run(src.path(), out.path(), Some(vault.path())), 4);
-        assert_eq!(
-            fs::read_to_string(vault.path().join("_MOC.md")).unwrap(),
-            user_moc
-        );
-        assert!(!vault.path().join(super::VAULT_MANIFEST).exists());
+        assert_eq!(run(src.path(), out.path(), Some(vault.path())), 0);
+        assert!(vault.path().join("generated.md").exists());
+        assert!(vault.path().join(super::VAULT_MANIFEST).exists());
     }
 
     #[test]
@@ -2914,6 +2962,39 @@ mod tests {
             "user node"
         );
         assert!(!wiki.join(super::WIKI_MANIFEST).exists());
+    }
+
+    #[test]
+    fn wiki_flag_migrates_empty_legacy_index() {
+        let src = TempDir::new().unwrap();
+        let out = TempDir::new().unwrap();
+        mk_file(src.path(), "lib.rs", "fn generated() {}");
+        let wiki = out.path().join("wiki");
+        fs::create_dir(&wiki).unwrap();
+        fs::write(wiki.join("index.md"), "# Index\n\n").unwrap();
+        let opts = ExtractOpts {
+            wiki: true,
+            ..ExtractOpts::default()
+        };
+
+        assert_eq!(run_artifacts(src.path(), out.path(), None, opts), 0);
+        assert!(wiki.join(super::WIKI_MANIFEST).exists());
+        assert!(fs::read_to_string(wiki.join("index.md"))
+            .unwrap()
+            .contains(habitat_graph_export::wiki::GENERATED_WIKI_SIGNATURE));
+    }
+
+    #[test]
+    fn empty_legacy_wiki_index_rejects_candidate_node_pages() {
+        let contents = std::collections::BTreeMap::from([
+            ("index.md".to_owned(), "# Index\n\n".to_owned()),
+            (
+                "node-1.md".to_owned(),
+                legacy_wiki_node("stale", "_none_", "_none_"),
+            ),
+        ]);
+
+        assert!(super::legacy_generated_wiki_ownership(&contents).is_empty());
     }
 
     #[test]

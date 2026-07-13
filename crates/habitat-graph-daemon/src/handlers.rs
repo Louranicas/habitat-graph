@@ -136,6 +136,7 @@ mod tests {
         Graph {
             schema: SCHEMA_VERSION.to_owned(),
             nodes,
+            node_content_ids: Default::default(),
             edges,
             communities: Vec::new(),
             manifest: Manifest::default(),

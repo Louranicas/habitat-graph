@@ -255,6 +255,7 @@ mod tests {
         Graph {
             schema: "test".to_owned(),
             nodes: Vec::new(),
+            node_content_ids: Default::default(),
             edges: Vec::new(),
             communities: Vec::new(),
             manifest: Manifest {

@@ -1,6 +1,6 @@
 //! Merge two graphs (incremental-rebuild support).
 
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet};
 
 use habitat_graph_core::{Community, Edge, Graph, Manifest, Node, NodeId};
 use indexmap::IndexMap;
@@ -42,6 +42,7 @@ pub fn merge(a: Graph, b: Graph) -> Graph {
     let Graph {
         schema: a_schema,
         nodes: a_nodes,
+        node_content_ids: _,
         edges: a_edges,
         communities: a_communities,
         manifest: a_manifest,
@@ -49,6 +50,7 @@ pub fn merge(a: Graph, b: Graph) -> Graph {
     let Graph {
         schema: _,
         nodes: b_nodes,
+        node_content_ids: _,
         edges: b_edges,
         communities: b_communities,
         manifest: b_manifest,
@@ -140,11 +142,20 @@ pub fn merge(a: Graph, b: Graph) -> Graph {
         generated_at: a_manifest.generated_at.or(b_manifest.generated_at),
     };
 
+    let node_content_ids: BTreeMap<NodeId, NodeId> = identity_to_new_id
+        .iter()
+        .filter_map(|(identity, assigned)| {
+            let content_id = identity.content_id();
+            (content_id != *assigned).then_some((*assigned, content_id))
+        })
+        .collect();
+
     // ── Phase 5: sorted ───────────────────────────────────────────────────────
 
     Graph {
         schema: a_schema,
         nodes: merged_nodes,
+        node_content_ids,
         edges: merged_edges,
         communities: merged_communities,
         manifest,

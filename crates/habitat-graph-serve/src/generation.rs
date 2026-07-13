@@ -25,6 +25,7 @@ pub const GENERATION_LEN: usize = 16;
 
 /// Domain separator prepended before the entire nodes section.
 const TAG_NODES: &[u8] = b"NODES\x00";
+const TAG_NODE_CONTENT_IDS: &[u8] = b"NODE_CONTENT_IDS\x00";
 /// Domain separator prepended before the entire edges section.
 const TAG_EDGES: &[u8] = b"EDGES\x00";
 /// Domain separator prepended before the entire communities section.
@@ -57,6 +58,14 @@ pub fn generation_id(graph: &Graph) -> String {
     hasher.update(&(nodes.len() as u64).to_le_bytes());
     for node in nodes {
         hash_node(&mut hasher, node);
+    }
+    if !graph.node_content_ids.is_empty() {
+        hasher.update(TAG_NODE_CONTENT_IDS);
+        hasher.update(&(graph.node_content_ids.len() as u64).to_le_bytes());
+        for (assigned, content) in &graph.node_content_ids {
+            hasher.update(&assigned.get().to_le_bytes());
+            hasher.update(&content.get().to_le_bytes());
+        }
     }
 
     // ── edges section ──────────────────────────────────────────────────────────
