@@ -186,6 +186,34 @@ pub(crate) fn node_identity_maps(
     maps
 }
 
+fn projected_slot_counts(
+    graph_count: usize,
+    candidates: &HashMap<NodeId, Vec<ProjectionCandidate>>,
+) -> Vec<HashMap<NodeId, usize>> {
+    let mut counts: Vec<HashMap<NodeId, usize>> =
+        (0..graph_count).map(|_| HashMap::new()).collect();
+    for candidate in candidates.values().flatten() {
+        *counts[candidate.graph_index]
+            .entry(candidate.assigned_id)
+            .or_default() += 1;
+    }
+    counts
+}
+
+fn legacy_bridge_anchor_is_unambiguous(
+    anchor: &ProjectionCandidate,
+    side_candidates: &[&ProjectionCandidate],
+    slot_counts: &[HashMap<NodeId, usize>],
+) -> bool {
+    side_candidates.iter().all(|candidate| {
+        slot_counts[candidate.graph_index]
+            .get(&anchor.assigned_id)
+            .copied()
+            .unwrap_or_default()
+            == usize::from(candidate.assigned_id == anchor.assigned_id)
+    })
+}
+
 fn bridge_legacy_projection_lineage(
     graphs: &[&Graph],
     root: usize,
@@ -214,6 +242,7 @@ fn bridge_legacy_projection_lineage(
     for anchors in root_anchors.values_mut() {
         anchors.sort_unstable_by_key(|(position, _)| *position);
     }
+    let slot_counts = projected_slot_counts(graphs.len(), candidates);
     let mut bridges = Vec::new();
 
     for (&content_id, group) in candidates {
@@ -267,6 +296,9 @@ fn bridge_legacy_projection_lineage(
             continue;
         }
         let anchor = anchors[first].1;
+        if !legacy_bridge_anchor_is_unambiguous(anchor, &side_candidates, &slot_counts) {
+            continue;
+        }
         bridges.push((content_id, anchor, side_candidates));
     }
 

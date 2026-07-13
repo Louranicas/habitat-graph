@@ -2163,6 +2163,49 @@ mod tests {
     }
 
     #[test]
+    fn legacy_lineage_bridge_rejects_a_retained_projected_anchor() {
+        let marker = "[REDACTED:api_key]";
+        let content = content_id("Occupied");
+        let anchor = content.wrapping_add(1);
+        let displaced = content.wrapping_add(2);
+        let target = content.wrapping_add(10);
+        let mut base = nodes_graph(&[(content, "Occupied"), (anchor, marker), (target, "Safe")]);
+        base.edges.push(edge(anchor, target, "legacy-edge"));
+        base.communities.push(community(7, "legacy", &[anchor]));
+
+        let mut ours = base.clone();
+        ours.nodes.push(node(displaced, marker));
+        ours.node_content_ids
+            .insert(NodeId::new(displaced), NodeId::new(content));
+        let theirs = ours.clone();
+
+        let identities =
+            crate::merge_identity::node_identity_maps(&[&base, &ours, &theirs], Some(0));
+        assert_ne!(
+            identities[0][&NodeId::new(anchor)],
+            identities[1][&NodeId::new(displaced)]
+        );
+
+        let merged = merge3(&base, &ours, &theirs);
+        let legacy_edge = merged
+            .edges
+            .iter()
+            .find(|edge| edge.relation == "legacy-edge")
+            .unwrap();
+
+        assert_eq!(
+            merged.node_content_id(legacy_edge.source),
+            NodeId::new(anchor)
+        );
+        assert!(merged.communities.iter().any(|community| {
+            community.label == "legacy" && community.members.contains(&legacy_edge.source)
+        }));
+        assert!(merged.nodes.iter().any(|node| {
+            merged.node_content_id(node.id) == NodeId::new(content) && node.id != legacy_edge.source
+        }));
+    }
+
+    #[test]
     fn adjacent_projected_additions_preserve_unchanged_base_slot() {
         let marker = "[REDACTED:api_key]";
         let mut base = nodes_graph(&[(10, marker), (20, "Safe")]);

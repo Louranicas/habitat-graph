@@ -10,7 +10,7 @@ use std::fmt::Write as _;
 use std::path::{Component, Path, PathBuf};
 
 use habitat_graph_core::{
-    display_safe, sanitize_label, Graph, GraphError, InputRecord, Manifest, Result,
+    content_id, display_safe, sanitize_label, Graph, GraphError, InputRecord, Manifest, Result,
 };
 
 /// Ownership manifest for generated Obsidian notes. Only files recorded here (or recognized by
@@ -1035,6 +1035,116 @@ fn legacy_wiki_reciprocal_multiplicities_match(
     outbound == inbound
 }
 
+fn legacy_wiki_probe_positions(ids: impl Iterator<Item = u32>) -> HashMap<u32, (usize, usize)> {
+    let mut ids: Vec<_> = ids.collect();
+    ids.sort_unstable();
+    ids.dedup();
+    let mut groups: Vec<Vec<u32>> = Vec::new();
+    for id in ids {
+        if groups
+            .last()
+            .and_then(|group| group.last())
+            .is_some_and(|last| *last != u32::MAX && *last + 1 == id)
+        {
+            if let Some(group) = groups.last_mut() {
+                group.push(id);
+            }
+        } else {
+            groups.push(vec![id]);
+        }
+    }
+    if groups.len() > 1
+        && groups
+            .first()
+            .and_then(|group| group.first())
+            .is_some_and(|id| *id == 0)
+        && groups
+            .last()
+            .and_then(|group| group.last())
+            .is_some_and(|id| *id == u32::MAX)
+    {
+        let first = groups.remove(0);
+        if let Some(last) = groups.last_mut() {
+            last.extend(first);
+        }
+    }
+    groups
+        .into_iter()
+        .enumerate()
+        .flat_map(|(group, ids)| {
+            ids.into_iter()
+                .enumerate()
+                .map(move |(position, id)| (id, (group, position)))
+        })
+        .collect()
+}
+
+fn legacy_wiki_allocation_matches(
+    claimed: &[(&str, &LegacyWikiNode)],
+    raw_titles: &[String],
+) -> bool {
+    if claimed.len() != raw_titles.len() {
+        return false;
+    }
+    let mut raw_seen = HashSet::with_capacity(claimed.len());
+    let mut assignments = Vec::with_capacity(claimed.len());
+    for ((filename, node), raw_title) in claimed.iter().zip(raw_titles) {
+        let Some(assigned) = filename
+            .strip_prefix("node-")
+            .and_then(|value| value.strip_suffix(".md"))
+            .and_then(canonical_legacy_number::<u32>)
+        else {
+            return false;
+        };
+        if display_safe(&sanitize_label(raw_title)) != node.title
+            || !raw_seen.insert(raw_title.as_str())
+        {
+            return false;
+        }
+        assignments.push((assigned, content_id(raw_title)));
+    }
+
+    let positions = legacy_wiki_probe_positions(assignments.iter().map(|(assigned, _)| *assigned));
+    assignments.into_iter().all(|(assigned, content)| {
+        assigned == content
+            || matches!(
+                (positions.get(&content), positions.get(&assigned)),
+                (Some((content_group, content_position)), Some((assigned_group, assigned_position)))
+                    if content_group == assigned_group && assigned_position > content_position
+            )
+    })
+}
+
+fn legacy_wiki_node_ids_match(
+    nodes: &BTreeMap<String, LegacyWikiNode>,
+    indexed: &HashSet<String>,
+) -> bool {
+    let claimed: Vec<_> = nodes
+        .iter()
+        .filter(|(filename, _)| indexed.contains(filename.as_str()))
+        .map(|(filename, node)| (filename.as_str(), node))
+        .collect();
+    let displayed: Vec<_> = claimed.iter().map(|(_, node)| node.title.clone()).collect();
+    if legacy_wiki_allocation_matches(&claimed, &displayed) {
+        return true;
+    }
+
+    let mut decoded_any = false;
+    let raw: Vec<_> = claimed
+        .iter()
+        .map(|(_, node)| {
+            legacy_display_safe_raw(&node.title).map_or_else(
+                || node.title.clone(),
+                |raw| {
+                    decoded_any = true;
+                    raw
+                },
+            )
+        })
+        .collect();
+    decoded_any && legacy_wiki_allocation_matches(&claimed, &raw)
+}
+
 fn legacy_generated_wiki_ownership(contents: &BTreeMap<String, String>) -> HashSet<String> {
     let Some(index_links) = contents
         .get("index.md")
@@ -1071,6 +1181,9 @@ fn legacy_generated_wiki_ownership(contents: &BTreeMap<String, String>) -> HashS
         } else {
             HashSet::new()
         };
+    }
+    if !legacy_wiki_node_ids_match(&nodes, &indexed) {
+        return HashSet::new();
     }
 
     for filename in &indexed {
@@ -3069,37 +3182,93 @@ mod tests {
     }
 
     #[test]
-    fn legacy_wiki_ownership_requires_reciprocal_link_multiplicity() {
-        let outbound = "- [Two](node-2.md) (calls)\n- [Two](node-2.md) (calls)";
-        let inbound = "- [One](node-1.md) (calls)";
-        let mut contents = std::collections::BTreeMap::from([
+    fn legacy_wiki_ownership_requires_content_allocated_node_ids() {
+        let title = "Foo";
+        let invalid = std::collections::BTreeMap::from([
             (
                 "index.md".to_owned(),
-                "# Index\n\n- [One](node-1.md)\n- [Two](node-2.md)\n".to_owned(),
+                format!("# Index\n\n- [{title}](node-1.md)\n"),
             ),
             (
                 "node-1.md".to_owned(),
-                legacy_wiki_node("One", outbound, "_none_"),
+                legacy_wiki_node(title, "_none_", "_none_"),
+            ),
+        ]);
+        assert!(super::legacy_generated_wiki_ownership(&invalid).is_empty());
+
+        let id = habitat_graph_core::content_id(title);
+        let filename = format!("node-{id}.md");
+        let valid = std::collections::BTreeMap::from([
+            (
+                "index.md".to_owned(),
+                format!("# Index\n\n- [{title}]({filename})\n"),
             ),
             (
-                "node-2.md".to_owned(),
-                legacy_wiki_node("Two", "_none_", inbound),
+                filename.clone(),
+                legacy_wiki_node(title, "_none_", "_none_"),
+            ),
+        ]);
+        assert_eq!(
+            super::legacy_generated_wiki_ownership(&valid),
+            std::collections::HashSet::from(["index.md".to_owned(), filename])
+        );
+    }
+
+    #[test]
+    fn legacy_wiki_ownership_accepts_display_safe_title_ids() {
+        let raw_title = "Foo\u{200B}Bar";
+        let title = habitat_graph_core::display_safe(raw_title);
+        let id = habitat_graph_core::content_id(raw_title);
+        let filename = format!("node-{id}.md");
+        let contents = std::collections::BTreeMap::from([
+            (
+                "index.md".to_owned(),
+                format!("# Index\n\n- [{title}]({filename})\n"),
+            ),
+            (
+                filename.clone(),
+                legacy_wiki_node(&title, "_none_", "_none_"),
+            ),
+        ]);
+
+        assert_eq!(
+            super::legacy_generated_wiki_ownership(&contents),
+            std::collections::HashSet::from(["index.md".to_owned(), filename])
+        );
+    }
+
+    #[test]
+    fn legacy_wiki_ownership_requires_reciprocal_link_multiplicity() {
+        let one = habitat_graph_core::content_id("One");
+        let two = habitat_graph_core::content_id("Two");
+        let one_filename = format!("node-{one}.md");
+        let two_filename = format!("node-{two}.md");
+        let outbound = format!("- [Two]({two_filename}) (calls)\n- [Two]({two_filename}) (calls)");
+        let inbound = format!("- [One]({one_filename}) (calls)");
+        let mut contents = std::collections::BTreeMap::from([
+            (
+                "index.md".to_owned(),
+                format!("# Index\n\n- [One]({one_filename})\n- [Two]({two_filename})\n"),
+            ),
+            (
+                one_filename.clone(),
+                legacy_wiki_node("One", &outbound, "_none_"),
+            ),
+            (
+                two_filename.clone(),
+                legacy_wiki_node("Two", "_none_", &inbound),
             ),
         ]);
 
         assert!(super::legacy_generated_wiki_ownership(&contents).is_empty());
 
         contents.insert(
-            "node-2.md".to_owned(),
+            two_filename.clone(),
             legacy_wiki_node("Two", "_none_", &format!("{inbound}\n{inbound}")),
         );
         assert_eq!(
             super::legacy_generated_wiki_ownership(&contents),
-            std::collections::HashSet::from([
-                "index.md".to_owned(),
-                "node-1.md".to_owned(),
-                "node-2.md".to_owned(),
-            ])
+            std::collections::HashSet::from(["index.md".to_owned(), one_filename, two_filename,])
         );
     }
 
