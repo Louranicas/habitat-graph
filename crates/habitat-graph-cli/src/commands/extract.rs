@@ -9,7 +9,9 @@ use std::collections::{BTreeMap, HashSet};
 use std::fmt::Write as _;
 use std::path::{Component, Path, PathBuf};
 
-use habitat_graph_core::{sanitize_label, Graph, GraphError, InputRecord, Manifest, Result};
+use habitat_graph_core::{
+    display_safe, sanitize_label, Graph, GraphError, InputRecord, Manifest, Result,
+};
 
 /// Ownership manifest for generated Obsidian notes. Only files recorded here (or recognized by
 /// the conservative legacy signature during first migration) may be removed on a later sync.
@@ -306,17 +308,44 @@ fn legacy_vault_filename_stem(label: &str) -> String {
     }
 }
 
-fn legacy_vault_filenames_match(notes: &[(String, GeneratedVaultNode)]) -> bool {
-    let stems: Vec<_> = notes
-        .iter()
-        .map(|(_, note)| legacy_vault_filename_stem(&note.label))
-        .collect();
+fn legacy_vault_raw_label(label: &str) -> Option<String> {
+    let mut decoded = String::with_capacity(label.len());
+    let mut remaining = label;
+    let mut changed = false;
+    while !remaining.is_empty() {
+        if let Some(body) = remaining.strip_prefix("\\u{") {
+            if let Some(end) = body.find('}') {
+                let escape_length = 3 + end + 1;
+                let escape = &remaining[..escape_length];
+                if let Some(character) = u32::from_str_radix(&body[..end], 16)
+                    .ok()
+                    .and_then(char::from_u32)
+                    .filter(|character| display_safe(&character.to_string()) == escape)
+                {
+                    decoded.push(character);
+                    remaining = &remaining[escape_length..];
+                    changed = true;
+                    continue;
+                }
+            }
+        }
+        let character = remaining.chars().next()?;
+        decoded.push(character);
+        remaining = &remaining[character.len_utf8()..];
+    }
+    changed.then_some(decoded)
+}
+
+fn legacy_vault_allocated_filenames_match(
+    notes: &[(String, GeneratedVaultNode)],
+    stems: &[String],
+) -> bool {
     let mut counts = BTreeMap::new();
-    for stem in &stems {
+    for stem in stems {
         *counts.entry(stem.as_str()).or_insert(0_usize) += 1;
     }
     let mut expected_names = HashSet::with_capacity(notes.len());
-    notes.iter().zip(&stems).all(|((filename, note), stem)| {
+    notes.iter().zip(stems).all(|((filename, note), stem)| {
         let expected = if counts.get(stem.as_str()).copied().unwrap_or(0) > 1 {
             format!("{stem}_n{}.md", note.id)
         } else {
@@ -324,6 +353,31 @@ fn legacy_vault_filenames_match(notes: &[(String, GeneratedVaultNode)]) -> bool 
         };
         filename == &expected && expected_names.insert(expected)
     })
+}
+
+fn legacy_vault_filenames_match(notes: &[(String, GeneratedVaultNode)]) -> bool {
+    let displayed_stems: Vec<_> = notes
+        .iter()
+        .map(|(_, note)| legacy_vault_filename_stem(&note.label))
+        .collect();
+    if legacy_vault_allocated_filenames_match(notes, &displayed_stems) {
+        return true;
+    }
+
+    let mut decoded_any = false;
+    let raw_stems: Vec<_> = notes
+        .iter()
+        .map(|(_, note)| {
+            legacy_vault_raw_label(&note.label).map_or_else(
+                || legacy_vault_filename_stem(&note.label),
+                |raw| {
+                    decoded_any = true;
+                    legacy_vault_filename_stem(&raw)
+                },
+            )
+        })
+        .collect();
+    decoded_any && legacy_vault_allocated_filenames_match(notes, &raw_stems)
 }
 
 fn generated_vault_moc_section_matches(
@@ -855,27 +909,34 @@ fn legacy_wiki_link_matches(
         })
 }
 
-fn legacy_wiki_reciprocal_matches(
-    link: &LegacyWikiLink,
-    source: &str,
-    source_title: &str,
+fn legacy_wiki_reciprocal_multiplicities_match(
     nodes: &BTreeMap<String, LegacyWikiNode>,
-    outbound: bool,
+    indexed: &HashSet<String>,
 ) -> bool {
-    let Some(target) = nodes.get(&link.target) else {
-        return false;
-    };
-    let reciprocal = if outbound {
-        &target.inbound
-    } else {
-        &target.outbound
-    };
-    let source_label = legacy_wiki_link_text(source_title);
-    reciprocal.iter().any(|candidate| {
-        candidate.target == source
-            && candidate.label == source_label
-            && candidate.relation == link.relation
-    })
+    let mut outbound = BTreeMap::new();
+    let mut inbound = BTreeMap::new();
+    for filename in indexed {
+        let node = &nodes[filename];
+        for link in &node.outbound {
+            *outbound
+                .entry((
+                    filename.as_str(),
+                    link.target.as_str(),
+                    link.relation.as_deref(),
+                ))
+                .or_insert(0_usize) += 1;
+        }
+        for link in &node.inbound {
+            *inbound
+                .entry((
+                    link.target.as_str(),
+                    filename.as_str(),
+                    link.relation.as_deref(),
+                ))
+                .or_insert(0_usize) += 1;
+        }
+    }
+    outbound == inbound
 }
 
 fn legacy_generated_wiki_ownership(contents: &BTreeMap<String, String>) -> HashSet<String> {
@@ -918,15 +979,12 @@ fn legacy_generated_wiki_ownership(contents: &BTreeMap<String, String>) -> HashS
                 .inbound
                 .iter()
                 .any(|link| !legacy_wiki_link_matches(link, &nodes, &indexed))
-            || node.outbound.iter().any(|link| {
-                !legacy_wiki_reciprocal_matches(link, filename, &node.title, &nodes, true)
-            })
-            || node.inbound.iter().any(|link| {
-                !legacy_wiki_reciprocal_matches(link, filename, &node.title, &nodes, false)
-            })
         {
             return HashSet::new();
         }
+    }
+    if !legacy_wiki_reciprocal_multiplicities_match(&nodes, &indexed) {
+        return HashSet::new();
     }
 
     let mut owned = indexed;
@@ -1503,6 +1561,12 @@ mod tests {
         )
     }
 
+    fn legacy_wiki_node(title: &str, outbound: &str, inbound: &str) -> String {
+        format!(
+            "# {title}\n\nSource: `lib.rs` line 1\n\n## Outbound\n\n{outbound}\n\n## Inbound\n\n{inbound}\n"
+        )
+    }
+
     // ── T1: .rs file with two functions → exit 0 ─────────────────────────────
     // Probes: the whole pipeline runs without error for a non-trivial source file.
 
@@ -1822,6 +1886,41 @@ mod tests {
                 "_MOC.md".to_owned(),
             ])
         );
+    }
+
+    #[test]
+    fn legacy_vault_ownership_accepts_display_safe_legacy_labels() {
+        let vault = TempDir::new().unwrap();
+        let raw_labels = ["\u{0001}\u{0002}", "hidden\u{202E}"];
+        let displayed_labels: Vec<_> = raw_labels
+            .iter()
+            .map(|label| habitat_graph_core::display_safe(label))
+            .collect();
+        for (index, (raw, displayed)) in raw_labels.iter().zip(&displayed_labels).enumerate() {
+            let filename = format!("{}.md", super::legacy_vault_filename_stem(raw));
+            fs::write(
+                vault.path().join(filename),
+                legacy_vault_note(index as u32 + 1, None, displayed),
+            )
+            .unwrap();
+        }
+        fs::write(
+            vault.path().join("_MOC.md"),
+            format!(
+                "# Map of Content\n\n## Unclustered\n\n- [[{}]]\n- [[{}]]\n",
+                displayed_labels[0], displayed_labels[1]
+            ),
+        )
+        .unwrap();
+
+        let owned = super::generated_vault_ownership(vault.path()).unwrap();
+        assert_eq!(owned.len(), 3);
+        assert!(owned.contains("_.md"));
+        assert!(owned.contains("_MOC.md"));
+        assert!(owned.contains(&format!(
+            "{}.md",
+            super::legacy_vault_filename_stem(raw_labels[1])
+        )));
     }
 
     #[cfg(unix)]
@@ -2721,6 +2820,41 @@ mod tests {
         assert_eq!(
             fs::read_to_string(wiki.join(format!("node-{unindexed_id}.md"))).unwrap(),
             unindexed
+        );
+    }
+
+    #[test]
+    fn legacy_wiki_ownership_requires_reciprocal_link_multiplicity() {
+        let outbound = "- [Two](node-2.md) (calls)\n- [Two](node-2.md) (calls)";
+        let inbound = "- [One](node-1.md) (calls)";
+        let mut contents = std::collections::BTreeMap::from([
+            (
+                "index.md".to_owned(),
+                "# Index\n\n- [One](node-1.md)\n- [Two](node-2.md)\n".to_owned(),
+            ),
+            (
+                "node-1.md".to_owned(),
+                legacy_wiki_node("One", outbound, "_none_"),
+            ),
+            (
+                "node-2.md".to_owned(),
+                legacy_wiki_node("Two", "_none_", inbound),
+            ),
+        ]);
+
+        assert!(super::legacy_generated_wiki_ownership(&contents).is_empty());
+
+        contents.insert(
+            "node-2.md".to_owned(),
+            legacy_wiki_node("Two", "_none_", &format!("{inbound}\n{inbound}")),
+        );
+        assert_eq!(
+            super::legacy_generated_wiki_ownership(&contents),
+            std::collections::HashSet::from([
+                "index.md".to_owned(),
+                "node-1.md".to_owned(),
+                "node-2.md".to_owned(),
+            ])
         );
     }
 

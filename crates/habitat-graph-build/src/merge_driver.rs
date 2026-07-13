@@ -220,13 +220,6 @@ fn ambiguous_projected_node_ids(
             }
         }
     }
-    let mut shared_slots = projected_node_ids(base);
-    let ours_slots = projected_node_ids(ours);
-    let theirs_slots = projected_node_ids(theirs);
-    shared_slots.retain(|id| ours_slots.contains(id) && theirs_slots.contains(id));
-    for ambiguous in &mut ambiguous {
-        ambiguous.retain(|id| !shared_slots.contains(id));
-    }
     ambiguous
 }
 
@@ -1859,24 +1852,23 @@ mod tests {
     }
 
     #[test]
-    fn shared_projected_slot_survives_adjacent_base_deletion() {
+    fn shared_projected_slot_does_not_prove_collision_lineage() {
         let marker = "[REDACTED:api_key]";
         let mut base = nodes_graph(&[(10, marker), (11, marker), (20, "Safe")]);
-        base.edges.push(edge(10, 20, "calls"));
-        base.edges.push(edge(11, 20, "calls"));
+        base.edges.push(edge(10, 20, "first-edge"));
+        base.edges.push(edge(11, 20, "second-edge"));
         let mut ours = nodes_graph(&[(10, marker), (20, "Safe")]);
-        ours.edges.push(edge(10, 20, "calls"));
+        ours.edges.push(edge(10, 20, "second-edge"));
         let mut theirs = nodes_graph(&[(10, marker), (20, "Safe")]);
-        theirs.edges.push(edge(10, 20, "calls"));
+        theirs.edges.push(edge(10, 20, "first-edge"));
 
         let merged = merge3(&base, &ours, &theirs);
-        assert_eq!(node_labels(&merged), vec!["Safe", marker]);
-        assert_eq!(merged.edges.len(), 1);
-        assert_eq!(merged.edges[0].source, NodeId::new(10));
+        assert_eq!(node_labels(&merged), vec!["Safe"]);
+        assert!(merged.edges.is_empty());
     }
 
     #[test]
-    fn shared_projected_slot_survives_adjacent_clean_occupancy() {
+    fn shared_projected_slot_stays_ambiguous_across_clean_occupancy() {
         let marker = "[REDACTED:api_key]";
         let mut base = nodes_graph(&[(10, marker), (11, "Occupied"), (12, marker), (20, "Safe")]);
         base.edges.push(edge(10, 20, "calls"));
@@ -1886,9 +1878,8 @@ mod tests {
         let theirs = ours.clone();
 
         let merged = merge3(&base, &ours, &theirs);
-        assert_eq!(node_labels(&merged), vec!["Occupied", "Safe", marker]);
-        assert_eq!(merged.edges.len(), 1);
-        assert_eq!(merged.edges[0].source, NodeId::new(10));
+        assert_eq!(node_labels(&merged), vec!["Occupied", "Safe"]);
+        assert!(merged.edges.is_empty());
     }
 
     #[test]
@@ -1969,7 +1960,7 @@ mod tests {
     }
 
     #[test]
-    fn adjacent_base_projected_deletion_preserves_shared_slot_and_topology() {
+    fn adjacent_base_projected_deletion_drops_unprovable_slot_and_topology() {
         let marker = "[REDACTED:api_key]";
         let mut base = nodes_graph(&[(10, marker), (11, marker), (20, "Safe")]);
         base.edges.push(edge(10, 20, "deleted-edge"));
@@ -1979,15 +1970,8 @@ mod tests {
         let theirs = base.clone();
 
         let merged = merge3(&base, &ours, &theirs);
-        let projected = merged
-            .nodes
-            .iter()
-            .find(|node| node.label == marker)
-            .unwrap();
-        assert_eq!(projected.id, NodeId::new(11));
-        assert_eq!(merged.edges.len(), 1);
-        assert_eq!(merged.edges[0].source, NodeId::new(11));
-        assert_eq!(merged.edges[0].relation, "shared-edge");
+        assert_eq!(node_labels(&merged), vec!["Safe"]);
+        assert!(merged.edges.is_empty());
     }
 
     #[test]

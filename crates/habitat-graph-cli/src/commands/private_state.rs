@@ -1556,14 +1556,75 @@ fn context_is_expired_in(path: &Path, expirations: &ExpirationIndex) -> Result<b
 }
 
 #[derive(Clone, Default, Eq, PartialEq)]
+struct ExpirationSet {
+    exact: BTreeSet<String>,
+    prefixes: BTreeSet<String>,
+    admitted: BTreeSet<String>,
+}
+
+impl ExpirationSet {
+    fn from_exact(exact: BTreeSet<String>) -> Self {
+        Self {
+            exact,
+            ..Self::default()
+        }
+    }
+
+    fn from_prefixes(prefixes: BTreeSet<String>, mut admitted: BTreeSet<String>) -> Self {
+        admitted.retain(|value| prefixes.iter().any(|prefix| value.starts_with(prefix)));
+        Self {
+            exact: BTreeSet::new(),
+            prefixes,
+            admitted,
+        }
+    }
+
+    fn contains(&self, value: &str) -> bool {
+        self.exact.contains(value)
+            || (self.prefixes.iter().any(|prefix| value.starts_with(prefix))
+                && !self.admitted.contains(value))
+    }
+
+    fn insert(&mut self, value: String) {
+        self.admitted.remove(&value);
+        self.exact.insert(value);
+    }
+
+    fn remove(&mut self, value: &str) {
+        self.exact.remove(value);
+        self.prefixes.remove(value);
+        if self.prefixes.iter().any(|prefix| value.starts_with(prefix)) {
+            self.admitted.insert(value.to_owned());
+        } else {
+            self.admitted.remove(value);
+        }
+    }
+
+    fn extend(&mut self, values: impl IntoIterator<Item = String>) {
+        for value in values {
+            self.insert(value);
+        }
+    }
+
+    fn is_empty(&self) -> bool {
+        self.exact.is_empty() && self.prefixes.is_empty() && self.admitted.is_empty()
+    }
+
+    fn prefix_values(&self) -> BTreeSet<String> {
+        self.prefixes.union(&self.exact).cloned().collect()
+    }
+}
+
+#[derive(Clone, Default, Eq, PartialEq)]
 struct ExpirationIndex {
-    contexts: BTreeSet<String>,
-    revisions: BTreeSet<String>,
+    contexts: ExpirationSet,
+    revisions: ExpirationSet,
 }
 
 enum ExpirationStorage {
     Missing,
     Legacy,
+    PrefixLegacy,
     Log {
         records: usize,
         complete_bytes: usize,
@@ -1718,34 +1779,30 @@ fn parse_expiration_log(text: &str) -> Result<(ExpirationIndex, usize, usize, bo
     Ok((index, records, offset, false))
 }
 
-fn load_legacy_expiration_index(text: &str) -> Result<ExpirationIndex> {
+fn load_legacy_expiration_index(text: &str) -> Result<(ExpirationIndex, ExpirationStorage)> {
     let value: serde_json::Value = serde_json::from_str(text)
         .map_err(|error| GraphError::Schema(format!("private state expiration index: {error}")))?;
     match value["schema"].as_str() {
-        Some(LEGACY_EXPIRATION_INDEX_SCHEMA) => Ok(ExpirationIndex {
-            contexts: expiration_values(&value, "contexts")?,
-            revisions: expiration_values(&value, "revisions")?,
-        }),
-        Some(PREFIX_EXPIRATION_INDEX_SCHEMA) => {
-            let mut contexts: BTreeSet<_> = expiration_prefixes(&value, "context_prefixes")?
-                .into_iter()
-                .filter(|value| is_generation(value))
-                .collect();
-            let mut revisions: BTreeSet<_> = expiration_prefixes(&value, "revision_prefixes")?
-                .into_iter()
-                .filter(|value| is_generation(value))
-                .collect();
-            for admitted in expiration_values(&value, "admitted_contexts")? {
-                contexts.remove(&admitted);
-            }
-            for admitted in expiration_values(&value, "admitted_revisions")? {
-                revisions.remove(&admitted);
-            }
-            Ok(ExpirationIndex {
-                contexts,
-                revisions,
-            })
-        }
+        Some(LEGACY_EXPIRATION_INDEX_SCHEMA) => Ok((
+            ExpirationIndex {
+                contexts: ExpirationSet::from_exact(expiration_values(&value, "contexts")?),
+                revisions: ExpirationSet::from_exact(expiration_values(&value, "revisions")?),
+            },
+            ExpirationStorage::Legacy,
+        )),
+        Some(PREFIX_EXPIRATION_INDEX_SCHEMA) => Ok((
+            ExpirationIndex {
+                contexts: ExpirationSet::from_prefixes(
+                    expiration_prefixes(&value, "context_prefixes")?,
+                    expiration_values(&value, "admitted_contexts")?,
+                ),
+                revisions: ExpirationSet::from_prefixes(
+                    expiration_prefixes(&value, "revision_prefixes")?,
+                    expiration_values(&value, "admitted_revisions")?,
+                ),
+            },
+            ExpirationStorage::PrefixLegacy,
+        )),
         _ => Err(GraphError::Schema(
             "unsupported private state expiration index schema".to_owned(),
         )),
@@ -1776,10 +1833,8 @@ fn load_expiration_storage(path: &Path) -> Result<LoadedExpirationIndex> {
             },
         })
     } else {
-        Ok(LoadedExpirationIndex {
-            index: load_legacy_expiration_index(&text)?,
-            storage: ExpirationStorage::Legacy,
-        })
+        let (index, storage) = load_legacy_expiration_index(&text)?;
+        Ok(LoadedExpirationIndex { index, storage })
     }
 }
 
@@ -1850,16 +1905,16 @@ fn push_expiration_record(records: &mut Vec<u8>, operation: u8, kind: u8, value:
 
 fn expiration_changes(before: &ExpirationIndex, after: &ExpirationIndex) -> Vec<u8> {
     let mut records = Vec::new();
-    for value in before.contexts.difference(&after.contexts) {
+    for value in before.contexts.exact.difference(&after.contexts.exact) {
         push_expiration_record(&mut records, b'-', b'c', value);
     }
-    for value in before.revisions.difference(&after.revisions) {
+    for value in before.revisions.exact.difference(&after.revisions.exact) {
         push_expiration_record(&mut records, b'-', b'r', value);
     }
-    for value in after.contexts.difference(&before.contexts) {
+    for value in after.contexts.exact.difference(&before.contexts.exact) {
         push_expiration_record(&mut records, b'+', b'c', value);
     }
-    for value in after.revisions.difference(&before.revisions) {
+    for value in after.revisions.exact.difference(&before.revisions.exact) {
         push_expiration_record(&mut records, b'+', b'r', value);
     }
     records
@@ -1882,13 +1937,22 @@ fn expiration_frame(records: &[u8]) -> Result<Vec<u8>> {
 }
 
 fn expiration_log_bytes(index: &ExpirationIndex) -> Result<Vec<u8>> {
+    if !index.contexts.prefixes.is_empty()
+        || !index.contexts.admitted.is_empty()
+        || !index.revisions.prefixes.is_empty()
+        || !index.revisions.admitted.is_empty()
+    {
+        return Err(GraphError::Schema(
+            "private state expiration prefixes require legacy storage".to_owned(),
+        ));
+    }
     let mut records = Vec::with_capacity(
-        EXPIRATION_RECORD_BYTES * (index.contexts.len() + index.revisions.len()),
+        EXPIRATION_RECORD_BYTES * (index.contexts.exact.len() + index.revisions.exact.len()),
     );
-    for value in &index.contexts {
+    for value in &index.contexts.exact {
         push_expiration_record(&mut records, b'+', b'c', value);
     }
-    for value in &index.revisions {
+    for value in &index.revisions.exact {
         push_expiration_record(&mut records, b'+', b'r', value);
     }
     let frame = expiration_frame(&records)?;
@@ -1909,6 +1973,27 @@ fn write_expiration_index(path: &Path, index: &ExpirationIndex) -> Result<()> {
         return remove(&index_path, "private state expiration index");
     }
     write(&index_path, &expiration_log_bytes(index)?)
+}
+
+fn write_prefix_expiration_index(path: &Path, index: &ExpirationIndex) -> Result<()> {
+    let index_path = expiration_index_path(path).ok_or_else(|| {
+        GraphError::Guard(format!(
+            "cannot update unscoped private state expiration index: {}",
+            path.display()
+        ))
+    })?;
+    if index.contexts.is_empty() && index.revisions.is_empty() {
+        return remove(&index_path, "private state expiration index");
+    }
+    let bytes = serde_json::to_vec_pretty(&serde_json::json!({
+        "schema": PREFIX_EXPIRATION_INDEX_SCHEMA,
+        "context_prefixes": index.contexts.prefix_values(),
+        "revision_prefixes": index.revisions.prefix_values(),
+        "admitted_contexts": index.contexts.admitted,
+        "admitted_revisions": index.revisions.admitted,
+    }))
+    .map_err(|error| GraphError::Schema(format!("private state expiration index: {error}")))?;
+    write(&index_path, &bytes)
 }
 
 #[cfg(unix)]
@@ -1991,10 +2076,9 @@ fn update_expiration_index(path: &Path, update: impl FnOnce(&mut ExpirationIndex
     let original = loaded.index.clone();
     let mut index = loaded.index;
     let (legacy, markers) = legacy_expiration_markers(path)?;
-    index.contexts.extend(legacy.contexts);
-    index.revisions.extend(legacy.revisions);
+    index.contexts.extend(legacy.contexts.exact);
+    index.revisions.extend(legacy.revisions.exact);
     update(&mut index);
-    let changes = expiration_changes(&original, &index);
     let index_path = expiration_index_path(path).ok_or_else(|| {
         GraphError::Guard(format!(
             "cannot update unscoped private state expiration index: {}",
@@ -2005,12 +2089,20 @@ fn update_expiration_index(path: &Path, update: impl FnOnce(&mut ExpirationIndex
         ExpirationStorage::Missing | ExpirationStorage::Legacy => {
             write_expiration_index(path, &index)?;
         }
+        ExpirationStorage::PrefixLegacy => {
+            write_prefix_expiration_index(path, &index)?;
+        }
         ExpirationStorage::Log {
             records,
             complete_bytes,
             partial_tail,
         } => {
-            let live_records = index.contexts.len().saturating_add(index.revisions.len());
+            let changes = expiration_changes(&original, &index);
+            let live_records = index
+                .contexts
+                .exact
+                .len()
+                .saturating_add(index.revisions.exact.len());
             if index.contexts.is_empty() && index.revisions.is_empty()
                 || partial_tail
                 || records
@@ -2617,6 +2709,22 @@ fn ensure_migration_conflict_directory(path: &Path) -> Result<()> {
     ensure_private_directory(&migration_conflict_directory(path))
 }
 
+fn migration_conflict_filename_matches(filename: &OsStr, family: &str) -> bool {
+    if !is_generation(family) {
+        return false;
+    }
+    let Some(suffix) = native_filename_suffix(filename, OsStr::new(family)) else {
+        return false;
+    };
+    let Some(suffix) = suffix.strip_prefix('-') else {
+        return false;
+    };
+    let mut generations = suffix.split('-');
+    generations.next().is_some_and(is_generation)
+        && generations.next().is_some_and(is_generation)
+        && generations.next().is_none()
+}
+
 fn migration_conflict_candidates(path: &Path) -> Result<Vec<PathBuf>> {
     let directory = migration_conflict_directory(path);
     let metadata = match std::fs::symlink_metadata(&directory) {
@@ -2635,11 +2743,11 @@ fn migration_conflict_candidates(path: &Path) -> Result<Vec<PathBuf>> {
         )));
     }
 
-    let mut prefixes = BTreeSet::new();
-    prefixes.insert(format!("{}-", migration_conflict_family_key(path)));
-    prefixes.insert(format!("{}-", output_key(&family_base_path(path))));
+    let mut families = BTreeSet::new();
+    families.insert(migration_conflict_family_key(path));
+    families.insert(output_key(&family_base_path(path)));
     for candidate in context_state_candidates(path)? {
-        prefixes.insert(format!("{}-", output_key(&family_base_path(&candidate))));
+        families.insert(output_key(&family_base_path(&candidate)));
     }
     let entries = std::fs::read_dir(&directory).map_err(|error| {
         GraphError::Io(format!("list private state migration conflicts: {error}"))
@@ -2650,9 +2758,9 @@ fn migration_conflict_candidates(path: &Path) -> Result<Vec<PathBuf>> {
             GraphError::Io(format!("list private state migration conflicts: {error}"))
         })?;
         let filename = entry.file_name();
-        if !prefixes
+        if !families
             .iter()
-            .any(|prefix| filename.to_string_lossy().starts_with(prefix))
+            .any(|family| migration_conflict_filename_matches(&filename, family))
         {
             continue;
         }
@@ -4431,6 +4539,27 @@ mod tests {
     }
 
     #[test]
+    fn migration_conflict_discovery_ignores_prefixed_backups() {
+        let root = TempDir::new().unwrap();
+        let state = root.path().join("current-state.json");
+        let conflict = super::migration_conflict_path(&state, b"private lineage");
+        fs::create_dir_all(conflict.parent().unwrap()).unwrap();
+        fs::write(&conflict, "private lineage").unwrap();
+        let mut backup_name = conflict.file_name().unwrap().to_os_string();
+        backup_name.push("-backup");
+        let backup = conflict.with_file_name(backup_name);
+        fs::write(&backup, "user backup").unwrap();
+
+        assert_eq!(
+            super::migration_conflict_candidates(&state).unwrap(),
+            vec![conflict.clone()]
+        );
+        super::remove_family(&state, "test private state").unwrap();
+        assert!(!conflict.exists());
+        assert_eq!(fs::read_to_string(backup).unwrap(), "user backup");
+    }
+
+    #[test]
     fn migration_conflict_blocks_every_git_context_for_the_output() {
         let root = TempDir::new().unwrap();
         let git_dir = create_git(root.path(), "ref: refs/heads/alpha\n");
@@ -4871,6 +5000,61 @@ mod tests {
             .unwrap()
             .contexts
             .contains(&expired_context));
+    }
+
+    #[test]
+    fn compacted_prefix_index_preserves_denials_and_admissions() {
+        let root = TempDir::new().unwrap();
+        let output = super::generation(b"output path");
+        let current = super::generation(b"current context");
+        let path = root.path().join(format!(
+            "{output}{}{current}.json",
+            super::CONTEXT_SEPARATOR
+        ));
+        let denied_context = super::generation(b"denied context");
+        let other_context = super::generation(b"other denied context");
+        let admitted_context = super::generation(b"admitted context");
+        let denied_revision = super::generation(b"denied revision");
+        let other_revision = super::generation(b"other denied revision");
+        let admitted_revision = super::generation(b"admitted revision");
+        let index_path = super::expiration_index_path(&path).unwrap();
+        fs::write(
+            &index_path,
+            serde_json::to_vec_pretty(&serde_json::json!({
+                "schema": super::PREFIX_EXPIRATION_INDEX_SCHEMA,
+                "context_prefixes": [""],
+                "revision_prefixes": [""],
+                "admitted_contexts": [&admitted_context],
+                "admitted_revisions": [&admitted_revision],
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+
+        let expired = super::load_expiration_index(&path).unwrap();
+        assert!(expired.contexts.contains(&denied_context));
+        assert!(expired.contexts.contains(&other_context));
+        assert!(!expired.contexts.contains(&admitted_context));
+        assert!(expired.revisions.contains(&denied_revision));
+        assert!(expired.revisions.contains(&other_revision));
+        assert!(!expired.revisions.contains(&admitted_revision));
+
+        super::update_expiration_index(&path, |index| {
+            index.contexts.remove(&denied_context);
+            index.revisions.remove(&denied_revision);
+        })
+        .unwrap();
+
+        let expired = super::load_expiration_index(&path).unwrap();
+        assert!(!expired.contexts.contains(&denied_context));
+        assert!(expired.contexts.contains(&other_context));
+        assert!(!expired.revisions.contains(&denied_revision));
+        assert!(expired.revisions.contains(&other_revision));
+        assert_eq!(
+            serde_json::from_str::<serde_json::Value>(&fs::read_to_string(index_path).unwrap())
+                .unwrap()["schema"],
+            super::PREFIX_EXPIRATION_INDEX_SCHEMA
+        );
     }
 
     #[test]
