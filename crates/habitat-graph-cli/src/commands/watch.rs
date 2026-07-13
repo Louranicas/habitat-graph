@@ -76,7 +76,8 @@ pub fn rebuild(dir: &Path, out: &Path) -> Result<usize> {
     std::fs::create_dir_all(out).map_err(|error| GraphError::Io(error.to_string()))?;
     let legacy_state = out.join(".habitat-graph-state.json");
     #[cfg(unix)]
-    let state_path = super::private_state::path_for_output(&out.join("graph.json"), &legacy_state)?;
+    let state_path =
+        super::private_state::path_for_full_build(&out.join("graph.json"), &legacy_state)?;
     #[cfg(not(unix))]
     let state_path = legacy_state;
     let _output_lock = super::private_state::acquire_output_lock(&state_path)?;
@@ -90,13 +91,13 @@ pub fn rebuild(dir: &Path, out: &Path) -> Result<usize> {
 
     // Detect source files (all extractor-supported extensions).
     let files = habitat_graph_source::detect(dir, &["rs", "ts", "tsx", "js", "jsx", "go", "py"])?;
-    let inputs = super::extract::capture_inputs(&files)?;
-    let graph = super::extract::build_full_graph(&inputs)?;
+    let full_build = super::extract::build_full_graph(&files)?;
+    let graph = full_build.0;
 
     let n = graph.nodes.len();
 
     #[cfg(unix)]
-    super::extract::write_full_build_private_state(&state_path, &graph, &inputs)?;
+    super::extract::write_full_build_private_state(&state_path, &graph, &full_build.1)?;
     super::extract::write_public_artifacts(out, &graph, super::extract::ExtractOpts::default())?;
 
     Ok(n)

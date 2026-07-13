@@ -703,15 +703,7 @@ fn do_full_build(
     sidecar_path: &Path,
     legacy_sidecar_path: &Path,
 ) -> Result<()> {
-    let inputs = read_inputs(files)?;
-    let extractions = habitat_graph_extract::extract_inputs(&inputs)?;
-    let mut graph = habitat_graph_build::assemble(extractions);
-    // F12: cluster on the TRUSTED subgraph only (INFERRED/AMBIGUOUS edges excluded).
-    graph.communities =
-        habitat_graph_analyze::detect_communities(&habitat_graph_analyze::trusted_subgraph(&graph));
-    let graph = graph.sorted();
-
-    let manifest = habitat_graph_source::build_manifest(&inputs, env!("CARGO_PKG_VERSION"));
+    let (graph, manifest) = super::extract::build_full_graph(files)?;
 
     let n = graph.nodes.len();
     write_artifacts(

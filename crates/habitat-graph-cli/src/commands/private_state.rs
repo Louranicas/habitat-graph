@@ -53,6 +53,18 @@ pub(super) struct ContextIdentity {
 }
 
 pub(super) fn path_for_output(output: &Path, legacy: &Path) -> Result<PathBuf> {
+    path_for_output_with_expiration(output, legacy, false)
+}
+
+pub(super) fn path_for_full_build(output: &Path, legacy: &Path) -> Result<PathBuf> {
+    path_for_output_with_expiration(output, legacy, true)
+}
+
+fn path_for_output_with_expiration(
+    output: &Path,
+    legacy: &Path,
+    readmit_expired: bool,
+) -> Result<PathBuf> {
     #[cfg(not(unix))]
     remove_family(legacy, "unsupported legacy private state")?;
 
@@ -93,8 +105,12 @@ pub(super) fn path_for_output(output: &Path, legacy: &Path) -> Result<PathBuf> {
     let unscoped_state_path = state_dir.join(format!("{key}.json"));
     let context = git_context_identity(&git_dir)?;
     let state_path = state_dir.join(format!("{key}{CONTEXT_SEPARATOR}{}.json", context.key));
-    ensure_context_not_expired(&state_path)?;
-    ensure_revision_not_expired(&state_path, &context.revision)?;
+    if readmit_expired {
+        remove_expiration_markers(&state_path, &context.revision)?;
+    } else {
+        ensure_context_not_expired(&state_path)?;
+        ensure_revision_not_expired(&state_path, &context.revision)?;
+    }
     write_context_revision(&state_path, &context.revision)?;
     let mut first_error = None;
     for result in [
@@ -1061,6 +1077,16 @@ fn ensure_revision_not_expired(path: &Path, revision: &str) -> Result<()> {
             "private state for this Git revision has expired: {}",
             path.display()
         )));
+    }
+    Ok(())
+}
+
+fn remove_expiration_markers(path: &Path, revision: &str) -> Result<()> {
+    if let Some(marker) = expired_context_path(path) {
+        remove(&marker, "expired private state context marker")?;
+    }
+    if let Some(marker) = expired_revision_path(path, revision) {
+        remove(&marker, "expired private state revision marker")?;
     }
     Ok(())
 }
@@ -3096,7 +3122,7 @@ mod tests {
     }
 
     #[test]
-    fn pruned_git_context_remains_explicitly_expired() {
+    fn pruned_git_context_blocks_incremental_but_allows_full_rebuild() {
         let root = TempDir::new().unwrap();
         let git_dir = create_git(root.path(), "ref: refs/heads/main\n");
         let output_dir = root.path().join("public");
@@ -3139,6 +3165,30 @@ mod tests {
         assert!(renamed_error
             .to_string()
             .contains("Git revision has expired"));
+
+        let renamed_revision = super::git_context_identity(&git_dir).unwrap().revision;
+        let renamed_state = super::path_for_full_build(&output, &legacy).unwrap();
+        assert_ne!(renamed_state, expired_path);
+        assert!(
+            !super::expired_revision_path(&renamed_state, &renamed_revision)
+                .unwrap()
+                .exists()
+        );
+        assert_eq!(
+            super::path_for_output(&output, &legacy).unwrap(),
+            renamed_state
+        );
+
+        fs::write(git_dir.join("HEAD"), "ref: refs/heads/main\n").unwrap();
+        let rebuilt_state = super::path_for_full_build(&output, &legacy).unwrap();
+        assert_eq!(rebuilt_state, expired_path);
+        assert!(!super::expired_context_path(&rebuilt_state)
+            .unwrap()
+            .exists());
+        assert_eq!(
+            super::path_for_output(&output, &legacy).unwrap(),
+            rebuilt_state
+        );
     }
 
     #[cfg(not(unix))]

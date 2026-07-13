@@ -204,6 +204,37 @@ pub fn extract_from_bytes(bytes: &[u8], ext: &str) -> Result<habitat_graph_core:
 
 // ── Graph merge & persistence ─────────────────────────────────────────────────
 
+fn prepare_add_transaction(
+    out: &Path,
+) -> Result<(
+    PathBuf,
+    PathBuf,
+    super::private_state::OutputTransactionLock,
+)> {
+    if let Some(parent) = out.parent() {
+        if !parent.as_os_str().is_empty() {
+            std::fs::create_dir_all(parent)
+                .map_err(|e| GraphError::Io(format!("create dirs {}: {e}", parent.display())))?;
+        }
+    }
+
+    let legacy_state_path = legacy_private_state_path(out)?;
+    let state_path = super::private_state::path_for_output(out, &legacy_state_path)?;
+    let output_lock = super::private_state::acquire_output_lock(&state_path)?;
+    super::private_state::ensure_no_pending_update_journals(&state_path)?;
+    let legacy_journal_path = add_journal_path(&legacy_state_path)?;
+    let journal_path = add_journal_path(&state_path)?;
+    super::private_state::migrate(&legacy_journal_path, &journal_path, "legacy add journal")?;
+    super::private_state::ensure(&state_path)?;
+    Ok((state_path, legacy_state_path, output_lock))
+}
+
+fn recover_pending_add(out: &Path) -> Result<bool> {
+    let (state_path, _, _output_lock) = prepare_add_transaction(out)?;
+    let mut public = load_public_output(out)?;
+    recover_add_journal(out, &state_path, &mut public)
+}
+
 /// Loads matching owner-only graph state when available, otherwise uses `out` (or an empty graph
 /// if absent/empty), merges `new_graph` in, and writes both projections back.
 ///
@@ -216,21 +247,7 @@ pub fn extract_from_bytes(bytes: &[u8], ext: &str) -> Result<habitat_graph_core:
 ///   would destroy any prior content that is not otherwise regenerable.
 /// - [`GraphError::Guard`] when owner-only private state cannot be enforced.
 pub fn merge_into_output(new_graph: Graph, out: &Path) -> Result<()> {
-    if let Some(parent) = out.parent() {
-        if !parent.as_os_str().is_empty() {
-            std::fs::create_dir_all(parent)
-                .map_err(|e| GraphError::Io(format!("create dirs {}: {e}", parent.display())))?;
-        }
-    }
-
-    let legacy_state_path = legacy_private_state_path(out)?;
-    let state_path = super::private_state::path_for_output(out, &legacy_state_path)?;
-    let _output_lock = super::private_state::acquire_output_lock(&state_path)?;
-    super::private_state::ensure_no_pending_update_journals(&state_path)?;
-    let legacy_journal_path = add_journal_path(&legacy_state_path)?;
-    let journal_path = add_journal_path(&state_path)?;
-    super::private_state::migrate(&legacy_journal_path, &journal_path, "legacy add journal")?;
-    super::private_state::ensure(&state_path)?;
+    let (state_path, legacy_state_path, _output_lock) = prepare_add_transaction(out)?;
     let mut public_prior = load_public_output(out)?;
     let recovered_add = recover_add_journal(out, &state_path, &mut public_prior)?;
     let private_prior = load_private_state(
@@ -239,9 +256,11 @@ pub fn merge_into_output(new_graph: Graph, out: &Path) -> Result<()> {
         public_prior.content_generation.as_deref(),
         public_prior.semantic_generation.as_deref(),
     )?;
-    let replaying_legacy_projection = match (&private_prior, &public_prior.graph) {
-        (None, Some(public)) => public_topology(&new_graph)? == public_topology(public)?,
-        _ => false,
+    let legacy_projection_communities = match (&private_prior, &public_prior.graph) {
+        (None, Some(public)) if public_topology(&new_graph)? == public_topology(public)? => {
+            Some(public.communities.clone())
+        }
+        _ => None,
     };
     let prior = if recovered_add {
         private_prior.map(|state| state.graph).ok_or_else(|| {
@@ -256,8 +275,10 @@ pub fn merge_into_output(new_graph: Graph, out: &Path) -> Result<()> {
         )?
     };
     let before_private_checksum = private_graph_generation(&prior)?;
-    let merged = if replaying_legacy_projection {
-        new_graph.sorted()
+    let merged = if let Some(communities) = legacy_projection_communities {
+        let mut replacement = new_graph;
+        replacement.communities = communities;
+        replacement.sorted()
     } else {
         habitat_graph_build::merge(new_graph, prior).sorted()
     };
@@ -805,6 +826,7 @@ fn public_topology(graph: &Graph) -> Result<String> {
     for node in &mut topology.nodes {
         node.source_file.clear();
     }
+    topology.communities.clear();
     habitat_graph_export::to_node_link(&topology)
 }
 
@@ -851,6 +873,8 @@ fn run_inner(url: &str, out: &Path) -> Result<usize> {
     // 1. SSRF check — no network I/O before this passes.
     is_safe_url(url).map_err(GraphError::Guard)?;
 
+    recover_pending_add(out)?;
+
     // 2. Fetch.
     let bytes = fetch_bytes(url)?;
 
@@ -873,7 +897,7 @@ mod tests {
     use std::path::PathBuf;
     use std::sync::atomic::{AtomicU32, Ordering};
 
-    use habitat_graph_core::Graph;
+    use habitat_graph_core::{Community, CommunityId, Graph};
     // Only the `#[cfg(not(feature = "live"))]` tests below match on `GraphError` variants; under
     // `--features live` those tests are compiled out, so this import would otherwise be unused.
     #[cfg(not(feature = "live"))]
@@ -1459,6 +1483,40 @@ mod tests {
         assert_eq!(value["nodes"].as_array().unwrap().len(), 3);
     }
 
+    #[cfg(not(feature = "live"))]
+    #[test]
+    fn run_recovers_a_pending_add_before_reporting_disabled_http() {
+        let d = tdir();
+        let out = d.join("g.json");
+        let original = extract_from_bytes(b"fn original() {}", "rs").unwrap();
+        merge_into_output(original.clone(), &out).unwrap();
+        let public_before = fs::read_to_string(&out).unwrap();
+        let before_graph = habitat_graph_serve::from_node_link(&public_before).unwrap();
+        let pending = habitat_graph_build::merge(
+            extract_from_bytes(b"fn pending() {}", "rs").unwrap(),
+            original,
+        )
+        .sorted();
+        let pending_json = habitat_graph_export::to_node_link(&pending).unwrap();
+        let state_path = super::private_state_path(&out).unwrap();
+        super::write_add_journal(
+            &out,
+            &state_path,
+            Some(&before_graph),
+            &private_checksum(&state_path),
+            &pending,
+            &pending_json,
+        )
+        .unwrap();
+
+        let error = super::run_inner("https://example.com/unavailable.rs", &out).unwrap_err();
+
+        assert!(error.to_string().contains("--features live"));
+        assert!(!super::add_journal_path(&state_path).unwrap().exists());
+        assert!(fs::read_to_string(&state_path).unwrap().contains("pending"));
+        assert!(fs::read_to_string(&out).unwrap().contains("pending"));
+    }
+
     #[test]
     fn merge_recovers_a_pending_add_after_git_context_rotation() {
         let d = tdir();
@@ -2024,7 +2082,12 @@ mod tests {
         let d = tdir();
         let out = d.join("g.json");
         let source = b"fn api_key_alpha() { api_key_beta(); } fn api_key_beta() {}";
-        let legacy_raw = extract_from_bytes(source, "rs").expect("extract legacy");
+        let mut legacy_raw = extract_from_bytes(source, "rs").expect("extract legacy");
+        legacy_raw.communities.push(Community {
+            id: CommunityId::new(7),
+            label: "legacy".to_owned(),
+            members: legacy_raw.nodes.iter().map(|node| node.id).collect(),
+        });
         fs::write(
             &out,
             habitat_graph_export::to_node_link(&legacy_raw).expect("render legacy"),
@@ -2037,6 +2100,11 @@ mod tests {
             serde_json::from_str(&fs::read_to_string(&out).unwrap()).unwrap();
         assert_eq!(value["nodes"].as_array().unwrap().len(), 2);
         assert_eq!(value["links"].as_array().unwrap().len(), 1);
+        assert!(value["nodes"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|node| node["community"] == 7));
 
         let state = super::private_state_path(&out).unwrap();
         assert!(fs::read_to_string(state).unwrap().contains("api_key_alpha"));

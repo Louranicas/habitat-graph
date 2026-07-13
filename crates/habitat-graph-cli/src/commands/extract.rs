@@ -9,7 +9,7 @@ use std::collections::{BTreeMap, HashSet};
 use std::fmt::Write as _;
 use std::path::{Component, Path, PathBuf};
 
-use habitat_graph_core::{Graph, GraphError, Result};
+use habitat_graph_core::{Graph, GraphError, InputRecord, Manifest, Result};
 
 /// Ownership manifest for generated Obsidian notes. Only files recorded here (or recognized by
 /// the conservative legacy signature during first migration) may be removed on a later sync.
@@ -1291,11 +1291,10 @@ pub(super) fn write_public_artifacts(out: &Path, graph: &Graph, opts: ExtractOpt
 pub(super) fn write_full_build_private_state(
     state_path: &Path,
     graph: &Graph,
-    inputs: &[(PathBuf, Vec<u8>)],
+    manifest: &Manifest,
 ) -> Result<()> {
     let mut private_graph = graph.clone();
-    private_graph.manifest =
-        habitat_graph_source::build_manifest(inputs, env!("CARGO_PKG_VERSION"));
+    private_graph.manifest = manifest.clone();
     let public_json = habitat_graph_export::to_node_link(graph)?;
     let public_graph = habitat_graph_serve::from_node_link(&public_json)?;
     let state_json = super::private_state::serialize(
@@ -1306,19 +1305,33 @@ pub(super) fn write_full_build_private_state(
     super::private_state::write_state(state_path, &state_json)
 }
 
-pub(super) fn capture_inputs(files: &[PathBuf]) -> Result<Vec<(PathBuf, Vec<u8>)>> {
-    files
-        .iter()
-        .map(|path| habitat_graph_source::read_local(path, 0).map(|bytes| (path.clone(), bytes)))
-        .collect()
-}
-
-pub(super) fn build_full_graph(inputs: &[(PathBuf, Vec<u8>)]) -> Result<Graph> {
-    let extractions = habitat_graph_extract::extract_inputs(inputs)?;
+pub(super) fn build_full_graph(files: &[PathBuf]) -> Result<(Graph, Manifest)> {
+    let mut extractions = Vec::with_capacity(files.len());
+    let mut records = Vec::with_capacity(files.len());
+    for path in files {
+        let bytes = habitat_graph_source::read_local(path, 0)?;
+        let content_hash = blake3::hash(&bytes).to_hex().to_string();
+        let input = (path.clone(), bytes);
+        extractions.extend(habitat_graph_extract::extract_inputs(
+            std::slice::from_ref(&input),
+        )?);
+        records.push(InputRecord {
+            path: path.to_string_lossy().into_owned(),
+            content_hash,
+        });
+    }
+    records.sort_unstable_by(|left, right| left.path.cmp(&right.path));
     let mut graph = habitat_graph_build::assemble(extractions);
     graph.communities =
         habitat_graph_analyze::detect_communities(&habitat_graph_analyze::trusted_subgraph(&graph));
-    Ok(graph.sorted())
+    Ok((
+        graph.sorted(),
+        Manifest {
+            inputs: records,
+            tool_version: env!("CARGO_PKG_VERSION").to_owned(),
+            generated_at: None,
+        },
+    ))
 }
 
 /// Inner pipeline: detect → extract → build → analyze → export → write.
@@ -1336,15 +1349,11 @@ fn run_inner(
     vault: Option<&Path>,
     opts: ExtractOpts,
 ) -> Result<(usize, usize, usize)> {
-    // Detect all Rust source files under `dir`, honoring .gitignore.
-    let files = habitat_graph_source::detect(dir, &["rs"])?;
-    let inputs = capture_inputs(&files)?;
-    let graph = build_full_graph(&inputs)?;
-
     std::fs::create_dir_all(out).map_err(|error| GraphError::Io(error.to_string()))?;
     let legacy_state = out.join(".habitat-graph-state.json");
     #[cfg(unix)]
-    let state_path = super::private_state::path_for_output(&out.join("graph.json"), &legacy_state)?;
+    let state_path =
+        super::private_state::path_for_full_build(&out.join("graph.json"), &legacy_state)?;
     #[cfg(not(unix))]
     let state_path = legacy_state;
     let _output_lock = super::private_state::acquire_output_lock(&state_path)?;
@@ -1352,10 +1361,17 @@ fn run_inner(
     {
         super::private_state::ensure_no_pending_add_journals(&state_path)?;
         super::private_state::ensure_no_pending_update_journals(&state_path)?;
-        write_full_build_private_state(&state_path, &graph, &inputs)?;
     }
     #[cfg(not(unix))]
     super::private_state::remove_unsupported_family(&state_path)?;
+
+    // Detect all Rust source files under `dir`, honoring .gitignore.
+    let files = habitat_graph_source::detect(dir, &["rs"])?;
+    let full_build = build_full_graph(&files)?;
+    let graph = full_build.0;
+
+    #[cfg(unix)]
+    write_full_build_private_state(&state_path, &graph, &full_build.1)?;
     write_public_artifacts(out, &graph, opts)?;
 
     // Optionally emit an Obsidian vault — one note per node (`[[wikilinks]]` + frontmatter/tags)
@@ -1454,17 +1470,18 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
-    fn full_build_graph_and_manifest_share_captured_inputs() {
+    fn full_build_graph_and_manifest_share_each_file_read() {
         let src = TempDir::new().unwrap();
         let out = TempDir::new().unwrap();
         let source = src.path().join("lib.rs");
-        fs::write(&source, "fn captured_version() {}").unwrap();
-        let inputs = super::capture_inputs(std::slice::from_ref(&source)).unwrap();
+        let captured = b"fn captured_version() {}";
+        fs::write(&source, captured).unwrap();
+
+        let (graph, manifest) = super::build_full_graph(std::slice::from_ref(&source)).unwrap();
         fs::write(&source, "fn later_version() {}").unwrap();
 
-        let graph = super::build_full_graph(&inputs).unwrap();
         let state_path = out.path().join("private-state.json");
-        super::write_full_build_private_state(&state_path, &graph, &inputs).unwrap();
+        super::write_full_build_private_state(&state_path, &graph, &manifest).unwrap();
 
         assert!(graph
             .nodes
@@ -1476,7 +1493,10 @@ mod tests {
             .unwrap();
         assert_eq!(
             stored.graph.manifest,
-            habitat_graph_source::build_manifest(&inputs, env!("CARGO_PKG_VERSION"))
+            habitat_graph_source::build_manifest(
+                &[(source, captured.to_vec())],
+                env!("CARGO_PKG_VERSION")
+            )
         );
     }
 
@@ -1487,10 +1507,11 @@ mod tests {
         let out = TempDir::new().unwrap();
         mk_file(src.path(), "lib.rs", "fn current() {}");
         let state = out.path().join(".habitat-graph-state.json");
+        let generation = super::super::private_state::generation(b"snapshot");
         let family = [
             state.clone(),
             out.path()
-                .join(".habitat-graph-state.json.snapshot-generation"),
+                .join(format!(".habitat-graph-state.json.snapshot-{generation}")),
             out.path().join(".habitat-graph-state.json.add-journal"),
             out.path().join(".habitat-graph-state.json.update-journal"),
         ];
@@ -1500,6 +1521,22 @@ mod tests {
 
         assert_eq!(run(src.path(), out.path(), None), 0);
         assert!(family.iter().all(|member| !member.exists()));
+    }
+
+    #[cfg(not(unix))]
+    #[test]
+    fn full_extract_removes_unsupported_state_before_source_detection() {
+        let root = TempDir::new().unwrap();
+        let out = root.path().join("out");
+        fs::create_dir(&out).unwrap();
+        let state = out.join(".habitat-graph-state.json");
+        let journal = out.join(".habitat-graph-state.json.add-journal");
+        fs::write(&state, "unsupported private state").unwrap();
+        fs::write(&journal, "unsupported journal").unwrap();
+
+        assert_eq!(run(&root.path().join("missing"), &out, None), 4);
+        assert!(!state.exists());
+        assert!(!journal.exists());
     }
 
     // ── T1b: graph.html is written (the interactive viewer) ──────────────────
