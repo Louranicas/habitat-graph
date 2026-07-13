@@ -74,20 +74,23 @@ pub static REBUILD_LOCK: Mutex<()> = Mutex::new(());
 /// - [`GraphError::Schema`] — graph serialisation failed.
 pub fn rebuild(dir: &Path, out: &Path) -> Result<usize> {
     std::fs::create_dir_all(out).map_err(|error| GraphError::Io(error.to_string()))?;
+    let out = super::private_state::resolve_output_directory(out)?;
     let legacy_state = out.join(".habitat-graph-state.json");
     #[cfg(unix)]
-    let state_path =
-        super::private_state::path_for_full_build(&out.join("graph.json"), &legacy_state)?;
+    let full_build_state =
+        super::private_state::prepare_full_build_state(&out.join("graph.json"), &legacy_state)?;
     #[cfg(not(unix))]
-    let state_path = legacy_state;
-    let _output_lock = super::private_state::acquire_output_lock(&state_path)?;
+    let state_path = legacy_state.as_path();
+    #[cfg(unix)]
+    let state_path = full_build_state.path();
+    let _output_lock = super::private_state::acquire_output_lock(state_path)?;
     #[cfg(unix)]
     {
-        super::private_state::ensure_no_pending_add_journals(&state_path)?;
-        super::private_state::ensure_no_pending_update_journals(&state_path)?;
+        super::private_state::ensure_no_pending_add_journals(state_path)?;
+        super::private_state::ensure_no_pending_update_journals(state_path)?;
     }
     #[cfg(not(unix))]
-    super::private_state::remove_unsupported_family(&state_path)?;
+    super::private_state::remove_unsupported_family(state_path)?;
 
     // Detect source files (all extractor-supported extensions).
     let files = habitat_graph_source::detect(dir, &["rs", "ts", "tsx", "js", "jsx", "go", "py"])?;
@@ -97,8 +100,8 @@ pub fn rebuild(dir: &Path, out: &Path) -> Result<usize> {
     let n = graph.nodes.len();
 
     #[cfg(unix)]
-    super::extract::write_full_build_private_state(&state_path, &graph, &full_build.1)?;
-    super::extract::write_public_artifacts(out, &graph, super::extract::ExtractOpts::default())?;
+    super::extract::write_full_build_private_state(&full_build_state, &graph, &full_build.1)?;
+    super::extract::write_public_artifacts(&out, &graph, super::extract::ExtractOpts::default())?;
 
     Ok(n)
 }

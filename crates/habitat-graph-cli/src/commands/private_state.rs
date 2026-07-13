@@ -52,54 +52,64 @@ pub(super) struct ContextIdentity {
     unborn_predecessor: Option<(String, String)>,
 }
 
-pub(super) fn path_for_output(output: &Path, legacy: &Path) -> Result<PathBuf> {
-    path_for_output_with_expiration(output, legacy, false)
+#[cfg(unix)]
+#[derive(Debug)]
+pub(super) struct FullBuildState {
+    path: PathBuf,
+    output: PathBuf,
+    context: Option<ContextIdentity>,
 }
 
+#[cfg(unix)]
+impl FullBuildState {
+    pub(super) fn path(&self) -> &Path {
+        &self.path
+    }
+
+    fn ensure_current(&self) -> Result<()> {
+        if context_identity_for_output(&self.output)? != self.context {
+            return Err(GraphError::Guard(
+                "Git context changed during full build".to_owned(),
+            ));
+        }
+        Ok(())
+    }
+}
+
+pub(super) fn path_for_output(output: &Path, legacy: &Path) -> Result<PathBuf> {
+    path_for_output_with_expiration(output, legacy, false).map(|resolved| resolved.0)
+}
+
+#[cfg(test)]
 pub(super) fn path_for_full_build(output: &Path, legacy: &Path) -> Result<PathBuf> {
-    path_for_output_with_expiration(output, legacy, true)
+    path_for_output_with_expiration(output, legacy, true).map(|resolved| resolved.0)
+}
+
+#[cfg(unix)]
+pub(super) fn prepare_full_build_state(output: &Path, legacy: &Path) -> Result<FullBuildState> {
+    let output = resolve_output_file(output)?;
+    let (path, context) = path_for_output_with_expiration(&output, legacy, true)?;
+    Ok(FullBuildState {
+        path,
+        output,
+        context,
+    })
 }
 
 fn path_for_output_with_expiration(
     output: &Path,
     legacy: &Path,
     allow_expired: bool,
-) -> Result<PathBuf> {
+) -> Result<(PathBuf, Option<ContextIdentity>)> {
     #[cfg(not(unix))]
     remove_family(legacy, "unsupported legacy private state")?;
 
-    let parent = output
+    let canonical_output = resolve_output_file(output)?;
+    let canonical_parent = canonical_output
         .parent()
-        .filter(|parent| !parent.as_os_str().is_empty())
-        .unwrap_or_else(|| Path::new("."));
-    let canonical_parent = std::fs::canonicalize(parent).map_err(|error| {
-        GraphError::Io(format!(
-            "resolve output directory {}: {error}",
-            parent.display()
-        ))
-    })?;
-    let output_name = output
-        .file_name()
-        .ok_or_else(|| GraphError::Io("output path has no filename".to_owned()))?;
-    match std::fs::symlink_metadata(output) {
-        Ok(metadata) if metadata.file_type().is_symlink() => {
-            return Err(GraphError::Guard(format!(
-                "output path must not be a symbolic link: {}",
-                output.display()
-            )))
-        }
-        Ok(_) => {}
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
-        Err(error) => {
-            return Err(GraphError::Io(format!(
-                "inspect output path {}: {error}",
-                output.display()
-            )))
-        }
-    }
-    let canonical_output = canonical_parent.join(output_name);
-    let Some(git_dir) = find_git_dir(&canonical_parent)? else {
-        return Ok(legacy.to_path_buf());
+        .ok_or_else(|| GraphError::Io("output path has no parent".to_owned()))?;
+    let Some(git_dir) = find_git_dir(canonical_parent)? else {
+        return Ok((legacy.to_path_buf(), None));
     };
 
     let state_root = git_dir.join("habitat-graph");
@@ -129,7 +139,49 @@ fn path_for_output_with_expiration(
     if let Some(error) = first_error {
         return Err(error);
     }
-    Ok(state_path)
+    Ok((state_path, Some(context)))
+}
+
+pub(super) fn resolve_output_directory(path: &Path) -> Result<PathBuf> {
+    let resolved = std::fs::canonicalize(path).map_err(|error| {
+        GraphError::Io(format!(
+            "resolve output directory {}: {error}",
+            path.display()
+        ))
+    })?;
+    let metadata = std::fs::symlink_metadata(&resolved)
+        .map_err(|error| GraphError::Io(format!("inspect output directory: {error}")))?;
+    if !metadata.file_type().is_dir() {
+        return Err(GraphError::Guard(format!(
+            "output path is not a directory: {}",
+            resolved.display()
+        )));
+    }
+    Ok(resolved)
+}
+
+pub(super) fn resolve_output_file(path: &Path) -> Result<PathBuf> {
+    let parent = path
+        .parent()
+        .filter(|parent| !parent.as_os_str().is_empty())
+        .unwrap_or_else(|| Path::new("."));
+    let parent = resolve_output_directory(parent)?;
+    let filename = path
+        .file_name()
+        .ok_or_else(|| GraphError::Io("output path has no filename".to_owned()))?;
+    let resolved = parent.join(filename);
+    match std::fs::symlink_metadata(&resolved) {
+        Ok(metadata) if metadata.file_type().is_symlink() => Err(GraphError::Guard(format!(
+            "output path must not be a symbolic link: {}",
+            resolved.display()
+        ))),
+        Ok(_) => Ok(resolved),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(resolved),
+        Err(error) => Err(GraphError::Io(format!(
+            "inspect output path {}: {error}",
+            resolved.display()
+        ))),
+    }
 }
 
 pub(super) fn context_identity_for_output(output: &Path) -> Result<Option<ContextIdentity>> {
@@ -729,7 +781,13 @@ pub(super) fn write_state(path: &Path, bytes: &[u8]) -> Result<()> {
     write_state_contents(path, bytes)
 }
 
-pub(super) fn write_full_build_state(path: &Path, bytes: &[u8]) -> Result<()> {
+#[cfg(unix)]
+pub(super) fn commit_full_build_state(state: &FullBuildState, bytes: &[u8]) -> Result<()> {
+    state.ensure_current()?;
+    write_full_build_state(state.path(), bytes)
+}
+
+fn write_full_build_state(path: &Path, bytes: &[u8]) -> Result<()> {
     let revision = context_revision(path)?;
     if expired_context_path(path).is_some() && revision.is_none() {
         return Err(GraphError::Guard(format!(
@@ -2307,6 +2365,50 @@ mod tests {
         .unwrap_err();
         assert_eq!(error.kind(), "guard");
         assert!(error.to_string().contains("symbolic link"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn resolved_output_file_pins_symlinked_parent() {
+        use std::os::unix::fs::symlink;
+
+        let root = TempDir::new().unwrap();
+        let first = root.path().join("first");
+        let second = root.path().join("second");
+        let alias = root.path().join("alias");
+        fs::create_dir_all(&first).unwrap();
+        fs::create_dir_all(&second).unwrap();
+        symlink(&first, &alias).unwrap();
+
+        let output = super::resolve_output_file(&alias.join("graph.json")).unwrap();
+        fs::remove_file(&alias).unwrap();
+        symlink(&second, &alias).unwrap();
+        fs::write(&output, "pinned").unwrap();
+
+        assert_eq!(
+            fs::read_to_string(first.join("graph.json")).unwrap(),
+            "pinned"
+        );
+        assert!(!second.join("graph.json").exists());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn full_build_state_rejects_git_revision_change() {
+        let root = TempDir::new().unwrap();
+        let git_dir = create_git(root.path(), "ref: refs/heads/main\n");
+        write_ref(&git_dir, "refs/heads/main", &"1".repeat(40));
+        let output_dir = root.path().join("public");
+        fs::create_dir_all(&output_dir).unwrap();
+        let output = output_dir.join("graph.json");
+        let legacy = output_dir.join(".habitat-graph-state.json");
+        let state = super::prepare_full_build_state(&output, &legacy).unwrap();
+
+        write_ref(&git_dir, "refs/heads/main", &"2".repeat(40));
+
+        let error = super::commit_full_build_state(&state, b"{}").unwrap_err();
+        assert_eq!(error.kind(), "guard");
+        assert!(error.to_string().contains("Git context changed"));
     }
 
     #[cfg(unix)]

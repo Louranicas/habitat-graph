@@ -1289,7 +1289,7 @@ pub(super) fn write_public_artifacts(out: &Path, graph: &Graph, opts: ExtractOpt
 
 #[cfg(unix)]
 pub(super) fn write_full_build_private_state(
-    state_path: &Path,
+    state: &super::private_state::FullBuildState,
     graph: &Graph,
     manifest: &Manifest,
 ) -> Result<()> {
@@ -1302,7 +1302,7 @@ pub(super) fn write_full_build_private_state(
         &super::private_state::generation(public_json.as_bytes()),
         &super::private_state::semantic_generation(&public_graph)?,
     )?;
-    super::private_state::write_full_build_state(state_path, &state_json)
+    super::private_state::commit_full_build_state(state, &state_json)
 }
 
 const FULL_BUILD_BATCH_SIZE: usize = 64;
@@ -1352,20 +1352,23 @@ fn run_inner(
     opts: ExtractOpts,
 ) -> Result<(usize, usize, usize)> {
     std::fs::create_dir_all(out).map_err(|error| GraphError::Io(error.to_string()))?;
+    let out = super::private_state::resolve_output_directory(out)?;
     let legacy_state = out.join(".habitat-graph-state.json");
     #[cfg(unix)]
-    let state_path =
-        super::private_state::path_for_full_build(&out.join("graph.json"), &legacy_state)?;
+    let full_build_state =
+        super::private_state::prepare_full_build_state(&out.join("graph.json"), &legacy_state)?;
     #[cfg(not(unix))]
-    let state_path = legacy_state;
-    let _output_lock = super::private_state::acquire_output_lock(&state_path)?;
+    let state_path = legacy_state.as_path();
+    #[cfg(unix)]
+    let state_path = full_build_state.path();
+    let _output_lock = super::private_state::acquire_output_lock(state_path)?;
     #[cfg(unix)]
     {
-        super::private_state::ensure_no_pending_add_journals(&state_path)?;
-        super::private_state::ensure_no_pending_update_journals(&state_path)?;
+        super::private_state::ensure_no_pending_add_journals(state_path)?;
+        super::private_state::ensure_no_pending_update_journals(state_path)?;
     }
     #[cfg(not(unix))]
-    super::private_state::remove_unsupported_family(&state_path)?;
+    super::private_state::remove_unsupported_family(state_path)?;
 
     // Detect all Rust source files under `dir`, honoring .gitignore.
     let files = habitat_graph_source::detect(dir, &["rs"])?;
@@ -1373,8 +1376,8 @@ fn run_inner(
     let graph = full_build.0;
 
     #[cfg(unix)]
-    write_full_build_private_state(&state_path, &graph, &full_build.1)?;
-    write_public_artifacts(out, &graph, opts)?;
+    write_full_build_private_state(&full_build_state, &graph, &full_build.1)?;
+    write_public_artifacts(&out, &graph, opts)?;
 
     // Optionally emit an Obsidian vault — one note per node (`[[wikilinks]]` + frontmatter/tags)
     // for Obsidian's graph view + Dataview / Juggl / Breadcrumbs.
@@ -1483,7 +1486,12 @@ mod tests {
         fs::write(&source, "fn later_version() {}").unwrap();
 
         let state_path = out.path().join("private-state.json");
-        super::write_full_build_private_state(&state_path, &graph, &manifest).unwrap();
+        let full_build_state = super::super::private_state::prepare_full_build_state(
+            &out.path().join("graph.json"),
+            &state_path,
+        )
+        .unwrap();
+        super::write_full_build_private_state(&full_build_state, &graph, &manifest).unwrap();
 
         assert!(graph
             .nodes

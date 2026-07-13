@@ -195,39 +195,131 @@ fn ambiguous_projected_node_ids(
     ours: &Graph,
     theirs: &Graph,
 ) -> [HashSet<NodeId>; 2] {
-    let projected_ids = |graph: &Graph| {
-        graph
-            .nodes
-            .iter()
-            .filter(|node| habitat_graph_core::is_canonical_redaction_marker(&node.label))
-            .map(|node| node.id)
-            .collect::<HashSet<_>>()
-    };
-    let base_projected = projected_ids(base);
-    let side_projected = [projected_ids(ours), projected_ids(theirs)];
-    let mut occupied: Vec<NodeId> = base
+    let base_groups = projected_collision_groups(base);
+    let side_projected = [projected_probe_ranges(ours), projected_probe_ranges(theirs)];
+
+    let mut ambiguous = [HashSet::new(), HashSet::new()];
+    for (projected_slots, candidates) in base_groups {
+        let side_ids: [HashSet<NodeId>; 2] = std::array::from_fn(|index| {
+            side_projected[index]
+                .iter()
+                .filter(|(_, side_candidates)| candidates.intersects(*side_candidates))
+                .map(|(id, _)| *id)
+                .collect::<HashSet<_>>()
+        });
+        if side_ids.iter().any(|ids| !projected_slots.is_subset(ids)) {
+            for (ambiguous, ids) in ambiguous.iter_mut().zip(side_ids) {
+                if projected_slots.is_subset(&ids) {
+                    ambiguous.extend(ids.into_iter().filter(|id| projected_slots.contains(id)));
+                } else {
+                    ambiguous.extend(ids);
+                }
+            }
+        }
+    }
+    ambiguous
+}
+
+#[derive(Clone, Copy)]
+struct ProbeRange {
+    start: u32,
+    end: u32,
+}
+
+impl ProbeRange {
+    fn intersects(self, other: Self) -> bool {
+        let segments = |range: Self| {
+            if range.start <= range.end {
+                [(range.start, range.end), (1, 0)]
+            } else {
+                [(range.start, u32::MAX), (0, range.end)]
+            }
+        };
+        segments(self).iter().any(|left| {
+            left.0 <= left.1
+                && segments(other)
+                    .iter()
+                    .any(|right| right.0 <= right.1 && left.0 <= right.1 && right.0 <= left.1)
+        })
+    }
+}
+
+fn projected_collision_groups(graph: &Graph) -> Vec<(HashSet<NodeId>, ProbeRange)> {
+    let projected_ids: HashSet<NodeId> = graph
         .nodes
         .iter()
-        .chain(&ours.nodes)
-        .chain(&theirs.nodes)
+        .filter(|node| habitat_graph_core::is_canonical_redaction_marker(&node.label))
         .map(|node| node.id)
         .collect();
-    occupied.sort_unstable();
-    occupied.dedup();
+    let mut result = Vec::new();
+    for group in occupied_collision_groups(graph) {
+        let projected: HashSet<NodeId> = group
+            .iter()
+            .filter(|id| projected_ids.contains(id))
+            .copied()
+            .collect();
+        if let (Some(start), Some(end)) = (
+            group.first(),
+            group.iter().rfind(|id| projected.contains(id)),
+        ) {
+            result.push((
+                projected,
+                ProbeRange {
+                    start: start.get(),
+                    end: end.get(),
+                },
+            ));
+        }
+    }
+    result
+}
+
+fn projected_probe_ranges(graph: &Graph) -> Vec<(NodeId, ProbeRange)> {
+    let projected_ids: HashSet<NodeId> = graph
+        .nodes
+        .iter()
+        .filter(|node| habitat_graph_core::is_canonical_redaction_marker(&node.label))
+        .map(|node| node.id)
+        .collect();
+    let mut result = Vec::new();
+    for group in occupied_collision_groups(graph) {
+        let Some(start) = group.first().map(|id| id.get()) else {
+            continue;
+        };
+        result.extend(
+            group
+                .into_iter()
+                .filter(|id| projected_ids.contains(id))
+                .map(|id| {
+                    (
+                        id,
+                        ProbeRange {
+                            start,
+                            end: id.get(),
+                        },
+                    )
+                }),
+        );
+    }
+    result
+}
+
+fn occupied_collision_groups(graph: &Graph) -> Vec<Vec<NodeId>> {
+    let mut ids: Vec<NodeId> = graph.nodes.iter().map(|node| node.id).collect();
+    ids.sort_unstable();
+    ids.dedup();
     let mut groups: Vec<Vec<NodeId>> = Vec::new();
-    for candidate in occupied {
-        let extends_group = groups
+    for id in ids {
+        if groups
             .last()
             .and_then(|group| group.last())
-            .is_some_and(|last| {
-                last.get() != u32::MAX && last.get().saturating_add(1) == candidate.get()
-            });
-        if extends_group {
+            .is_some_and(|last| last.get() != u32::MAX && last.get() + 1 == id.get())
+        {
             if let Some(group) = groups.last_mut() {
-                group.push(candidate);
+                group.push(id);
             }
         } else {
-            groups.push(vec![candidate]);
+            groups.push(vec![id]);
         }
     }
     if groups.len() > 1
@@ -245,35 +337,7 @@ fn ambiguous_projected_node_ids(
             last.extend(first);
         }
     }
-
-    let mut ambiguous = [HashSet::new(), HashSet::new()];
-    for group in groups {
-        let projected_slots: HashSet<NodeId> = group
-            .iter()
-            .filter(|id| base_projected.contains(id))
-            .copied()
-            .collect();
-        if projected_slots.is_empty() {
-            continue;
-        }
-        let slots: HashSet<NodeId> = group.into_iter().collect();
-        let side_ids = side_projected.each_ref().map(|ids| {
-            ids.iter()
-                .copied()
-                .filter(|id| slots.contains(id))
-                .collect::<HashSet<_>>()
-        });
-        if side_ids.iter().any(|ids| !projected_slots.is_subset(ids)) {
-            for (ambiguous, ids) in ambiguous.iter_mut().zip(side_ids) {
-                if projected_slots.is_subset(&ids) {
-                    ambiguous.extend(ids.into_iter().filter(|id| projected_slots.contains(id)));
-                } else {
-                    ambiguous.extend(ids);
-                }
-            }
-        }
-    }
-    ambiguous
+    groups
 }
 
 fn node_identity_set_excluding(
@@ -1737,6 +1801,27 @@ mod tests {
             .edges
             .iter()
             .any(|edge| edge.relation == "theirs-edge"));
+    }
+
+    #[test]
+    fn adjacent_independent_projected_addition_survives_base_deletion() {
+        let marker = "[REDACTED:api_key]";
+        let mut base = nodes_graph(&[(10, marker), (20, "Safe")]);
+        base.edges.push(edge(10, 20, "base-edge"));
+        let mut ours = nodes_graph(&[(11, marker), (20, "Safe")]);
+        ours.edges.push(edge(11, 20, "ours-edge"));
+        let theirs = base.clone();
+
+        let merged = merge3(&base, &ours, &theirs);
+        let projected = merged
+            .nodes
+            .iter()
+            .find(|node| node.label == marker)
+            .unwrap();
+        assert_eq!(projected.id, NodeId::new(11));
+        assert_eq!(merged.edges.len(), 1);
+        assert_eq!(merged.edges[0].source, NodeId::new(11));
+        assert_eq!(merged.edges[0].relation, "ours-edge");
     }
 
     #[test]

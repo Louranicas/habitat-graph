@@ -78,7 +78,9 @@ pub fn run(dir: &Path, out: &Path) -> u8 {
 /// failures, [`GraphError::Schema`] on serialization failures, or [`GraphError::Guard`] when
 /// private-state permissions cannot be enforced.
 fn run_inner(dir: &Path, out: &Path) -> Result<()> {
-    let (sidecar_path, legacy_sidecar_path, _output_lock) = prepare_update_transaction(out)?;
+    std::fs::create_dir_all(out).map_err(|error| GraphError::Io(error.to_string()))?;
+    let out = super::private_state::resolve_output_directory(out)?;
+    let (sidecar_path, legacy_sidecar_path, _output_lock) = prepare_update_transaction(&out)?;
     let public_output = load_public_output(&out.join("graph.json"))?;
 
     // ── Detect all source files (sorted for R4 determinism) ─────────────────────
@@ -89,7 +91,7 @@ fn run_inner(dir: &Path, out: &Path) -> Result<()> {
         load_available_prior(&sidecar_path, &legacy_sidecar_path, public_output.as_ref())?
     else {
         // No sidecar or schema mismatch → full rebuild.
-        return do_full_build(out, &files, &sidecar_path, &legacy_sidecar_path);
+        return do_full_build(&out, &files, &sidecar_path, &legacy_sidecar_path);
     };
     let prior_private_checksum = private_graph_generation(&prior_graph)?;
 
@@ -154,7 +156,7 @@ fn run_inner(dir: &Path, out: &Path) -> Result<()> {
         // and atomically reharden the private sidecar so an upgrade cannot report success while
         // leaving legacy unredacted output or permissive cache permissions in place.
         write_artifacts(
-            out,
+            &out,
             &prior_graph,
             current_manifest,
             &sidecar_path,
@@ -204,7 +206,7 @@ fn run_inner(dir: &Path, out: &Path) -> Result<()> {
     // ── Write artifacts + refresh sidecar ────────────────────────────────────────
     let n = combined.nodes.len();
     write_artifacts(
-        out,
+        &out,
         &combined,
         current_manifest,
         &sidecar_path,

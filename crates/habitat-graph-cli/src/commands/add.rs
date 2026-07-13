@@ -209,6 +209,7 @@ fn prepare_add_transaction(
 ) -> Result<(
     PathBuf,
     PathBuf,
+    PathBuf,
     super::private_state::OutputTransactionLock,
 )> {
     if let Some(parent) = out.parent() {
@@ -217,22 +218,23 @@ fn prepare_add_transaction(
                 .map_err(|e| GraphError::Io(format!("create dirs {}: {e}", parent.display())))?;
         }
     }
+    let out = super::private_state::resolve_output_file(out)?;
 
-    let legacy_state_path = legacy_private_state_path(out)?;
-    let state_path = super::private_state::path_for_output(out, &legacy_state_path)?;
+    let legacy_state_path = legacy_private_state_path(&out)?;
+    let state_path = super::private_state::path_for_output(&out, &legacy_state_path)?;
     let output_lock = super::private_state::acquire_output_lock(&state_path)?;
     super::private_state::ensure_no_pending_update_journals(&state_path)?;
     let legacy_journal_path = add_journal_path(&legacy_state_path)?;
     let journal_path = add_journal_path(&state_path)?;
     super::private_state::migrate(&legacy_journal_path, &journal_path, "legacy add journal")?;
     super::private_state::ensure(&state_path)?;
-    Ok((state_path, legacy_state_path, output_lock))
+    Ok((out, state_path, legacy_state_path, output_lock))
 }
 
 fn recover_pending_add(out: &Path) -> Result<bool> {
-    let (state_path, _, _output_lock) = prepare_add_transaction(out)?;
-    let mut public = load_public_output(out)?;
-    recover_add_journal(out, &state_path, &mut public)
+    let (out, state_path, _, _output_lock) = prepare_add_transaction(out)?;
+    let mut public = load_public_output(&out)?;
+    recover_add_journal(&out, &state_path, &mut public)
 }
 
 /// Loads matching owner-only graph state when available, otherwise uses `out` (or an empty graph
@@ -247,9 +249,9 @@ fn recover_pending_add(out: &Path) -> Result<bool> {
 ///   would destroy any prior content that is not otherwise regenerable.
 /// - [`GraphError::Guard`] when owner-only private state cannot be enforced.
 pub fn merge_into_output(new_graph: Graph, out: &Path) -> Result<()> {
-    let (state_path, legacy_state_path, _output_lock) = prepare_add_transaction(out)?;
-    let mut public_prior = load_public_output(out)?;
-    let recovered_add = recover_add_journal(out, &state_path, &mut public_prior)?;
+    let (out, state_path, legacy_state_path, _output_lock) = prepare_add_transaction(out)?;
+    let mut public_prior = load_public_output(&out)?;
+    let recovered_add = recover_add_journal(&out, &state_path, &mut public_prior)?;
     let private_prior = load_private_state(
         &state_path,
         &legacy_state_path,
@@ -290,14 +292,14 @@ pub fn merge_into_output(new_graph: Graph, out: &Path) -> Result<()> {
     let state_json =
         super::private_state::serialize(&merged, &public_generation, &public_semantic_generation)?;
     write_add_journal(
-        out,
+        &out,
         &state_path,
         public_prior.graph.as_ref(),
         &before_private_checksum,
         &merged,
         &json,
     )?;
-    super::atomic_file::write(out, json.as_bytes(), false, "public graph")?;
+    super::atomic_file::write(&out, json.as_bytes(), false, "public graph")?;
     super::private_state::write_state(&state_path, &state_json)?;
     super::private_state::remove(&add_journal_path(&state_path)?, "add journal")?;
     if state_path != legacy_state_path {
