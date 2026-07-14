@@ -4,8 +4,8 @@
 //! one `<text>` label per node, and one `<line>` per edge. Layout is fully deterministic (R4):
 //! nodes are placed on a circle in the order of `graph.nodes`; angles are derived solely from
 //! node index and node count. Community membership drives fill colour via a fixed palette. Every
-//! attacker-influenced string (node label, etc.) is routed through [`crate::escape::xml_escape`]
-//! (STRIDE-T). No randomness; no system clock.
+//! attacker-influenced node label is redacted through the shared public-output policy and routed
+//! through [`crate::escape::xml_escape`] (STRIDE-T). No randomness; no system clock.
 
 use std::collections::HashMap;
 use std::f64::consts::PI;
@@ -13,7 +13,7 @@ use std::fmt::Write as FmtWrite;
 
 use habitat_graph_core::{Graph, NodeId};
 
-use crate::escape::xml_escape;
+use crate::escape::{redact_public_text, xml_escape};
 
 // ── Layout constants ──────────────────────────────────────────────────────────
 
@@ -35,8 +35,8 @@ const MIN_CANVAS: u32 = 300;
 ///
 /// Colours are taken from the Tableau-10 palette for perceptual distinctness.
 const PALETTE: &[&str] = &[
-    "#4e79a7", "#f28e2b", "#e15759", "#76b7b2", "#59a14f",
-    "#edc948", "#b07aa1", "#ff9da7", "#9c755f", "#bab0ac",
+    "#4e79a7", "#f28e2b", "#e15759", "#76b7b2", "#59a14f", "#edc948", "#b07aa1", "#ff9da7",
+    "#9c755f", "#bab0ac",
 ];
 
 /// Fill colour for nodes that belong to no community.
@@ -53,8 +53,10 @@ const UNCLUSTERED_FILL: &str = "#cccccc";
 /// whose source or target [`NodeId`] is absent from `graph.nodes` is silently skipped.
 /// Self-loop edges (source == target in position space) are also skipped.
 ///
-/// All node labels and graph-derived strings are passed through [`xml_escape`] before embedding,
-/// neutralising XML-injection payloads such as `</text><script>alert(1)</script>` (STRIDE-T).
+/// All node labels first use deterministic secret redaction and then pass through [`xml_escape`]
+/// before embedding, neutralising XML-injection payloads such as
+/// `</text><script>alert(1)</script>` (STRIDE-T). Redaction does not change node positions, edge
+/// lines, or community-derived colours.
 ///
 /// The function is infallible and never touches the filesystem, network, or system clock.
 #[must_use]
@@ -123,7 +125,8 @@ pub fn render_svg(graph: &Graph) -> String {
         let fill = fill_map.get(&node.id).copied().unwrap_or(UNCLUSTERED_FILL);
         // `xml_escape` converts `<`, `>`, `&`, `"`, `'` to entities and drops illegal XML
         // C0 controls — the full STRIDE-T guard for attacker-influenced labels.
-        let safe_label = xml_escape(&node.label);
+        let redacted_label = redact_public_text(&node.label);
+        let safe_label = xml_escape(&redacted_label);
         // Label text-anchor is centred horizontally; its baseline sits below the glyph.
         let ty = cy + NODE_RADIUS + LABEL_OFFSET;
         let _ = write!(
@@ -195,7 +198,8 @@ fn circular_layout(n: usize) -> (Vec<(f64, f64)>, u32) {
 fn build_fill_map(graph: &Graph) -> HashMap<NodeId, &'static str> {
     let mut map: HashMap<NodeId, &'static str> = HashMap::new();
     for community in &graph.communities {
-        #[allow(clippy::cast_possible_truncation)] // u32 → usize: lossless on all Rust-supported targets (usize ≥ 32 bits)
+        #[allow(clippy::cast_possible_truncation)]
+        // u32 → usize: lossless on all Rust-supported targets (usize ≥ 32 bits)
         let idx = (community.id.get() as usize) % PALETTE.len();
         let fill = PALETTE[idx];
         for &member in &community.members {
@@ -251,6 +255,7 @@ mod tests {
         Graph {
             schema: "test".to_owned(),
             nodes: Vec::new(),
+            node_content_ids: std::collections::BTreeMap::default(),
             edges: Vec::new(),
             communities: Vec::new(),
             manifest: Manifest {
@@ -291,7 +296,11 @@ mod tests {
     #[test]
     fn t04_empty_graph_has_no_circle_element() {
         let svg = render_svg(&Graph::new());
-        assert_eq!(count_tag(&svg, "<circle"), 0, "empty graph must have 0 circles: {svg:.120}");
+        assert_eq!(
+            count_tag(&svg, "<circle"),
+            0,
+            "empty graph must have 0 circles: {svg:.120}"
+        );
     }
 
     // ── T05-T09: single-node graph ────────────────────────────────────────────
@@ -301,7 +310,11 @@ mod tests {
         let mut g = bare_graph();
         g.nodes.push(node(1, "Alpha", "a.rs"));
         let svg = render_svg(&g);
-        assert_eq!(count_tag(&svg, "<circle"), 1, "expected 1 circle: {svg:.200}");
+        assert_eq!(
+            count_tag(&svg, "<circle"),
+            1,
+            "expected 1 circle: {svg:.200}"
+        );
     }
 
     #[test]
@@ -317,7 +330,11 @@ mod tests {
         let mut g = bare_graph();
         g.nodes.push(node(1, "Solo", "s.rs"));
         let svg = render_svg(&g);
-        assert_eq!(count_tag(&svg, "<line"), 0, "no edges → no lines: {svg:.200}");
+        assert_eq!(
+            count_tag(&svg, "<line"),
+            0,
+            "no edges → no lines: {svg:.200}"
+        );
     }
 
     #[test]
@@ -325,7 +342,10 @@ mod tests {
         let mut g = bare_graph();
         g.nodes.push(node(1, "UniqueLabel", "a.rs"));
         let svg = render_svg(&g);
-        assert!(svg.contains("UniqueLabel"), "label missing from svg: {svg:.200}");
+        assert!(
+            svg.contains("UniqueLabel"),
+            "label missing from svg: {svg:.200}"
+        );
     }
 
     #[test]
@@ -334,8 +354,14 @@ mod tests {
         g.nodes.push(node(1, "X", "x.rs"));
         let svg = render_svg(&g);
         // The width/height attributes must reflect MIN_CANVAS = 300.
-        assert!(svg.contains("width=\"300\""), "expected width=300: {svg:.200}");
-        assert!(svg.contains("height=\"300\""), "expected height=300: {svg:.200}");
+        assert!(
+            svg.contains("width=\"300\""),
+            "expected width=300: {svg:.200}"
+        );
+        assert!(
+            svg.contains("height=\"300\""),
+            "expected height=300: {svg:.200}"
+        );
     }
 
     // ── T10-T13: node/edge count correspondence ───────────────────────────────
@@ -379,7 +405,11 @@ mod tests {
         g.nodes.push(node(2, "Target", "t.rs"));
         g.edges.push(edge(99, 2, "mystery")); // NodeId 99 not in nodes
         let svg = render_svg(&g);
-        assert_eq!(count_tag(&svg, "<line"), 0, "dangling-source edge must not emit <line>");
+        assert_eq!(
+            count_tag(&svg, "<line"),
+            0,
+            "dangling-source edge must not emit <line>"
+        );
     }
 
     // ── T14-T16: determinism (R4) ─────────────────────────────────────────────
@@ -394,7 +424,11 @@ mod tests {
             g.communities.push(community(0, &[1]));
             g
         };
-        assert_eq!(render_svg(&build()), render_svg(&build()), "render_svg must be deterministic");
+        assert_eq!(
+            render_svg(&build()),
+            render_svg(&build()),
+            "render_svg must be deterministic"
+        );
     }
 
     #[test]
@@ -405,7 +439,10 @@ mod tests {
         g.edges.push(edge(1, 2, "e"));
         let first = render_svg(&g);
         let second = render_svg(&g);
-        assert_eq!(first, second, "calling render_svg twice must yield identical strings");
+        assert_eq!(
+            first, second,
+            "calling render_svg twice must yield identical strings"
+        );
     }
 
     #[test]
@@ -438,7 +475,8 @@ mod tests {
     #[test]
     fn t17_script_tag_injection_does_not_appear_raw() {
         let mut g = bare_graph();
-        g.nodes.push(node(1, "</text><script>alert(1)</script>", "evil.rs"));
+        g.nodes
+            .push(node(1, "</text><script>alert(1)</script>", "evil.rs"));
         let svg = render_svg(&g);
         assert!(
             !svg.contains("</text><script>"),
@@ -453,7 +491,10 @@ mod tests {
         let svg = render_svg(&g);
         // After xml_escape: `a&lt;b`. The raw `<b` must not appear inside a text element.
         // We verify the entity appears and the raw `<b` does not follow `a`.
-        assert!(svg.contains("a&lt;b"), "< must be escaped to &lt;: {svg:.300}");
+        assert!(
+            svg.contains("a&lt;b"),
+            "< must be escaped to &lt;: {svg:.300}"
+        );
     }
 
     #[test]
@@ -461,7 +502,10 @@ mod tests {
         let mut g = bare_graph();
         g.nodes.push(node(1, "a>b", "f.rs"));
         let svg = render_svg(&g);
-        assert!(svg.contains("a&gt;b"), "> must be escaped to &gt;: {svg:.300}");
+        assert!(
+            svg.contains("a&gt;b"),
+            "> must be escaped to &gt;: {svg:.300}"
+        );
     }
 
     #[test]
@@ -477,7 +521,10 @@ mod tests {
         let mut g = bare_graph();
         g.nodes.push(node(1, "say\"hi\"", "f.rs"));
         let svg = render_svg(&g);
-        assert!(svg.contains("say&quot;hi&quot;"), "\" must be escaped: {svg:.300}");
+        assert!(
+            svg.contains("say&quot;hi&quot;"),
+            "\" must be escaped: {svg:.300}"
+        );
     }
 
     #[test]
@@ -494,19 +541,32 @@ mod tests {
         // U+0000 is an illegal XML 1.0 character; xml_escape drops it.
         g.nodes.push(node(1, "ab\x00cd", "f.rs"));
         let svg = render_svg(&g);
-        assert!(!svg.contains('\x00'), "null char must not appear in output: {svg:.300}");
-        assert!(svg.contains("abcd"), "surrounding chars must survive: {svg:.300}");
+        assert!(
+            !svg.contains('\x00'),
+            "null char must not appear in output: {svg:.300}"
+        );
+        assert!(
+            svg.contains("abcd"),
+            "surrounding chars must survive: {svg:.300}"
+        );
     }
 
     #[test]
     fn t24_malicious_label_no_structural_breakout() {
         // The full closing-tag injection: if xml_escape works, no `<script>` tag can break out.
         let mut g = bare_graph();
-        g.nodes.push(node(1, "</text></svg><script>pwned</script>", "evil.rs"));
+        g.nodes
+            .push(node(1, "</text></svg><script>pwned</script>", "evil.rs"));
         let svg = render_svg(&g);
         // The SVG must still end with a single `</svg>`.
-        assert!(svg.ends_with("</svg>"), "SVG must close correctly even with hostile label");
-        assert!(!svg.contains("<script>"), "raw <script> tag must not appear");
+        assert!(
+            svg.ends_with("</svg>"),
+            "SVG must close correctly even with hostile label"
+        );
+        assert!(
+            !svg.contains("<script>"),
+            "raw <script> tag must not appear"
+        );
     }
 
     // ── T25-T32: SVG structural properties ───────────────────────────────────
@@ -517,8 +577,16 @@ mod tests {
         g.nodes.push(node(1, "A", "a.rs"));
         g.nodes.push(node(2, "B", "b.rs"));
         let svg = render_svg(&g);
-        assert_eq!(count_tag(&svg, "<svg"), 1, "must have exactly one <svg open tag");
-        assert_eq!(count_tag(&svg, "</svg>"), 1, "must have exactly one </svg> close tag");
+        assert_eq!(
+            count_tag(&svg, "<svg"),
+            1,
+            "must have exactly one <svg open tag"
+        );
+        assert_eq!(
+            count_tag(&svg, "</svg>"),
+            1,
+            "must have exactly one </svg> close tag"
+        );
     }
 
     #[test]
@@ -533,7 +601,10 @@ mod tests {
         let mut g = bare_graph();
         g.nodes.push(node(1, "N", "n.rs"));
         let svg = render_svg(&g);
-        assert!(svg.contains(" r=\"18\""), "circle must have r=\"18\": {svg:.300}");
+        assert!(
+            svg.contains(" r=\"18\""),
+            "circle must have r=\"18\": {svg:.300}"
+        );
     }
 
     #[test]
@@ -541,7 +612,10 @@ mod tests {
         let mut g = bare_graph();
         g.nodes.push(node(1, "N", "n.rs"));
         let svg = render_svg(&g);
-        assert!(svg.contains("fill=\""), "circle must have fill attribute: {svg:.300}");
+        assert!(
+            svg.contains("fill=\""),
+            "circle must have fill attribute: {svg:.300}"
+        );
     }
 
     #[test]
@@ -562,13 +636,19 @@ mod tests {
         let mut g = bare_graph();
         g.nodes.push(node(1, "LabelNode", "l.rs"));
         let svg = render_svg(&g);
-        assert!(svg.contains("class=\"hg-label\""), "text must have hg-label class: {svg:.300}");
+        assert!(
+            svg.contains("class=\"hg-label\""),
+            "text must have hg-label class: {svg:.300}"
+        );
     }
 
     #[test]
     fn t31_viewbox_attribute_present() {
         let svg = render_svg(&Graph::new());
-        assert!(svg.contains("viewBox=\""), "must have viewBox attribute: {svg:.200}");
+        assert!(
+            svg.contains("viewBox=\""),
+            "must have viewBox attribute: {svg:.200}"
+        );
     }
 
     #[test]
@@ -584,8 +664,14 @@ mod tests {
     fn t33_empty_graph_canvas_is_min_canvas() {
         let svg = render_svg(&Graph::new());
         // MIN_CANVAS = 300.
-        assert!(svg.contains("width=\"300\""), "empty graph width must be 300: {svg:.200}");
-        assert!(svg.contains("height=\"300\""), "empty graph height must be 300: {svg:.200}");
+        assert!(
+            svg.contains("width=\"300\""),
+            "empty graph width must be 300: {svg:.200}"
+        );
+        assert!(
+            svg.contains("height=\"300\""),
+            "empty graph height must be 300: {svg:.200}"
+        );
     }
 
     #[test]
@@ -642,7 +728,10 @@ mod tests {
         let w_start = svg.find("width=\"").expect("width missing") + 7;
         let w_end = svg[w_start..].find('"').expect("width close quote") + w_start;
         let width: u32 = svg[w_start..w_end].parse().expect("width is u32");
-        assert!(width > 300, "50-node canvas must be wider than 300 px; got {width}");
+        assert!(
+            width > 300,
+            "50-node canvas must be wider than 300 px; got {width}"
+        );
     }
 
     #[test]
@@ -651,8 +740,14 @@ mod tests {
         g.nodes.push(node(1, "Center", "c.rs"));
         let svg = render_svg(&g);
         // MIN_CANVAS=300, center=150.0. Circle cx should be "150.00".
-        assert!(svg.contains("cx=\"150.00\""), "single node must be at center (cx=150.00): {svg:.300}");
-        assert!(svg.contains("cy=\"150.00\""), "single node must be at center (cy=150.00): {svg:.300}");
+        assert!(
+            svg.contains("cx=\"150.00\""),
+            "single node must be at center (cx=150.00): {svg:.300}"
+        );
+        assert!(
+            svg.contains("cy=\"150.00\""),
+            "single node must be at center (cy=150.00): {svg:.300}"
+        );
     }
 
     #[test]
@@ -702,7 +797,10 @@ mod tests {
         g.communities.push(community(0, &[1]));
         let svg = render_svg(&g);
         // PALETTE[0] = "#4e79a7"
-        assert!(svg.contains("fill=\"#4e79a7\""), "community 0 must use palette[0]: {svg:.300}");
+        assert!(
+            svg.contains("fill=\"#4e79a7\""),
+            "community 0 must use palette[0]: {svg:.300}"
+        );
     }
 
     #[test]
@@ -712,7 +810,10 @@ mod tests {
         g.nodes.push(node(1, "Wrapped", "w.rs"));
         g.communities.push(community(10, &[1])); // 10 % 10 = 0 → PALETTE[0] = "#4e79a7"
         let svg = render_svg(&g);
-        assert!(svg.contains("fill=\"#4e79a7\""), "community 10 must wrap to palette[0]: {svg:.300}");
+        assert!(
+            svg.contains("fill=\"#4e79a7\""),
+            "community 10 must wrap to palette[0]: {svg:.300}"
+        );
     }
 
     #[test]
@@ -724,8 +825,14 @@ mod tests {
         g.communities.push(community(0, &[1]));
         g.communities.push(community(1, &[2]));
         let svg = render_svg(&g);
-        assert!(svg.contains("fill=\"#4e79a7\""), "community-0 fill missing: {svg:.400}");
-        assert!(svg.contains("fill=\"#f28e2b\""), "community-1 fill missing: {svg:.400}");
+        assert!(
+            svg.contains("fill=\"#4e79a7\""),
+            "community-0 fill missing: {svg:.400}"
+        );
+        assert!(
+            svg.contains("fill=\"#f28e2b\""),
+            "community-1 fill missing: {svg:.400}"
+        );
     }
 
     #[test]
@@ -734,7 +841,10 @@ mod tests {
         g.nodes.push(node(1, "N", "n.rs"));
         g.communities.push(community(1, &[1])); // PALETTE[1] = "#f28e2b"
         let svg = render_svg(&g);
-        assert!(svg.contains("fill=\"#f28e2b\""), "community 1 must use palette[1]: {svg:.300}");
+        assert!(
+            svg.contains("fill=\"#f28e2b\""),
+            "community 1 must use palette[1]: {svg:.300}"
+        );
     }
 
     #[test]
@@ -743,7 +853,10 @@ mod tests {
         g.nodes.push(node(1, "X", "x.rs"));
         let svg = render_svg(&g);
         // Both UNCLUSTERED_FILL and PALETTE entries start with `#`.
-        assert!(svg.contains("fill=\"#"), "fill must be a hex color: {svg:.300}");
+        assert!(
+            svg.contains("fill=\"#"),
+            "fill must be a hex color: {svg:.300}"
+        );
     }
 
     // ── T47-T53: edge cases ───────────────────────────────────────────────────
@@ -771,7 +884,11 @@ mod tests {
         g.nodes.push(node(1, "Src", "s.rs"));
         g.edges.push(edge(1, 999, "orphan")); // target NodeId 999 not in nodes
         let svg = render_svg(&g);
-        assert_eq!(count_tag(&svg, "<line"), 0, "dangling-target edge must not emit <line>");
+        assert_eq!(
+            count_tag(&svg, "<line"),
+            0,
+            "dangling-target edge must not emit <line>"
+        );
     }
 
     #[test]
@@ -796,8 +913,14 @@ mod tests {
         assert!(svg.contains("&amp;"), "& must escape to &amp;: {svg:.400}");
         assert!(svg.contains("&lt;"), "< must escape to &lt;: {svg:.400}");
         assert!(svg.contains("&gt;"), "> must escape to &gt;: {svg:.400}");
-        assert!(svg.contains("&quot;"), "\" must escape to &quot;: {svg:.400}");
-        assert!(svg.contains("&apos;"), "' must escape to &apos;: {svg:.400}");
+        assert!(
+            svg.contains("&quot;"),
+            "\" must escape to &quot;: {svg:.400}"
+        );
+        assert!(
+            svg.contains("&apos;"),
+            "' must escape to &apos;: {svg:.400}"
+        );
     }
 
     #[test]
@@ -806,7 +929,10 @@ mod tests {
         let mut g = bare_graph();
         g.nodes.push(node(1, "café — Ω", "f.rs"));
         let svg = render_svg(&g);
-        assert!(svg.contains("café — Ω"), "unicode chars must survive: {svg:.300}");
+        assert!(
+            svg.contains("café — Ω"),
+            "unicode chars must survive: {svg:.300}"
+        );
     }
 
     #[test]
@@ -847,7 +973,18 @@ mod tests {
     }
 
     #[test]
-    fn t55_sorted_graph_output_is_deterministic() {
+    fn t55_secret_pattern_label_is_redacted_without_topology_change() {
+        let mut g = bare_graph();
+        g.nodes
+            .push(node(77, "api_key_assignment_refused", "privacy.rs"));
+        let svg = render_svg(&g);
+        assert_eq!(count_tag(&svg, "<circle"), 1);
+        assert!(!svg.contains("api_key_assignment_refused"));
+        assert!(svg.contains("[REDACTED:api_key]"));
+    }
+
+    #[test]
+    fn t56_sorted_graph_output_is_deterministic() {
         let build = || {
             let mut g = bare_graph();
             g.nodes.push(node(3, "Gamma", "c.rs"));
@@ -861,6 +998,9 @@ mod tests {
         };
         let out_a = render_svg(&build());
         let out_b = render_svg(&build());
-        assert_eq!(out_a, out_b, "sorted graph must produce identical SVG each time");
+        assert_eq!(
+            out_a, out_b,
+            "sorted graph must produce identical SVG each time"
+        );
     }
 }

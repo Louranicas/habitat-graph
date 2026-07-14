@@ -50,11 +50,28 @@ $BIN --version
 $BIN self-test                                  # tiny in-memory corpus
 $BIN doctor                                     # engine + wiring diagnostics
 $BIN extract crates/habitat-graph-core/src --out graphify-out   # self-host: 139 nodes / 48 edges / 97 communities
+$BIN extract crates/habitat-graph-core/src --out graphify-out --svg --graphml --neo4j --wiki
+$BIN update crates/habitat-graph-core/src --out graphify-out    # cached extraction + public-artifact refresh
 $BIN query Confidence --graph graphify-out/graph.json
 $BIN path Span NodeId   --graph graphify-out/graph.json
 $BIN serve --graph graphify-out/graph.json --addr 127.0.0.1:7878   # HTTP /health /query?q= /path?from=&to=
 $BIN mcp   --graph graphify-out/graph.json      # MCP (JSON-RPC 2.0) over stdio
 ```
+
+All public artifacts use the same deterministic secret redaction before format-specific escaping;
+node IDs, endpoints, counts, and communities are preserved. Raw `update`/`add` state is kept only in
+owner-only private files; a platform that cannot enforce owner-only permissions fails these commands
+closed and removes any unsupported private state. Generated wiki/vault pages and optional exports
+are refreshed only when a hidden ownership manifest proves habitat-graph owns them; explicit
+exporter flags adopt existing optional files, while malformed manifests or unowned collisions fail closed.
+
+Source walks honor repository ignore rules. A scan outside Git honors only ignore files below its
+scan root, so ambient parent/global configuration cannot change a staged corpus.
+
+`add <URL>` requires a build with `--features live`, accepts only SSRF-checked public HTTP(S)
+destinations, caps the body at 10 MiB and the exchange at 30 seconds, and refuses every redirect
+rather than validating only the first hop. It also refuses a malformed or non-file existing graph;
+it never converts parse failure into an empty graph and overwrites prior content.
 
 ### 2a. HTTP service smoke
 ```bash
@@ -137,7 +154,7 @@ echo "gitlab: $(git ls-remote gitlab refs/heads/main | awk '{print $1}')   (== $
 gh repo view Louranicas/habitat-graph --json visibility -q .visibility       # PRIVATE
 atuin kv get port.claim.habitat-graph                                         # 8202
 curl -s -o /dev/null -w '%{http_code}\n' -m 1 http://localhost:8202/health    # 000 = free (reservation)
-# + re-run the 4-stage gate (§1) — 1225 passed / 0 failed
+# + re-run the 4-stage gate (§1) — current count is recorded in EVIDENCE.md
 ```
 
 ## 5. Remaining one-way doors — Luke @ 0.A only (NOT part of the current deployment)

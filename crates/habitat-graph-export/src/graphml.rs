@@ -2,14 +2,15 @@
 //!
 //! [`render_graphml`] produces a standards-conformant `GraphML` document with `<key>` declarations
 //! for node and edge attributes, one `<node>` per graph node, and one `<edge>` per graph edge.
-//! Every attacker-influenced string (label, `source_file`, relation) is routed through
-//! [`crate::escape::xml_escape`] before embedding in the XML (STRIDE-T injection guard).
+//! Every attacker-influenced string (label, `source_file`, relation) is redacted through the shared
+//! public-output policy, then routed through [`crate::escape::xml_escape`] before embedding in the
+//! XML (STRIDE-T injection guard).
 
 use std::fmt::Write as FmtWrite;
 
 use habitat_graph_core::{sanitize_label, Graph};
 
-use crate::escape::xml_escape;
+use crate::escape::{project_public_edges, redact_public_text, xml_escape};
 
 /// `GraphML` attribute key identifier for a node's `label` field.
 const KEY_LABEL: &str = "d_label";
@@ -50,15 +51,17 @@ const KEY_CONFIDENCE: &str = "d_confidence";
 ///
 /// ## Determinism (R4)
 ///
-/// Output is byte-identical across runs: nodes and edges are emitted in the order they appear in
-/// `graph.nodes` / `graph.edges`. Call [`Graph::sorted`](habitat_graph_core::Graph::sorted) first
-/// to obtain the canonical ascending-id ordering required by the git merge driver.
+/// Output is byte-identical across runs: nodes follow `graph.nodes`, while edges are ordered by
+/// public projected fields. Call [`Graph::sorted`](habitat_graph_core::Graph::sorted) first to
+/// obtain canonical node and community ordering required by the git merge driver.
 ///
 /// ## Security (STRIDE-T)
 ///
-/// Every attacker-influenced string is passed through [`xml_escape`](crate::escape::xml_escape)
-/// before embedding. Node labels and edge relations are additionally preprocessed with
-/// [`sanitize_label`](habitat_graph_core::sanitize_label), which strips C0 control characters and
+/// Every attacker-influenced string is passed through [`xml_escape`]
+/// before embedding. Labels, source paths, and relations first pass through deterministic secret
+/// redaction; that projection leaves node IDs, edge endpoints, and graph cardinality unchanged.
+/// Node labels and edge relations are additionally preprocessed with
+/// [`sanitize_label`], which strips C0 control characters and
 /// caps length at 256 code points. A label like `</node><evil>` or a path containing `&` cannot
 /// break out of its enclosing XML element.
 ///
@@ -74,12 +77,8 @@ pub fn render_graphml(graph: &Graph) -> String {
     // Root <graphml> element with canonical namespace + schema-location attributes.
     out.push_str("<graphml xmlns=\"http://graphml.graphdrawing.org/xmlns\"\n");
     out.push_str("         xmlns:xsi=\"http://www.w3.org/2001/XMLSchema-instance\"\n");
-    out.push_str(
-        "         xsi:schemaLocation=\"http://graphml.graphdrawing.org/xmlns\n",
-    );
-    out.push_str(
-        "           http://graphml.graphdrawing.org/xmlns/1.0/graphml.xsd\">\n",
-    );
+    out.push_str("         xsi:schemaLocation=\"http://graphml.graphdrawing.org/xmlns\n");
+    out.push_str("           http://graphml.graphdrawing.org/xmlns/1.0/graphml.xsd\">\n");
 
     // Key declarations — node attributes (label, source_file).
     let _ = writeln!(
@@ -108,8 +107,10 @@ pub fn render_graphml(graph: &Graph) -> String {
     for node in &graph.nodes {
         let id = node.id.get();
         // sanitize_label strips C0 controls / caps length; xml_escape escapes metacharacters.
-        let label = xml_escape(&sanitize_label(&node.label));
-        let source_file = xml_escape(&node.source_file);
+        let redacted_label = redact_public_text(&node.label);
+        let redacted_source_file = redact_public_text(&node.source_file);
+        let label = xml_escape(&sanitize_label(&redacted_label));
+        let source_file = xml_escape(&redacted_source_file);
 
         let _ = writeln!(out, "    <node id=\"n{id}\">");
         let _ = writeln!(out, "      <data key=\"{KEY_LABEL}\">{label}</data>");
@@ -120,11 +121,12 @@ pub fn render_graphml(graph: &Graph) -> String {
         out.push_str("    </node>\n");
     }
 
-    // One <edge> element per graph edge; deterministic (follows graph.edges order).
-    for edge in &graph.edges {
+    // One <edge> element per graph edge.
+    for projected in project_public_edges(graph) {
+        let edge = projected.edge;
         let src = edge.source.get();
         let tgt = edge.target.get();
-        let relation = xml_escape(&sanitize_label(&edge.relation));
+        let relation = xml_escape(&sanitize_label(&projected.relation));
         // Confidence values are always ASCII uppercase identifiers; xml_escape is a no-op here
         // but is applied for belt-and-suspenders STRIDE-T compliance.
         let confidence = xml_escape(edge.confidence.as_str());
@@ -374,10 +376,7 @@ mod tests {
         let mut g = Graph::new();
         g.nodes.push(node(42, "Thing", "t.rs"));
         let xml = render_graphml(&g);
-        assert!(
-            xml.contains("id=\"n42\""),
-            "node id=\"n42\" missing: {xml}"
-        );
+        assert!(xml.contains("id=\"n42\""), "node id=\"n42\" missing: {xml}");
     }
 
     // ── 19: node d_label data element present ───────────────────────────────
@@ -632,7 +631,8 @@ mod tests {
     #[test]
     fn script_tag_injection_in_label() {
         let mut g = Graph::new();
-        g.nodes.push(node(1, "</text><script>alert(1)</script>", "f.rs"));
+        g.nodes
+            .push(node(1, "</text><script>alert(1)</script>", "f.rs"));
         let xml = render_graphml(&g);
         assert!(
             !xml.contains("</text>"),
@@ -723,12 +723,8 @@ mod tests {
     #[test]
     fn xml_tag_injection_in_relation_neutralised() {
         let mut g = Graph::new();
-        g.edges.push(edge(
-            1,
-            2,
-            "</data><inject/>",
-            Confidence::Extracted,
-        ));
+        g.edges
+            .push(edge(1, 2, "</data><inject/>", Confidence::Extracted));
         let xml = render_graphml(&g);
         assert!(
             !xml.contains("</data><inject/>"),
@@ -752,7 +748,10 @@ mod tests {
         assert!(xml.contains("&amp;"), "& must be escaped as &amp;: {xml}");
         assert!(xml.contains("&lt;"), "< must be escaped as &lt;: {xml}");
         assert!(xml.contains("&gt;"), "> must be escaped as &gt;: {xml}");
-        assert!(xml.contains("&quot;"), "\" must be escaped as &quot;: {xml}");
+        assert!(
+            xml.contains("&quot;"),
+            "\" must be escaped as &quot;: {xml}"
+        );
         assert!(xml.contains("&apos;"), "' must be escaped as &apos;: {xml}");
         // The raw unescaped label must not appear as a contiguous substring.
         assert!(
@@ -857,7 +856,10 @@ mod tests {
     fn deterministic_empty_graph() {
         let out1 = render_graphml(&Graph::new());
         let out2 = render_graphml(&Graph::new());
-        assert_eq!(out1, out2, "render_graphml must be deterministic on empty graph");
+        assert_eq!(
+            out1, out2,
+            "render_graphml must be deterministic on empty graph"
+        );
     }
 
     // ── 50: deterministic — single-node graph ────────────────────────────────
@@ -1061,7 +1063,10 @@ mod tests {
         let pos1 = xml.find("id=\"n1\"").expect("n1 missing");
         let pos2 = xml.find("id=\"n2\"").expect("n2 missing");
         let pos3 = xml.find("id=\"n3\"").expect("n3 missing");
-        assert!(pos1 < pos2 && pos2 < pos3, "nodes out of sort order in output");
+        assert!(
+            pos1 < pos2 && pos2 < pos3,
+            "nodes out of sort order in output"
+        );
     }
 
     // ── 63: graph id attribute is "G" ────────────────────────────────────────
@@ -1096,12 +1101,33 @@ mod tests {
     // ── 65: node data elements are children of their <node> ──────────────────
 
     #[test]
+    fn secret_patterns_are_redacted_before_xml_escaping() {
+        let mut g = Graph::new();
+        g.nodes
+            .push(node(1, "api_key_assignment_refused", "src/api_key.rs"));
+        g.edges.push(edge(
+            1,
+            1,
+            "Authorization: Bearer token",
+            Confidence::Extracted,
+        ));
+        let xml = render_graphml(&g);
+        assert!(!xml.contains("api_key_assignment_refused"));
+        assert!(!xml.contains("src/api_key.rs"));
+        assert!(!xml.contains("Authorization: Bearer token"));
+        assert!(xml.contains("[REDACTED:api_key]"));
+        assert!(xml.contains("[REDACTED:bearer_token]"));
+    }
+
+    #[test]
     fn node_data_appears_between_node_tags() {
         let mut g = Graph::new();
         g.nodes.push(node(1, "MyNode", "src.rs"));
         let xml = render_graphml(&g);
         // Find the <node id="n1"> ... </node> slice.
-        let node_open = xml.find("<node id=\"n1\">").expect("<node id=\"n1\"> missing");
+        let node_open = xml
+            .find("<node id=\"n1\">")
+            .expect("<node id=\"n1\"> missing");
         let node_close = xml[node_open..].find("</node>").expect("</node> missing");
         let node_slice = &xml[node_open..node_open + node_close];
         assert!(

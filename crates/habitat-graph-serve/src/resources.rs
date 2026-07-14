@@ -117,8 +117,8 @@ fn render_schema() -> Result<Value, String> {
         "schema_version": SCHEMA_VERSION,
         "envelope": "NetworkX node-link: directed,multigraph,graph,nodes,links"
     });
-    let text = serde_json::to_string(&payload)
-        .map_err(|e| format!("schema serialisation failed: {e}"))?;
+    let text =
+        serde_json::to_string(&payload).map_err(|e| format!("schema serialisation failed: {e}"))?;
     Ok(contents(SCHEMA_URI, "application/json", &text))
 }
 
@@ -149,7 +149,8 @@ fn render_report(graph: &Graph) -> Value {
             let _ = writeln!(
                 buf,
                 "- `{safe_label}` (`{}:{}`)",
-                display_safe(&node.source_file), node.source_location.start_line
+                display_safe(&node.source_file),
+                node.source_location.start_line
             );
         }
         if n > REPORT_SAMPLE_SIZE {
@@ -186,7 +187,8 @@ fn render_node(graph: &Graph, label: &str) -> Result<Value, String> {
         let _ = writeln!(
             buf,
             "- **File:** `{}:{}`",
-            display_safe(&node.source_file), node.source_location.start_line
+            display_safe(&node.source_file),
+            node.source_location.start_line
         );
 
         // Outbound: source == node.id.  Sort by (target, relation) for R4 determinism.
@@ -195,9 +197,8 @@ fn render_node(graph: &Graph, label: &str) -> Result<Value, String> {
             .iter()
             .filter(|edge| edge.source == node.id)
             .collect();
-        outbound.sort_by(|a, b| {
-            (a.target, a.relation.as_str()).cmp(&(b.target, b.relation.as_str()))
-        });
+        outbound
+            .sort_by(|a, b| (a.target, a.relation.as_str()).cmp(&(b.target, b.relation.as_str())));
 
         if outbound.is_empty() {
             let _ = writeln!(buf, "- **Outbound edges:** none");
@@ -219,9 +220,8 @@ fn render_node(graph: &Graph, label: &str) -> Result<Value, String> {
             .iter()
             .filter(|edge| edge.target == node.id)
             .collect();
-        inbound.sort_by(|a, b| {
-            (a.source, a.relation.as_str()).cmp(&(b.source, b.relation.as_str()))
-        });
+        inbound
+            .sort_by(|a, b| (a.source, a.relation.as_str()).cmp(&(b.source, b.relation.as_str())));
 
         if inbound.is_empty() {
             let _ = writeln!(buf, "- **Inbound edges:** none");
@@ -248,9 +248,10 @@ fn render_node(graph: &Graph, label: &str) -> Result<Value, String> {
 /// members in ascending [`NodeId`] order (R4 determinism). All labels pass through
 /// [`display_safe`].
 fn render_community(graph: &Graph, id_str: &str) -> Result<Value, String> {
-    let raw: u32 = id_str.trim().parse().map_err(|_| {
-        format!("community id must be a non-negative integer, got: {id_str:?}")
-    })?;
+    let raw: u32 = id_str
+        .trim()
+        .parse()
+        .map_err(|_| format!("community id must be a non-negative integer, got: {id_str:?}"))?;
     let cid = CommunityId::new(raw);
     let community = graph
         .communities
@@ -303,7 +304,8 @@ fn contents(uri: &str, mime: &str, text: &str) -> Value {
 #[cfg(test)]
 mod tests {
     use habitat_graph_core::{
-        Community, CommunityId, Confidence, Edge, Graph, Manifest, Node, NodeId, Span, SCHEMA_VERSION,
+        Community, CommunityId, Confidence, Edge, Graph, Manifest, Node, NodeId, Span,
+        SCHEMA_VERSION,
     };
     use serde_json::Value;
 
@@ -344,6 +346,7 @@ mod tests {
         let mut g = Graph {
             schema: SCHEMA_VERSION.to_owned(),
             nodes: vec![node(1, "Alpha"), node(2, "Beta"), node(3, "Gamma")],
+            node_content_ids: std::collections::BTreeMap::default(),
             edges: vec![edge(1, 2, "calls"), edge(2, 3, "imports")],
             communities: Vec::new(),
             manifest: Manifest::default(),
@@ -357,7 +360,9 @@ mod tests {
     }
 
     fn mime_of(v: &Value) -> &str {
-        v["contents"][0]["mimeType"].as_str().expect("mimeType field")
+        v["contents"][0]["mimeType"]
+            .as_str()
+            .expect("mimeType field")
     }
 
     fn uri_of(v: &Value) -> &str {
@@ -467,7 +472,12 @@ mod tests {
             .as_array()
             .unwrap()
             .iter()
-            .find(|r| r["uriTemplate"].as_str().unwrap_or("").contains("community/"))
+            .find(|r| {
+                r["uriTemplate"]
+                    .as_str()
+                    .unwrap_or("")
+                    .contains("community/")
+            })
             .expect("community template");
         assert_eq!(tpl["mimeType"], "text/markdown");
     }
@@ -529,7 +539,10 @@ mod tests {
     #[test]
     fn read_schema_text_contains_schema_version() {
         let v = resources_read(&Graph::new(), "habitat-graph://schema").unwrap();
-        assert!(text_of(&v).contains(SCHEMA_VERSION), "SCHEMA_VERSION missing");
+        assert!(
+            text_of(&v).contains(SCHEMA_VERSION),
+            "SCHEMA_VERSION missing"
+        );
         assert!(text_of(&v).contains("habitat-graph.graph"));
     }
 
@@ -577,21 +590,30 @@ mod tests {
     fn read_report_includes_node_metric() {
         let v = resources_read(&sample_graph(), "habitat-graph://report").unwrap();
         let text = text_of(&v);
-        assert!(text.contains("| Nodes | 3 |"), "node count row missing: {text}");
+        assert!(
+            text.contains("| Nodes | 3 |"),
+            "node count row missing: {text}"
+        );
     }
 
     #[test]
     fn read_report_includes_edge_metric() {
         let v = resources_read(&sample_graph(), "habitat-graph://report").unwrap();
         let text = text_of(&v);
-        assert!(text.contains("| Edges | 2 |"), "edge count row missing: {text}");
+        assert!(
+            text.contains("| Edges | 2 |"),
+            "edge count row missing: {text}"
+        );
     }
 
     #[test]
     fn read_report_includes_community_metric() {
         let v = resources_read(&sample_graph(), "habitat-graph://report").unwrap();
         let text = text_of(&v);
-        assert!(text.contains("| Communities | 1 |"), "community row missing: {text}");
+        assert!(
+            text.contains("| Communities | 1 |"),
+            "community row missing: {text}"
+        );
     }
 
     #[test]
@@ -624,7 +646,10 @@ mod tests {
         let mut g = Graph::new();
         g.nodes.push(node(1, "label\u{001B}escape"));
         let v = resources_read(&g, "habitat-graph://report").unwrap();
-        assert!(!text_of(&v).contains('\u{001B}'), "raw ESC leaked into report");
+        assert!(
+            !text_of(&v).contains('\u{001B}'),
+            "raw ESC leaked into report"
+        );
     }
 
     #[test]
@@ -651,14 +676,21 @@ mod tests {
         }
         let v = resources_read(&g, "habitat-graph://report").unwrap();
         // Exactly REPORT_SAMPLE_SIZE nodes — no "more" note should appear.
-        assert!(!text_of(&v).contains("more node"), "spurious truncation note");
+        assert!(
+            !text_of(&v).contains("more node"),
+            "spurious truncation note"
+        );
     }
 
     #[test]
     fn read_report_deterministic() {
         let g = sample_graph();
-        let a = resources_read(&g, "habitat-graph://report").unwrap().to_string();
-        let b = resources_read(&g, "habitat-graph://report").unwrap().to_string();
+        let a = resources_read(&g, "habitat-graph://report")
+            .unwrap()
+            .to_string();
+        let b = resources_read(&g, "habitat-graph://report")
+            .unwrap()
+            .to_string();
         assert_eq!(a, b);
     }
 
@@ -715,12 +747,24 @@ mod tests {
         });
         let node_v = resources_read(&g, "habitat-graph://node/Alpha").unwrap();
         let node_text = text_of(&node_v);
-        assert!(!node_text.contains('\u{202e}'), "bidi must be sanitised in node view");
-        assert!(!node_text.contains('\u{1b}'), "ESC must be sanitised in node view");
+        assert!(
+            !node_text.contains('\u{202e}'),
+            "bidi must be sanitised in node view"
+        );
+        assert!(
+            !node_text.contains('\u{1b}'),
+            "ESC must be sanitised in node view"
+        );
         let report_v = resources_read(&g, "habitat-graph://report").unwrap();
         let report_text = text_of(&report_v);
-        assert!(!report_text.contains('\u{202e}'), "bidi must be sanitised in report");
-        assert!(!report_text.contains('\u{1b}'), "ESC must be sanitised in report");
+        assert!(
+            !report_text.contains('\u{202e}'),
+            "bidi must be sanitised in report"
+        );
+        assert!(
+            !report_text.contains('\u{1b}'),
+            "ESC must be sanitised in report"
+        );
     }
 
     #[test]
@@ -746,7 +790,10 @@ mod tests {
         let mut g = Graph::new();
         g.nodes.push(node(1, "Isolated"));
         let v = resources_read(&g, "habitat-graph://node/Isolated").unwrap();
-        assert!(text_of(&v).contains("none"), "none message missing for no edges");
+        assert!(
+            text_of(&v).contains("none"),
+            "none message missing for no edges"
+        );
     }
 
     #[test]
@@ -788,7 +835,10 @@ mod tests {
         g.nodes.push(node(2, "ev\u{202E}il"));
         g.edges.push(edge(1, 2, "calls"));
         let v = resources_read(&g, "habitat-graph://node/Source").unwrap();
-        assert!(!text_of(&v).contains('\u{202E}'), "raw bidi in neighbour label");
+        assert!(
+            !text_of(&v).contains('\u{202E}'),
+            "raw bidi in neighbour label"
+        );
     }
 
     #[test]
@@ -850,7 +900,10 @@ mod tests {
         g.nodes.push(node(1, "ev\u{202E}il"));
         g.communities.push(community(0, "C", vec![1]));
         let v = resources_read(&g, "habitat-graph://community/0").unwrap();
-        assert!(!text_of(&v).contains('\u{202E}'), "bidi leaked into community member");
+        assert!(
+            !text_of(&v).contains('\u{202E}'),
+            "bidi leaked into community member"
+        );
     }
 
     #[test]
@@ -858,7 +911,10 @@ mod tests {
         let mut g = Graph::new();
         g.communities.push(community(0, "C\u{202E}luster", vec![]));
         let v = resources_read(&g, "habitat-graph://community/0").unwrap();
-        assert!(!text_of(&v).contains('\u{202E}'), "bidi leaked into community label");
+        assert!(
+            !text_of(&v).contains('\u{202E}'),
+            "bidi leaked into community label"
+        );
     }
 
     #[test]
@@ -867,7 +923,10 @@ mod tests {
         g.communities.push(community(0, "Empty", vec![]));
         let v = resources_read(&g, "habitat-graph://community/0").unwrap();
         // Expect "_No members._" in the output.
-        assert!(text_of(&v).contains("No members"), "empty-members message missing");
+        assert!(
+            text_of(&v).contains("No members"),
+            "empty-members message missing"
+        );
     }
 
     #[test]
@@ -909,7 +968,10 @@ mod tests {
         let alpha_pos = text.find("Alpha").unwrap_or(usize::MAX);
         let beta_pos = text.find("Beta").unwrap_or(usize::MAX);
         let gamma_pos = text.find("Gamma").unwrap_or(usize::MAX);
-        assert!(alpha_pos < beta_pos && beta_pos < gamma_pos, "members not in NodeId order");
+        assert!(
+            alpha_pos < beta_pos && beta_pos < gamma_pos,
+            "members not in NodeId order"
+        );
     }
 
     #[test]
@@ -919,7 +981,10 @@ mod tests {
         g.communities.push(community(0, "C", vec![42]));
         let v = resources_read(&g, "habitat-graph://community/0").unwrap();
         // Must render a placeholder rather than panic.
-        assert!(text_of(&v).contains("42"), "unknown node id not represented");
+        assert!(
+            text_of(&v).contains("42"),
+            "unknown node id not represented"
+        );
     }
 
     // ── resources_read: unknown / invalid URIs ────────────────────────────────
@@ -997,16 +1062,24 @@ mod tests {
     #[test]
     fn read_node_deterministic_across_calls() {
         let g = sample_graph();
-        let a = resources_read(&g, "habitat-graph://node/Beta").unwrap().to_string();
-        let b = resources_read(&g, "habitat-graph://node/Beta").unwrap().to_string();
+        let a = resources_read(&g, "habitat-graph://node/Beta")
+            .unwrap()
+            .to_string();
+        let b = resources_read(&g, "habitat-graph://node/Beta")
+            .unwrap()
+            .to_string();
         assert_eq!(a, b);
     }
 
     #[test]
     fn read_community_deterministic_across_calls() {
         let g = sample_graph();
-        let a = resources_read(&g, "habitat-graph://community/0").unwrap().to_string();
-        let b = resources_read(&g, "habitat-graph://community/0").unwrap().to_string();
+        let a = resources_read(&g, "habitat-graph://community/0")
+            .unwrap()
+            .to_string();
+        let b = resources_read(&g, "habitat-graph://community/0")
+            .unwrap()
+            .to_string();
         assert_eq!(a, b);
     }
 }

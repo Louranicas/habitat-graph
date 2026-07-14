@@ -48,9 +48,10 @@ pub fn estimate_tokens(text: &str) -> usize {
 /// The node-link estimate falls back to `0` if serialization fails (it cannot in practice for a
 /// well-formed [`Graph`]); the report estimate is always available.
 ///
-/// Both estimates are deterministic: identical graphs produce identical [`TokenBenchmark`] values
-/// (R4 invariant). Call [`Graph::sorted`](habitat_graph_core::Graph::sorted) before this function
-/// to obtain the canonical ordering.
+/// Both estimates measure the public redacted projections, not the raw internal strings, and are
+/// deterministic: identical graphs produce identical [`TokenBenchmark`] values (R4 invariant).
+/// Call [`Graph::sorted`](habitat_graph_core::Graph::sorted) before this function to obtain the
+/// canonical ordering.
 ///
 /// # Examples
 ///
@@ -71,9 +72,7 @@ pub fn token_benchmark(graph: &Graph) -> TokenBenchmark {
 
 #[cfg(test)]
 mod tests {
-    use habitat_graph_core::{
-        Community, CommunityId, Confidence, Edge, Graph, Node, NodeId, Span,
-    };
+    use habitat_graph_core::{Community, CommunityId, Confidence, Edge, Graph, Node, NodeId, Span};
 
     use super::{estimate_tokens, token_benchmark, TokenBenchmark};
 
@@ -521,7 +520,10 @@ mod tests {
             "single-digit community ID should produce smaller or equal node_link: {before} → {after}"
         );
         // The value must remain positive regardless.
-        assert!(after > 0, "node_link must stay positive after embedding community: {after}");
+        assert!(
+            after > 0,
+            "node_link must stay positive after embedding community: {after}"
+        );
     }
 
     #[test]
@@ -610,44 +612,80 @@ mod tests {
     fn token_benchmark_struct_is_copy() {
         let tb = token_benchmark(&Graph::new());
         let tb2 = tb; // Copy semantics: tb remains accessible.
-        assert_eq!(tb.node_link, tb2.node_link, "Copy: original field accessible after copy");
-        assert_eq!(tb.report, tb2.report, "Copy: original field accessible after copy");
+        assert_eq!(
+            tb.node_link, tb2.node_link,
+            "Copy: original field accessible after copy"
+        );
+        assert_eq!(
+            tb.report, tb2.report,
+            "Copy: original field accessible after copy"
+        );
     }
 
     #[test]
     fn token_benchmark_eq_when_fields_equal() {
-        let tb1 = TokenBenchmark { node_link: 10, report: 5 };
-        let tb2 = TokenBenchmark { node_link: 10, report: 5 };
+        let tb1 = TokenBenchmark {
+            node_link: 10,
+            report: 5,
+        };
+        let tb2 = TokenBenchmark {
+            node_link: 10,
+            report: 5,
+        };
         assert_eq!(tb1, tb2);
     }
 
     #[test]
     fn token_benchmark_ne_when_node_link_differs() {
-        let tb1 = TokenBenchmark { node_link: 10, report: 5 };
-        let tb2 = TokenBenchmark { node_link: 11, report: 5 };
+        let tb1 = TokenBenchmark {
+            node_link: 10,
+            report: 5,
+        };
+        let tb2 = TokenBenchmark {
+            node_link: 11,
+            report: 5,
+        };
         assert_ne!(tb1, tb2);
     }
 
     #[test]
     fn token_benchmark_ne_when_report_differs() {
-        let tb1 = TokenBenchmark { node_link: 10, report: 5 };
-        let tb2 = TokenBenchmark { node_link: 10, report: 6 };
+        let tb1 = TokenBenchmark {
+            node_link: 10,
+            report: 5,
+        };
+        let tb2 = TokenBenchmark {
+            node_link: 10,
+            report: 6,
+        };
         assert_ne!(tb1, tb2);
     }
 
     #[test]
     fn token_benchmark_debug_contains_both_field_names() {
-        let tb = TokenBenchmark { node_link: 7, report: 3 };
+        let tb = TokenBenchmark {
+            node_link: 7,
+            report: 3,
+        };
         let dbg = format!("{tb:?}");
-        assert!(dbg.contains("node_link"), "Debug output must mention node_link: {dbg}");
-        assert!(dbg.contains("report"), "Debug output must mention report: {dbg}");
+        assert!(
+            dbg.contains("node_link"),
+            "Debug output must mention node_link: {dbg}"
+        );
+        assert!(
+            dbg.contains("report"),
+            "Debug output must mention report: {dbg}"
+        );
     }
 
     #[test]
     fn token_benchmark_zero_fallback_is_valid_construct() {
         // Documents the infallible-fallback path: node_link=0 is the degrade when serialization
         // fails (unreachable in practice for well-formed graphs, but the API allows it).
-        let tb = TokenBenchmark { node_link: 0, report: 0 };
+        let tb = TokenBenchmark {
+            node_link: 0,
+            report: 0,
+        };
         assert_eq!(tb.node_link, 0);
         assert_eq!(tb.report, 0);
     }
@@ -664,15 +702,22 @@ mod tests {
         g.nodes.push(make_node(1, "evil\u{202E}label"));
         g.edges.push(make_edge(1, 1, "calls"));
         let tb = token_benchmark(&g);
-        assert!(tb.node_link > 0, "node_link must be > 0 even with dangerous label");
-        assert!(tb.report > 0, "report must be > 0 even with dangerous label");
+        assert!(
+            tb.node_link > 0,
+            "node_link must be > 0 even with dangerous label"
+        );
+        assert!(
+            tb.report > 0,
+            "report must be > 0 even with dangerous label"
+        );
     }
 
     #[test]
     fn large_graph_both_fields_are_positive() {
         let mut g = Graph::new();
         for i in 0..100_u32 {
-            g.nodes.push(make_node(i, &format!("function_{i}_implementation")));
+            g.nodes
+                .push(make_node(i, &format!("function_{i}_implementation")));
         }
         for i in 0..99_u32 {
             g.edges.push(make_edge(i, i + 1, "calls"));
@@ -682,8 +727,14 @@ mod tests {
             g.communities.push(make_community(c, &members));
         }
         let tb = token_benchmark(&g);
-        assert!(tb.node_link > 0, "node_link must be positive for a 100-node graph");
-        assert!(tb.report > 0, "report must be positive for a 100-node graph");
+        assert!(
+            tb.node_link > 0,
+            "node_link must be positive for a 100-node graph"
+        );
+        assert!(
+            tb.report > 0,
+            "report must be positive for a 100-node graph"
+        );
     }
 
     #[test]

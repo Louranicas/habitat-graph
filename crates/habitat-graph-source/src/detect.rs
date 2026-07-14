@@ -2,9 +2,12 @@
 //!
 //! Entry point: [`detect`].
 
+use std::io::{BufRead as _, Read as _};
 use std::path::{Path, PathBuf};
 
 use habitat_graph_core::{GraphError, Result};
+
+const MAX_GIT_MARKER_LINE_BYTES: u64 = 4096;
 
 /// Collects files under `root` whose extension is in `extensions` (case-insensitive), honoring
 /// `.gitignore`.  Results are returned in a deterministic (sorted) order.
@@ -13,21 +16,70 @@ use habitat_graph_core::{GraphError, Result};
 /// Matching is case-insensitive: a file with extension `".RS"` matches the key `"rs"`, and a key
 /// of `"MD"` matches a file named `"readme.md"`.
 ///
-/// The walk is performed by [`ignore::WalkBuilder`], so all standard gitignore rules — including
-/// nested `.gitignore` files, `.ignore` files, and `.git/info/exclude` — are honoured
-/// automatically.
+/// Roots within a Git worktree use the standard gitignore sources, including nested `.gitignore`
+/// files, `.ignore` files, global excludes, and `.git/info/exclude`. Roots without Git metadata in
+/// their ancestor chain honor only ignore files within the scan root, so staged trees do not depend
+/// on ambient parent or user configuration.
 ///
 /// # Errors
 ///
 /// Returns [`GraphError::Io`] wrapping the underlying walk diagnostic if `root` cannot be
-/// traversed (e.g. the path does not exist or permission is denied).
+/// traversed (e.g. the path does not exist or permission is denied), and [`GraphError::Guard`]
+/// when an ancestor `.git` worktree marker file is invalid or stale — the scan fails closed, like
+/// Git, rather than adopting an outer repository's ignore context or non-git semantics.
 pub fn detect(root: &Path, extensions: &[&str]) -> Result<Vec<PathBuf>> {
+    let global_exclude = ignore::gitignore::gitconfig_excludes_path();
+    detect_with_global_exclude(root, extensions, global_exclude.as_deref())
+}
+
+fn detect_with_global_exclude(
+    root: &Path,
+    extensions: &[&str],
+    global_exclude: Option<&Path>,
+) -> Result<Vec<PathBuf>> {
     // Lower-case every caller-supplied extension key once, outside the per-entry loop.
     let lowered: Vec<String> = extensions.iter().map(|e| e.to_lowercase()).collect();
+    let canonical_root = std::fs::canonicalize(root).map_err(|error| {
+        GraphError::Io(format!(
+            "resolve detection root {}: {error}",
+            root.display()
+        ))
+    })?;
 
     let mut paths: Vec<PathBuf> = Vec::new();
+    // Keep traversal and explicit Git matchers in the same canonical namespace. Otherwise an
+    // anchored `info/exclude` rule can miss a root spelled with `..` or through a symlink.
+    let mut walker = ignore::WalkBuilder::new(&canonical_root);
+    match git_ancestor(&canonical_root)? {
+        None => {
+            walker
+                .require_git(false)
+                .parents(false)
+                .git_global(false)
+                .git_exclude(false);
+        }
+        Some(metadata) => {
+            walker.current_dir(metadata.root);
+            if let Some(exclude) = metadata.manual_exclude {
+                walker.git_global(false).git_exclude(false);
+                for (context, path) in [
+                    ("global Git exclude", global_exclude),
+                    ("Git exclude", Some(exclude.as_path())),
+                ] {
+                    if let Some(path) = path.filter(|path| path.is_file()) {
+                        if let Some(error) = walker.add_ignore(path) {
+                            return Err(GraphError::Io(format!(
+                                "load {context} {}: {error}",
+                                path.display()
+                            )));
+                        }
+                    }
+                }
+            }
+        }
+    }
 
-    for entry in ignore::WalkBuilder::new(root).build() {
+    for entry in walker.build() {
         let entry = entry.map_err(|e| GraphError::Io(e.to_string()))?;
 
         // Skip directories, symlinks-to-directories, and special files.
@@ -36,7 +88,13 @@ pub fn detect(root: &Path, extensions: &[&str]) -> Result<Vec<PathBuf>> {
             if let Some(ext) = path.extension() {
                 let ext_lower = ext.to_string_lossy().to_lowercase();
                 if lowered.iter().any(|key| key == &ext_lower) {
-                    paths.push(path.to_path_buf());
+                    let relative = path.strip_prefix(&canonical_root).map_err(|error| {
+                        GraphError::Io(format!(
+                            "detected path escaped canonical root {}: {error}",
+                            canonical_root.display()
+                        ))
+                    })?;
+                    paths.push(root.join(relative));
                 }
             }
         }
@@ -44,6 +102,133 @@ pub fn detect(root: &Path, extensions: &[&str]) -> Result<Vec<PathBuf>> {
 
     paths.sort();
     Ok(paths)
+}
+
+struct GitMetadata {
+    root: PathBuf,
+    manual_exclude: Option<PathBuf>,
+}
+
+fn git_ancestor(root: &Path) -> Result<Option<GitMetadata>> {
+    for ancestor in root.ancestors() {
+        let path = ancestor.join(".git");
+        if path.is_dir() {
+            if path.join("HEAD").is_file() {
+                return Ok(Some(GitMetadata {
+                    root: path.parent().unwrap_or_else(|| Path::new("")).to_path_buf(),
+                    manual_exclude: None,
+                }));
+            }
+        } else if path.is_file() {
+            // A `.git` marker file names this tree a linked worktree. If it cannot be resolved
+            // to live Git metadata the scan fails closed, like Git itself: silently continuing
+            // would demote the tree to non-git ignore semantics or rebind it to an enclosing
+            // repository's excludes, sweeping in files the worktree's own context ignored.
+            return git_worktree_metadata(&path).map(Some);
+        }
+    }
+    Ok(None)
+}
+
+fn git_worktree_metadata(path: &Path) -> Result<GitMetadata> {
+    let marker = gitdir_marker(path).ok_or_else(|| {
+        GraphError::Guard(format!(
+            "invalid Git worktree marker {}: refusing to scan without its ignore context",
+            path.display()
+        ))
+    })?;
+    let gitdir = if marker.is_absolute() {
+        marker
+    } else {
+        path.parent().unwrap_or_else(|| Path::new("")).join(marker)
+    };
+    if !gitdir.is_dir() || !gitdir.join("HEAD").is_file() {
+        return Err(GraphError::Guard(format!(
+            "stale Git worktree marker {}: gitdir {} is not a repository; \
+             refusing to scan without its ignore context",
+            path.display(),
+            gitdir.display()
+        )));
+    }
+    let common_dir = git_common_dir(&gitdir).ok_or_else(|| {
+        GraphError::Guard(format!(
+            "invalid Git worktree marker {}: unreadable commondir; \
+             refusing to scan without its ignore context",
+            path.display()
+        ))
+    })?;
+    Ok(GitMetadata {
+        root: path.parent().unwrap_or_else(|| Path::new("")).to_path_buf(),
+        manual_exclude: Some(common_dir.join("info/exclude")),
+    })
+}
+
+fn git_common_dir(gitdir: &Path) -> Option<PathBuf> {
+    let marker = gitdir.join("commondir");
+    if !marker.exists() {
+        return Some(gitdir.to_path_buf());
+    }
+    let common = native_path_line(&marker)?;
+    Some(if common.is_absolute() {
+        common
+    } else {
+        gitdir.join(common)
+    })
+}
+
+fn gitdir_marker(path: &Path) -> Option<PathBuf> {
+    let line = bounded_first_line(path)?;
+    let gitdir = trim_ascii_whitespace(line.strip_prefix(b"gitdir:")?);
+    if gitdir.is_empty() {
+        return None;
+    }
+    native_path_from_bytes(gitdir)
+}
+
+fn native_path_line(path: &Path) -> Option<PathBuf> {
+    let line = bounded_first_line(path)?;
+    if line.is_empty() {
+        None
+    } else {
+        native_path_from_bytes(&line)
+    }
+}
+
+fn bounded_first_line(path: &Path) -> Option<Vec<u8>> {
+    let file = std::fs::File::open(path).ok()?;
+    let mut line = Vec::new();
+    let mut reader = std::io::BufReader::new(file).take(MAX_GIT_MARKER_LINE_BYTES + 1);
+    reader.read_until(b'\n', &mut line).ok()?;
+    if line.is_empty() || line.len() as u64 > MAX_GIT_MARKER_LINE_BYTES {
+        return None;
+    }
+    Some(trim_ascii_whitespace(&line).to_vec())
+}
+
+fn trim_ascii_whitespace(mut bytes: &[u8]) -> &[u8] {
+    while bytes.first().is_some_and(u8::is_ascii_whitespace) {
+        bytes = &bytes[1..];
+    }
+    while bytes.last().is_some_and(u8::is_ascii_whitespace) {
+        bytes = &bytes[..bytes.len() - 1];
+    }
+    bytes
+}
+
+#[cfg(unix)]
+fn native_path_from_bytes(bytes: &[u8]) -> Option<PathBuf> {
+    use std::os::unix::ffi::OsStringExt as _;
+
+    if bytes.contains(&0) {
+        None
+    } else {
+        Some(std::ffi::OsString::from_vec(bytes.to_vec()).into())
+    }
+}
+
+#[cfg(not(unix))]
+fn native_path_from_bytes(bytes: &[u8]) -> Option<PathBuf> {
+    std::str::from_utf8(bytes).ok().map(PathBuf::from)
 }
 
 #[cfg(test)]
@@ -320,6 +505,262 @@ mod tests {
         let names = filenames(&got);
         assert!(names.contains(&"lib.rs".to_owned()));
         assert!(!names.contains(&"generated.rs".to_owned()));
+    }
+
+    #[test]
+    fn non_git_scan_does_not_inherit_parent_gitignore() {
+        let parent = TempDir::new().unwrap();
+        let root = parent.path().join("staged");
+        fs::create_dir_all(&root).unwrap();
+        fs::write(root.join("visible.rs"), b"").unwrap();
+        fs::write(parent.path().join(".gitignore"), "visible.rs\n").unwrap();
+
+        let got = detect(&root, &["rs"]).unwrap();
+        assert_eq!(filenames(&got), vec!["visible.rs"]);
+    }
+
+    #[test]
+    fn lexical_repository_ancestor_does_not_change_non_git_scan() {
+        let sandbox = TempDir::new().unwrap();
+        let repository = sandbox.path().join("repository");
+        fs::create_dir_all(repository.join(".git")).unwrap();
+        fs::write(repository.join(".git/HEAD"), "ref: refs/heads/main\n").unwrap();
+        fs::create_dir(repository.join("pivot")).unwrap();
+        let staged = sandbox.path().join("staged");
+        fs::create_dir(&staged).unwrap();
+        fs::write(staged.join("visible.rs"), b"").unwrap();
+        fs::write(sandbox.path().join(".ignore"), "visible.rs\n").unwrap();
+
+        let lexical_root = repository.join("pivot/../../staged");
+        let got = detect(&lexical_root, &["rs"]).unwrap();
+
+        assert_eq!(filenames(&got), vec!["visible.rs"]);
+    }
+
+    #[test]
+    fn git_scan_still_inherits_repository_gitignore() {
+        let repository = TempDir::new().unwrap();
+        fs::create_dir_all(repository.path().join(".git")).unwrap();
+        fs::write(
+            repository.path().join(".git/HEAD"),
+            "ref: refs/heads/main\n",
+        )
+        .unwrap();
+        fs::create_dir_all(repository.path().join("src")).unwrap();
+        fs::write(repository.path().join("src/ignored.rs"), b"").unwrap();
+        fs::write(repository.path().join(".gitignore"), "ignored.rs\n").unwrap();
+
+        let got = detect(repository.path(), &["rs"]).unwrap();
+        assert!(got.is_empty());
+    }
+
+    #[test]
+    fn git_subdirectory_scan_inherits_repository_gitignore() {
+        let repository = TempDir::new().unwrap();
+        fs::create_dir_all(repository.path().join(".git")).unwrap();
+        fs::write(
+            repository.path().join(".git/HEAD"),
+            "ref: refs/heads/main\n",
+        )
+        .unwrap();
+        fs::create_dir_all(repository.path().join("src")).unwrap();
+        fs::write(repository.path().join("src/ignored.rs"), b"").unwrap();
+        fs::write(repository.path().join(".gitignore"), "ignored.rs\n").unwrap();
+
+        let got = detect(&repository.path().join("src"), &["rs"]).unwrap();
+        assert!(got.is_empty());
+    }
+
+    #[test]
+    fn stale_worktree_pointer_fails_closed() {
+        let repository = TempDir::new().unwrap();
+        fs::write(repository.path().join(".git"), "gitdir: .missing-gitdir\n").unwrap();
+        fs::create_dir_all(repository.path().join("src")).unwrap();
+        fs::write(repository.path().join("src/ignored.rs"), b"").unwrap();
+        fs::write(repository.path().join(".gitignore"), "ignored.rs\n").unwrap();
+
+        let error = detect(&repository.path().join("src"), &["rs"]).unwrap_err();
+        assert!(
+            matches!(error, GraphError::Guard(_)),
+            "a dangling worktree marker must refuse the scan, got: {error:?}"
+        );
+        assert!(error.to_string().contains("stale Git worktree marker"));
+    }
+
+    #[test]
+    fn oversized_worktree_pointer_fails_closed() {
+        let repository = TempDir::new().unwrap();
+        fs::write(
+            repository.path().join(".git"),
+            vec![b'x'; usize::try_from(super::MAX_GIT_MARKER_LINE_BYTES).unwrap() + 1],
+        )
+        .unwrap();
+        fs::create_dir_all(repository.path().join("src")).unwrap();
+        fs::write(repository.path().join("src/ignored.rs"), b"").unwrap();
+        fs::write(repository.path().join(".gitignore"), "ignored.rs\n").unwrap();
+
+        let error = detect(&repository.path().join("src"), &["rs"]).unwrap_err();
+        assert!(
+            matches!(error, GraphError::Guard(_)),
+            "an unparseable worktree marker must refuse the scan, got: {error:?}"
+        );
+        assert!(error.to_string().contains("invalid Git worktree marker"));
+    }
+
+    #[test]
+    fn stale_worktree_pointer_does_not_adopt_an_outer_repository() {
+        // The stale inner worktree sits inside a real outer repository whose .gitignore would
+        // hide everything. The scan must fail closed instead of walking up and scanning with
+        // the outer repository's ignore context.
+        let outer = TempDir::new().unwrap();
+        fs::create_dir_all(outer.path().join(".git")).unwrap();
+        fs::write(outer.path().join(".git/HEAD"), "ref: refs/heads/main\n").unwrap();
+        fs::write(outer.path().join(".gitignore"), "*.rs\n").unwrap();
+        let inner = outer.path().join("stale-worktree");
+        fs::create_dir_all(inner.join("src")).unwrap();
+        fs::write(inner.join(".git"), "gitdir: .missing-gitdir\n").unwrap();
+        fs::write(inner.join("src/visible.rs"), b"").unwrap();
+
+        let error = detect(&inner.join("src"), &["rs"]).unwrap_err();
+        assert!(
+            matches!(error, GraphError::Guard(_)),
+            "a stale marker under an outer repository must refuse the scan, got: {error:?}"
+        );
+    }
+
+    #[test]
+    fn worktree_subdirectory_scan_inherits_repository_gitignore() {
+        let repository = TempDir::new().unwrap();
+        fs::create_dir_all(repository.path().join(".git-data")).unwrap();
+        fs::write(
+            repository.path().join(".git-data/HEAD"),
+            "ref: refs/heads/main\n",
+        )
+        .unwrap();
+        fs::write(repository.path().join(".git"), "gitdir: .git-data\n").unwrap();
+        fs::create_dir_all(repository.path().join("src")).unwrap();
+        fs::write(repository.path().join("src/ignored.rs"), b"").unwrap();
+        fs::write(repository.path().join(".gitignore"), "ignored.rs\n").unwrap();
+
+        let got = detect(&repository.path().join("src"), &["rs"]).unwrap();
+        assert!(got.is_empty());
+    }
+
+    #[test]
+    fn relative_worktree_pointer_uses_resolved_common_exclude() {
+        let repository = TempDir::new().unwrap();
+        let common_dir = repository.path().join(".git-data");
+        let gitdir = common_dir.join("worktrees/linked");
+        fs::create_dir_all(common_dir.join("info")).unwrap();
+        fs::create_dir_all(&gitdir).unwrap();
+        fs::write(gitdir.join("HEAD"), "ref: refs/heads/main\n").unwrap();
+        fs::write(gitdir.join("commondir"), "../..\n").unwrap();
+        fs::write(common_dir.join("info/exclude"), "/src/excluded.rs\n").unwrap();
+        fs::write(
+            repository.path().join(".git"),
+            "gitdir: .git-data/worktrees/linked\n",
+        )
+        .unwrap();
+        fs::create_dir(repository.path().join("src")).unwrap();
+        fs::write(repository.path().join("src/excluded.rs"), b"").unwrap();
+        fs::write(repository.path().join("src/kept.rs"), b"").unwrap();
+
+        let got = detect(&repository.path().join("src"), &["rs"]).unwrap();
+
+        assert_eq!(filenames(&got), vec!["kept.rs"]);
+    }
+
+    #[test]
+    fn linked_worktree_excludes_match_a_lexically_spelled_root() {
+        let repository = TempDir::new().unwrap();
+        let common_dir = repository.path().join(".git-data");
+        let gitdir = common_dir.join("worktrees/linked");
+        fs::create_dir_all(common_dir.join("info")).unwrap();
+        fs::create_dir_all(&gitdir).unwrap();
+        fs::write(gitdir.join("HEAD"), "ref: refs/heads/main\n").unwrap();
+        fs::write(gitdir.join("commondir"), "../..\n").unwrap();
+        fs::write(common_dir.join("info/exclude"), "/src/excluded.rs\n").unwrap();
+        fs::write(
+            repository.path().join(".git"),
+            "gitdir: .git-data/worktrees/linked\n",
+        )
+        .unwrap();
+        fs::create_dir(repository.path().join("src")).unwrap();
+        fs::write(repository.path().join("src/excluded.rs"), b"").unwrap();
+        fs::write(repository.path().join("src/kept.rs"), b"").unwrap();
+
+        let lexical_root = repository.path().join("src/../src");
+        let got = detect(&lexical_root, &["rs"]).unwrap();
+
+        assert_eq!(filenames(&got), vec!["kept.rs"]);
+        assert!(got.iter().all(|path| path.starts_with(repository.path())));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn non_utf8_worktree_pointer_preserves_git_ignore_precedence() {
+        use std::os::unix::ffi::{OsStrExt as _, OsStringExt as _};
+
+        let repository = TempDir::new().unwrap();
+        let gitdir_name = std::ffi::OsString::from_vec(b".git-data-\xff".to_vec());
+        let common_dir = repository.path().join(&gitdir_name);
+        let gitdir = common_dir.join("worktrees/linked");
+        fs::create_dir_all(common_dir.join("info")).unwrap();
+        fs::create_dir_all(&gitdir).unwrap();
+        fs::write(gitdir.join("HEAD"), "ref: refs/heads/main\n").unwrap();
+        fs::write(gitdir.join("commondir"), "../..\n").unwrap();
+        fs::write(
+            common_dir.join("info/exclude"),
+            concat!(
+                "/src/excluded.rs\n",
+                "!/src/info-unignored.rs\n",
+                "/src/info-only.rs\n",
+                "/src/gitignore-unignored.rs\n",
+                "!/src/gitignore-only.rs\n",
+            ),
+        )
+        .unwrap();
+        let mut marker = b"gitdir: ".to_vec();
+        marker.extend_from_slice(gitdir_name.as_os_str().as_bytes());
+        marker.extend_from_slice(b"/worktrees/linked");
+        marker.push(b'\n');
+        fs::write(repository.path().join(".git"), marker).unwrap();
+        fs::create_dir(repository.path().join("src")).unwrap();
+        fs::write(repository.path().join("src/ignored.rs"), b"").unwrap();
+        fs::write(repository.path().join("src/excluded.rs"), b"").unwrap();
+        fs::write(repository.path().join("src/global-only.rs"), b"").unwrap();
+        fs::write(repository.path().join("src/info-unignored.rs"), b"").unwrap();
+        fs::write(repository.path().join("src/info-only.rs"), b"").unwrap();
+        fs::write(repository.path().join("src/gitignore-unignored.rs"), b"").unwrap();
+        fs::write(repository.path().join("src/gitignore-only.rs"), b"").unwrap();
+        fs::write(repository.path().join("src/kept.rs"), b"").unwrap();
+        fs::write(
+            repository.path().join(".gitignore"),
+            "ignored.rs\n!gitignore-unignored.rs\ngitignore-only.rs\n",
+        )
+        .unwrap();
+        let global_exclude = repository.path().join("global-ignore");
+        fs::write(
+            &global_exclude,
+            concat!(
+                "/src/global-only.rs\n",
+                "/src/info-unignored.rs\n",
+                "!/src/info-only.rs\n",
+            ),
+        )
+        .unwrap();
+
+        let got = super::detect_with_global_exclude(
+            &repository.path().join("src"),
+            &["rs"],
+            Some(&global_exclude),
+        )
+        .unwrap();
+
+        assert_eq!(
+            filenames(&got),
+            vec!["gitignore-unignored.rs", "info-unignored.rs", "kept.rs"]
+        );
     }
 
     #[test]

@@ -20,7 +20,7 @@ use serde_json::Value;
 /// over the shared `graph`. Each handler delegates to the pure functions in [`crate::handlers`].
 ///
 /// The returned [`Router`] has the graph state baked in and is ready to be passed to
-/// [`axum::serve`] or used as a [`tower::Service`] in tests.
+/// [`axum::serve()`] or used as a `tower::Service` in tests.
 #[must_use]
 #[allow(clippy::double_must_use, clippy::needless_pass_by_value)]
 pub fn build_router(graph: Arc<Graph>) -> Router {
@@ -33,14 +33,14 @@ pub fn build_router(graph: Arc<Graph>) -> Router {
 
 /// Runs the HTTP service on `addr` until the process ends.
 ///
-/// Binds a [`tokio::net::TcpListener`], then calls [`axum::serve`] with the router produced by
+/// Binds a [`tokio::net::TcpListener`], then calls [`axum::serve()`] with the router produced by
 /// [`build_router`]. Both the bind step and the serve loop can produce errors, which are converted
 /// to `String` for convenient propagation.
 ///
 /// # Errors
 /// Returns a `String` description if:
 /// - [`tokio::net::TcpListener::bind`] fails (e.g. port already in use, permission denied), or
-/// - [`axum::serve`] returns an I/O error during the serving loop.
+/// - [`axum::serve()`] returns an I/O error during the serving loop.
 pub async fn run_server(graph: Arc<Graph>, addr: SocketAddr) -> Result<(), String> {
     let listener = tokio::net::TcpListener::bind(addr)
         .await
@@ -121,6 +121,7 @@ mod tests {
                 make_node(2, "beta"),
                 make_node(3, "orphan"),
             ],
+            node_content_ids: std::collections::BTreeMap::default(),
             edges: vec![make_edge(1, 2)],
             communities: Vec::new(),
             manifest: Manifest::default(),

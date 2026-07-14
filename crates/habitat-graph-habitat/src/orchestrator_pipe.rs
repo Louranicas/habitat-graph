@@ -12,7 +12,7 @@
 //! | Transport | Feature | Remarks |
 //! |---|---|---|
 //! | [`LoopbackTransport`] | always | in-process round-trip; zero network/spawn |
-//! | [`live::ProcessTransport`] | `live` | shells out to `cc-pipe` |
+//! | `live::ProcessTransport` | `live` | shells out to `cc-pipe` |
 //!
 //! Tests exclusively use [`LoopbackTransport`] — zero I/O, zero process spawning.
 //!
@@ -346,7 +346,10 @@ mod tests {
     fn ack_detail_contains_scope() {
         let resp = handle_request(&req("map.scope", "my-crate"));
         if let PipeResponse::Ack { detail, .. } = resp {
-            assert!(detail.contains("my-crate"), "detail missing scope: {detail}");
+            assert!(
+                detail.contains("my-crate"),
+                "detail missing scope: {detail}"
+            );
         } else {
             panic!("expected Ack");
         }
@@ -442,7 +445,9 @@ mod tests {
         let resp = handle_request(&req("frobnicate", ""));
         match resp {
             PipeResponse::Nack { ref code, .. } => assert_eq!(code, "NACK_SCHEMA_INVALID"),
-            other @ PipeResponse::Ack { .. } => panic!("expected NACK_SCHEMA_INVALID, got {other:?}"),
+            other @ PipeResponse::Ack { .. } => {
+                panic!("expected NACK_SCHEMA_INVALID, got {other:?}")
+            }
         }
     }
 
@@ -484,7 +489,10 @@ mod tests {
     fn nack_unknown_verb_reason_lists_supported_verbs() {
         let resp = handle_request(&req("bad.verb", "scope"));
         if let PipeResponse::Nack { reason, .. } = resp {
-            assert!(reason.contains("map.scope"), "reason missing map.scope: {reason}");
+            assert!(
+                reason.contains("map.scope"),
+                "reason missing map.scope: {reason}"
+            );
             assert!(
                 reason.contains("map.health"),
                 "reason missing map.health: {reason}"
@@ -523,7 +531,10 @@ mod tests {
     #[test]
     fn parse_request_rejects_missing_verb() {
         let json = r#"{"scope":"habitat","payload":null}"#;
-        assert!(parse_request(json).is_err(), "missing `verb` must be rejected");
+        assert!(
+            parse_request(json).is_err(),
+            "missing `verb` must be rejected"
+        );
     }
 
     #[test]
@@ -579,7 +590,11 @@ mod tests {
     #[test]
     fn parse_request_error_kind_is_schema() {
         let err = parse_request("{bad}").expect_err("bad JSON");
-        assert_eq!(err.kind(), "schema", "expected schema error kind, got {err:?}");
+        assert_eq!(
+            err.kind(),
+            "schema",
+            "expected schema error kind, got {err:?}"
+        );
     }
 
     // ── serialize_response ────────────────────────────────────────────────────
@@ -623,7 +638,10 @@ mod tests {
             reason: "empty scope".to_string(),
         };
         let json = serialize_response(&resp).expect("serialize");
-        assert!(json.contains("NACK_SCHEMA_INVALID"), "code missing from: {json}");
+        assert!(
+            json.contains("NACK_SCHEMA_INVALID"),
+            "code missing from: {json}"
+        );
     }
 
     // ── PipeResponse round-trips ──────────────────────────────────────────────
@@ -763,7 +781,10 @@ mod tests {
         let resp_str = t.send(&line).expect("loopback must succeed");
         let v: Value = serde_json::from_str(&resp_str).expect("valid JSON");
         let detail = v["detail"].as_str().expect("detail must be a string");
-        assert!(detail.contains("my-crate"), "detail missing scope: {detail}");
+        assert!(
+            detail.contains("my-crate"),
+            "detail missing scope: {detail}"
+        );
     }
 
     #[test]

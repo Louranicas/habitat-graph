@@ -43,7 +43,7 @@ struct WireGraph {
 
 /// Builds the instruction prompt asking a model to return the semantic `{nodes, edges}` JSON.
 ///
-/// The schema in the prompt mirrors [`WireGraph`]; `text` is appended verbatim. Backends that set a
+/// The schema in the prompt mirrors the private `WireGraph`; `text` is appended verbatim. Backends that set a
 /// JSON response-format flag still send this so models without that flag produce parseable output.
 #[must_use]
 pub fn build_prompt(text: &str) -> String {
@@ -66,7 +66,9 @@ Use short concept names as labels. Text:\n{text}"
 /// Returns [`GraphError::Backend`] if `raw` is not the expected JSON object.
 pub fn parse_semantic(raw: &str, source_file: &str) -> Result<Extraction> {
     let wire: WireGraph = serde_json::from_str(raw).map_err(|e| {
-        GraphError::Backend(format!("semantic response was not the expected JSON object: {e}"))
+        GraphError::Backend(format!(
+            "semantic response was not the expected JSON object: {e}"
+        ))
     })?;
 
     let mut extraction = Extraction::new();
@@ -141,8 +143,12 @@ mod tests {
 
     #[test]
     fn missing_arrays_default_to_empty() {
-        assert!(parse_semantic(r#"{"nodes":[]}"#, "f").expect("ok").is_empty());
-        assert!(parse_semantic(r#"{"edges":[]}"#, "f").expect("ok").is_empty());
+        assert!(parse_semantic(r#"{"nodes":[]}"#, "f")
+            .expect("ok")
+            .is_empty());
+        assert!(parse_semantic(r#"{"edges":[]}"#, "f")
+            .expect("ok")
+            .is_empty());
     }
 
     #[test]
@@ -206,7 +212,10 @@ mod tests {
         // contract for untrusted model output — a Trojan-Source label can never reach a terminal raw.
         let e = parse_semantic("{\"nodes\":[{\"label\":\"a\\u202eb\"}]}", "f").expect("ok");
         let label = &e.nodes[0].label;
-        assert!(label.contains('\u{202e}'), "format char retained in storage");
+        assert!(
+            label.contains('\u{202e}'),
+            "format char retained in storage"
+        );
         let rendered = habitat_graph_core::display_safe(label);
         assert!(!rendered.contains('\u{202e}'), "escaped at render");
         assert!(rendered.contains("\\u{202E}"));

@@ -7,8 +7,8 @@
 //! |-----|------------------------------------------------------------|
 //! | XM-1 | `initialize` + `tools/list` round-trip; tools discovered  |
 //! | XM-2 | `graph_query` via MCP; typed response format verified      |
-//! | XM-3 | MCP `tools/list` → OpenAI function spec translation        |
-//! | XM-4 | OpenAI function call → MCP `tools/call` translation        |
+//! | XM-3 | MCP `tools/list` → `OpenAI` function spec translation        |
+//! | XM-4 | `OpenAI` function call → MCP `tools/call` translation        |
 //! | XM-5 | `max_tokens=100` budget constraint observed in output       |
 //! | XM-6 | `generation_id` changes on graph mutation (cache key)       |
 //! | XM-7 | `resources/read` round-trip for schema, report, node URI   |
@@ -59,7 +59,7 @@ fn call(graph: &Graph, line: &str) -> Value {
 }
 
 /// Convenience wrapper for a `tools/call` request.
-fn tool_call(graph: &Graph, id: i64, name: &str, arguments: Value) -> Value {
+fn tool_call(graph: &Graph, id: i64, name: &str, arguments: &Value) -> Value {
     let req = json!({
         "jsonrpc": "2.0",
         "id": id,
@@ -140,10 +140,7 @@ fn xm1_initialize_tools_list_round_trip() {
     );
 
     // Collect names dynamically — a cross-model client must do this, never hard-code.
-    let names: Vec<&str> = tools
-        .iter()
-        .filter_map(|t| t["name"].as_str())
-        .collect();
+    let names: Vec<&str> = tools.iter().filter_map(|t| t["name"].as_str()).collect();
     assert!(
         names.contains(&"graph_query"),
         "graph_query must appear in tools/list; got: {names:?}"
@@ -180,7 +177,7 @@ fn xm1_initialize_tools_list_round_trip() {
 #[test]
 fn xm2_graph_query_typed_response_format() {
     let g = sample_graph();
-    let resp = tool_call(&g, 1, "graph_query", json!({"query": "Alpha"}));
+    let resp = tool_call(&g, 1, "graph_query", &json!({"query": "Alpha"}));
 
     // Must return result, not error.
     assert!(
@@ -197,7 +194,10 @@ fn xm2_graph_query_typed_response_format() {
         .as_array()
         .expect("result.content must be an array");
     assert!(!content.is_empty(), "result.content must not be empty");
-    assert_eq!(content[0]["type"], "text", "content item type must be 'text'");
+    assert_eq!(
+        content[0]["type"], "text",
+        "content item type must be 'text'"
+    );
     assert!(
         content[0]["text"].is_string(),
         "content item text must be a string"
@@ -213,7 +213,7 @@ fn xm2_graph_query_typed_response_format() {
     );
 
     // Missing required arg → error, not panic.
-    let err_resp = tool_call(&g, 2, "graph_query", json!({}));
+    let err_resp = tool_call(&g, 2, "graph_query", &json!({}));
     assert!(
         err_resp.get("error").is_some(),
         "missing query arg must return an error"
@@ -223,10 +223,10 @@ fn xm2_graph_query_typed_response_format() {
 
 // ── XM-3 ─────────────────────────────────────────────────────────────────────
 
-/// XM-3: MCP `tools/list` descriptors → OpenAI function spec translation.
+/// XM-3: MCP `tools/list` descriptors → `OpenAI` function spec translation.
 ///
 /// Verifies that `mcp_tools_to_openai_functions` applied to the live `tools/list`
-/// output produces valid OpenAI function tool specs that a GPT-5.5+ function-router
+/// output produces valid `OpenAI` function tool specs that a GPT-5.5+ function-router
 /// can consume. Every tool maps 1:1. Names, descriptions, and `required` arrays survive.
 #[test]
 fn xm3_mcp_tools_to_openai_functions_translation() {
@@ -286,10 +286,7 @@ fn xm3_mcp_tools_to_openai_functions_translation() {
     let path_req = path_fn["function"]["parameters"]["required"]
         .as_array()
         .expect("graph_path must have a required array");
-    let path_req_strs: Vec<&str> = path_req
-        .iter()
-        .filter_map(Value::as_str)
-        .collect();
+    let path_req_strs: Vec<&str> = path_req.iter().filter_map(Value::as_str).collect();
     assert!(
         path_req_strs.contains(&"from") && path_req_strs.contains(&"to"),
         "graph_path function spec must require 'from' and 'to'; got: {path_req_strs:?}"
@@ -305,7 +302,7 @@ fn xm3_mcp_tools_to_openai_functions_translation() {
 
 // ── XM-4 ─────────────────────────────────────────────────────────────────────
 
-/// XM-4: OpenAI function call → MCP `tools/call` params translation.
+/// XM-4: `OpenAI` function call → MCP `tools/call` params translation.
 ///
 /// Verifies `openai_function_call_to_mcp`:
 /// - Object arguments pass through directly.
@@ -314,10 +311,8 @@ fn xm3_mcp_tools_to_openai_functions_translation() {
 #[test]
 fn xm4_openai_function_call_to_mcp_translation() {
     // Object arguments pass through directly.
-    let params = openai_function_call_to_mcp(
-        "graph_query",
-        &json!({"query": "Alpha", "max_tokens": 500}),
-    );
+    let params =
+        openai_function_call_to_mcp("graph_query", &json!({"query": "Alpha", "max_tokens": 500}));
     assert_eq!(params["name"], "graph_query");
     assert_eq!(params["arguments"]["query"], "Alpha");
     assert_eq!(params["arguments"]["max_tokens"], 500);
@@ -380,7 +375,7 @@ fn xm5_token_budget_constraint_respected() {
     }
 
     // Without budget: all 30 nodes should be mentioned.
-    let resp_unbounded = tool_call(&g, 1, "graph_query", json!({"query": "match_node"}));
+    let resp_unbounded = tool_call(&g, 1, "graph_query", &json!({"query": "match_node"}));
     let text_unbounded = text_of(&resp_unbounded);
     assert!(
         text_unbounded.contains("30 node(s) match"),
@@ -392,7 +387,7 @@ fn xm5_token_budget_constraint_respected() {
         &g,
         2,
         "graph_query",
-        json!({"query": "match_node", "max_tokens": 5}),
+        &json!({"query": "match_node", "max_tokens": 5}),
     );
     let text_tight = text_of(&resp_tight);
     assert!(
@@ -410,7 +405,7 @@ fn xm5_token_budget_constraint_respected() {
         &g,
         3,
         "graph_query",
-        json!({"query": "match_node", "max_tokens": 100}),
+        &json!({"query": "match_node", "max_tokens": 100}),
     );
     let text_100 = text_of(&resp_100);
     // Seed (first match) is always present.
@@ -478,7 +473,10 @@ fn xm6_generation_id_changes_on_mutation() {
 
     // Empty graph has a stable id different from the sample graph.
     let gen_empty = generation_id(&Graph::new());
-    assert_ne!(gen_empty, gen1, "empty graph must have a different id from non-empty");
+    assert_ne!(
+        gen_empty, gen1,
+        "empty graph must have a different id from non-empty"
+    );
     assert_eq!(
         generation_id(&Graph::new()),
         gen_empty,
@@ -514,6 +512,7 @@ fn xm6_generation_id_changes_on_mutation() {
 /// - `habitat-graph://schema` — JSON schema descriptor.
 /// - `habitat-graph://report` — Markdown graph summary.
 /// - `habitat-graph://node/{label}` — typed node neighbourhood.
+///
 /// Unknown URIs must return a JSON-RPC error (not a panic).
 #[test]
 fn xm7_resources_read_round_trip() {
@@ -627,7 +626,7 @@ fn xm7_resources_read_round_trip() {
 /// Simulates what a GPT-5.5+ function-router does:
 /// 1. Initialize to learn the generation id (cache key).
 /// 2. Discover tools via `tools/list`.
-/// 3. Translate tools to OpenAI function specs.
+/// 3. Translate tools to `OpenAI` function specs.
 /// 4. Simulate a GPT function call and translate it to MCP.
 /// 5. Execute the translated call through `handle_jsonrpc`.
 /// 6. Verify the response carries the same generation id (cache validity).

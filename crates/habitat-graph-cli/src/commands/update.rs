@@ -1,18 +1,21 @@
-//! The `update` command — incremental rebuild with sidecar-based extraction cache (FO-9 lifecycle).
+//! The `update` command — incremental rebuild with owner-only raw extraction state (FO-9 lifecycle).
 //!
 //! ## Honest cost model (C-4)
 //!
-//! File-level extraction is cached via a sidecar file
-//! (`<out>/.habitat-graph-state.json`), so only files whose `blake3` content hash has changed
-//! since the last build are re-parsed by the tree-sitter extractors.  **Community detection is
-//! not incremental**: Leiden is always re-run on the full combined graph after each incremental
-//! merge.  The sidecar saves AST-parsing work; it does not save analysis work.
+//! File-level extraction is cached via owner-only private state, so only files whose `blake3`
+//! content hash has changed since the last build are re-parsed by the tree-sitter extractors.
+//! **Community detection is not incremental**: Leiden is always re-run on the full combined graph
+//! after each incremental merge. The state cache saves AST-parsing work; it does not save analysis
+//! work.
 //!
-//! ## Sidecar format
+//! ## Private-state format and location
 //!
-//! The sidecar stores the complete [`Graph`] in its internal JSON format
-//! (via [`Graph::to_json`] / [`Graph::from_json`]).  On the next incremental run three things
-//! are extracted from it without extra serialization overhead:
+//! The state stores the complete [`Graph`] in graph-compatible JSON together with byte and semantic
+//! generations of its committed public projection. In Git it lives below the resolved metadata
+//! directory, keyed by canonical output and Git context; non-Git outputs use the legacy hidden
+//! sidecar. Prior generations are retained as owner-only snapshots so branch switches can recover
+//! matching raw lineage. On the next incremental run three things are extracted from it without
+//! extra serialization overhead:
 //!
 //! - `graph.schema` — the [`SCHEMA_VERSION`] at build time (for the P1-G12 mismatch guard).
 //! - `graph.manifest.inputs` — the `path → content_hash` map used to diff against the current
@@ -22,7 +25,7 @@
 //!
 //! ## Schema-version guard (P1-G12)
 //!
-//! If the sidecar's `schema` field differs from the current [`SCHEMA_VERSION`], a warning is
+//! If the private state's `schema` field differs from the current [`SCHEMA_VERSION`], a warning is
 //! emitted to stderr and a full rebuild is performed.  Silently merging across taxonomy versions
 //! would corrupt the graph by mixing incompatible node/edge semantics.
 
@@ -31,14 +34,12 @@ use std::path::{Path, PathBuf};
 
 use habitat_graph_core::{Graph, GraphError, Manifest, NodeId, Result, SCHEMA_VERSION};
 
-/// Sidecar filename storing the full internal [`Graph`] JSON (relative to the output directory).
+/// Legacy non-Git/migration filename for the full internal [`Graph`] state.
 const SIDECAR: &str = ".habitat-graph-state.json";
-/// Primary artifact filename (node-link format, graphify-compatible).
-const GRAPH_JSON: &str = "graph.json";
 
 /// Runs an incremental update over `dir`, writing refreshed artifacts into `out`.
 ///
-/// On the first invocation (no sidecar present) or after a [`SCHEMA_VERSION`] mismatch, a full
+/// On the first invocation (no matching private state) or after a [`SCHEMA_VERSION`] mismatch, a full
 /// rebuild is performed.  On subsequent invocations only files whose `blake3` content hash has
 /// changed are re-extracted; unchanged files' nodes/edges are preserved from the prior graph.
 /// Community detection is always re-run globally (honest C-4 cost: Leiden is not incremental).
@@ -47,9 +48,13 @@ const GRAPH_JSON: &str = "graph.json";
 ///
 /// Emits exactly one summary line on success:
 /// - `"update: {changed} changed, {n} nodes (analyze re-run globally)"` after any build.
-/// - `"update: 0 changed, {n} nodes (no-op; analyze not re-run)"` when nothing has changed.
+/// - `"update: 0 changed, {n} nodes (artifacts refreshed; analyze not re-run)"` when source
+///   inputs are unchanged. Public artifacts and private-state permissions are still refreshed so
+///   an exporter-policy upgrade cannot leave legacy output behind.
 ///
 /// Returns a process exit code: `0` on success, `4` on any error (diagnostics to stderr).
+/// Targets without Unix owner-only file creation reject incremental updates and remove any
+/// existing raw sidecar before source processing.
 ///
 /// # Errors
 ///
@@ -70,82 +75,52 @@ pub fn run(dir: &Path, out: &Path) -> u8 {
 /// # Errors
 ///
 /// Returns [`GraphError::Io`] on filesystem failures, [`GraphError::Parse`] on extraction
-/// failures, or [`GraphError::Schema`] on serialization failures.
+/// failures, [`GraphError::Schema`] on serialization failures, or [`GraphError::Guard`] when
+/// private-state permissions cannot be enforced.
 fn run_inner(dir: &Path, out: &Path) -> Result<()> {
+    std::fs::create_dir_all(out).map_err(|error| GraphError::Io(error.to_string()))?;
+    let out = super::private_state::resolve_output_directory(out)?;
+    let (sidecar_path, legacy_sidecar_path, _identity_lock, _output_lock) =
+        prepare_update_transaction(&out)?;
+    let public_output = load_public_output(&out.join("graph.json"))?;
+
     // ── Detect all source files (sorted for R4 determinism) ─────────────────────
     let files = habitat_graph_source::detect(dir, &["rs"])?;
-    let sidecar_path = out.join(SIDECAR);
 
     // ── Load the prior sidecar (returns None on first run / mismatch) ───────────
-    let Some(prior_graph) = try_load_prior(&sidecar_path)? else {
+    let Some(prior_graph) =
+        load_available_prior(&sidecar_path, &legacy_sidecar_path, public_output.as_ref())?
+    else {
         // No sidecar or schema mismatch → full rebuild.
-        return do_full_build(out, &files);
+        return do_full_build(&out, &files, &sidecar_path, &legacy_sidecar_path);
     };
+    let prior_private_checksum = private_graph_generation(&prior_graph)?;
 
     // ── Hash every current file (needed for the diff) ───────────────────────────
-    let current_inputs: Vec<(PathBuf, Vec<u8>)> = files
-        .iter()
-        .map(|p| {
-            let bytes = habitat_graph_source::read_local(p, 0)?;
-            Ok((p.clone(), bytes))
-        })
-        .collect::<Result<_>>()?;
+    let current_inputs = read_inputs(&files)?;
 
     let current_manifest =
         habitat_graph_source::build_manifest(&current_inputs, env!("CARGO_PKG_VERSION"));
 
-    // ── Clone prior manifest into owned strings to release prior_graph borrow ───
-    // `prior_map` must not borrow from `prior_graph.manifest` (we move prior_graph later).
-    let prior_entries: Vec<(String, String)> = prior_graph
-        .manifest
-        .inputs
-        .iter()
-        .map(|r| (r.path.clone(), r.content_hash.clone()))
-        .collect();
-    // `prior_graph.manifest.inputs` borrow ends here (iter consumed, collect done).
-
-    let current_map: HashMap<&str, &str> = current_manifest
-        .inputs
-        .iter()
-        .map(|r| (r.path.as_str(), r.content_hash.as_str()))
-        .collect();
-    let prior_map: HashMap<&str, &str> = prior_entries
-        .iter()
-        .map(|(p, h)| (p.as_str(), h.as_str()))
-        .collect();
-
-    let current_paths: HashSet<&str> = current_map.keys().copied().collect();
-    let prior_paths: HashSet<&str> = prior_map.keys().copied().collect();
-
-    // Build diff lists as owned `String`s so they do not borrow from `prior_graph`.
-    let mut added: Vec<String> = current_paths
-        .difference(&prior_paths)
-        .copied()
-        .map(str::to_owned)
-        .collect();
-    let mut removed: Vec<String> = prior_paths
-        .difference(&current_paths)
-        .copied()
-        .map(str::to_owned)
-        .collect();
-    let mut changed: Vec<String> = current_paths
-        .intersection(&prior_paths)
-        .copied()
-        .filter(|&p| current_map.get(p) != prior_map.get(p))
-        .map(str::to_owned)
-        .collect();
-
-    // Deterministic ordering of the three diff lists (R4 compliance).
-    added.sort_unstable();
-    removed.sort_unstable();
-    changed.sort_unstable();
+    let (added, removed, changed) = diff_manifest(&current_manifest, &prior_graph);
 
     let need_reextract = added.len() + changed.len();
 
-    // ── No-op fast exit ──────────────────────────────────────────────────────────
+    // ── Unchanged-input artifact refresh ─────────────────────────────────────────
     if need_reextract == 0 && removed.is_empty() {
         let n = prior_graph.nodes.len();
-        println!("update: 0 changed, {n} nodes (no-op; analyze not re-run)");
+        // Export policy evolves independently of source hashes. Always rerender public artifacts
+        // and atomically reharden the private sidecar so an upgrade cannot report success while
+        // leaving legacy unredacted output or permissive cache permissions in place.
+        write_artifacts(
+            &out,
+            &prior_graph,
+            current_manifest,
+            &sidecar_path,
+            &legacy_sidecar_path,
+            Some(&prior_private_checksum),
+        )?;
+        println!("update: 0 changed, {n} nodes (artifacts refreshed; analyze not re-run)");
         return Ok(());
     }
 
@@ -162,16 +137,15 @@ fn run_inner(dir: &Path, out: &Path) -> Result<()> {
         .map(String::as_str)
         .collect();
 
-    let to_extract: Vec<PathBuf> = files
-        .iter()
-        .filter(|p| {
-            let cow = p.to_string_lossy();
+    let to_extract: Vec<(PathBuf, Vec<u8>)> = current_inputs
+        .into_iter()
+        .filter(|(path, _)| {
+            let cow = path.to_string_lossy();
             to_extract_set.contains(cow.as_ref())
         })
-        .cloned()
         .collect();
 
-    let new_extractions = habitat_graph_extract::extract_files(&to_extract)?;
+    let new_extractions = habitat_graph_extract::extract_inputs(&to_extract)?;
     let new_partial = habitat_graph_build::assemble(new_extractions);
 
     // ── Prune prior graph (drop stale-file nodes + dangling edges) ───────────────
@@ -181,43 +155,563 @@ fn run_inner(dir: &Path, out: &Path) -> Result<()> {
     // ── Merge + global community detection (honest: Leiden is NOT incremental) ───
     // F12: cluster on the TRUSTED subgraph only (INFERRED/AMBIGUOUS edges excluded).
     let mut combined = habitat_graph_build::merge(new_partial, pruned_prior);
-    combined.communities =
-        habitat_graph_analyze::detect_communities(&habitat_graph_analyze::trusted_subgraph(&combined));
+    combined.communities = habitat_graph_analyze::detect_communities(
+        &habitat_graph_analyze::trusted_subgraph(&combined),
+    );
     let combined = combined.sorted();
 
     // ── Write artifacts + refresh sidecar ────────────────────────────────────────
     let n = combined.nodes.len();
-    write_artifacts(out, &combined, current_manifest)?;
+    write_artifacts(
+        &out,
+        &combined,
+        current_manifest,
+        &sidecar_path,
+        &legacy_sidecar_path,
+        Some(&prior_private_checksum),
+    )?;
     println!("update: {need_reextract} changed, {n} nodes (analyze re-run globally)");
     Ok(())
 }
 
-/// Attempts to load the prior graph from the sidecar file.
+fn diff_manifest(
+    current_manifest: &Manifest,
+    prior_graph: &Graph,
+) -> (Vec<String>, Vec<String>, Vec<String>) {
+    let prior_entries: Vec<(String, String)> = prior_graph
+        .manifest
+        .inputs
+        .iter()
+        .map(|record| (record.path.clone(), record.content_hash.clone()))
+        .collect();
+    let current_map: HashMap<&str, &str> = current_manifest
+        .inputs
+        .iter()
+        .map(|record| (record.path.as_str(), record.content_hash.as_str()))
+        .collect();
+    let prior_map: HashMap<&str, &str> = prior_entries
+        .iter()
+        .map(|(path, hash)| (path.as_str(), hash.as_str()))
+        .collect();
+    let current_paths: HashSet<&str> = current_map.keys().copied().collect();
+    let prior_paths: HashSet<&str> = prior_map.keys().copied().collect();
+    let mut added: Vec<String> = current_paths
+        .difference(&prior_paths)
+        .copied()
+        .map(str::to_owned)
+        .collect();
+    let mut removed: Vec<String> = prior_paths
+        .difference(&current_paths)
+        .copied()
+        .map(str::to_owned)
+        .collect();
+    let mut changed: Vec<String> = current_paths
+        .intersection(&prior_paths)
+        .copied()
+        .filter(|&path| current_map.get(path) != prior_map.get(path))
+        .map(str::to_owned)
+        .collect();
+    added.sort_unstable();
+    removed.sort_unstable();
+    changed.sort_unstable();
+    (added, removed, changed)
+}
+
+fn load_available_prior(
+    current: &Path,
+    legacy: &Path,
+    public: Option<&PublicOutput>,
+) -> Result<Option<Graph>> {
+    if let Some(prior) = try_load_prior(current, public)? {
+        return Ok(Some(prior));
+    }
+    if legacy != current {
+        return try_load_prior(legacy, public);
+    }
+    Ok(None)
+}
+
+fn read_inputs(files: &[PathBuf]) -> Result<Vec<(PathBuf, Vec<u8>)>> {
+    files
+        .iter()
+        .map(|path| {
+            let bytes = habitat_graph_source::read_local(path, 0)?;
+            Ok((path.clone(), bytes))
+        })
+        .collect()
+}
+
+struct PublicOutput {
+    generation: String,
+    semantic_generation: String,
+}
+
+fn load_public_output(path: &Path) -> Result<Option<PublicOutput>> {
+    let metadata = match std::fs::symlink_metadata(path) {
+        Ok(metadata) => metadata,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(error) => {
+            return Err(GraphError::Io(format!(
+                "inspect public graph {}: {error}",
+                path.display()
+            )))
+        }
+    };
+    if !metadata.file_type().is_file() {
+        return Err(GraphError::Guard(format!(
+            "public graph is not a regular file: {}",
+            path.display()
+        )));
+    }
+    let text = std::fs::read_to_string(path)
+        .map_err(|error| GraphError::Io(format!("read public graph: {error}")))?;
+    let graph = if text.trim().is_empty() {
+        Graph::default()
+    } else {
+        match habitat_graph_serve::from_node_link(&text) {
+            Ok(graph) => graph,
+            Err(error) => {
+                eprintln!("warning: public graph parse failed ({error}): forcing full rebuild");
+                return Ok(None);
+            }
+        }
+    };
+    Ok(Some(PublicOutput {
+        semantic_generation: super::private_state::semantic_generation(&graph)?,
+        generation: super::private_state::generation(text.as_bytes()),
+    }))
+}
+
+fn prepare_private_state(out: &Path) -> Result<(PathBuf, PathBuf)> {
+    std::fs::create_dir_all(out).map_err(|error| GraphError::Io(error.to_string()))?;
+    let legacy = out.join(SIDECAR);
+    let current = super::private_state::path_for_output(&out.join("graph.json"), &legacy)?;
+    super::private_state::ensure(&current)?;
+    if current != legacy {
+        super::private_state::ensure(&legacy)?;
+    }
+    Ok((current, legacy))
+}
+
+fn prepare_update_transaction(
+    out: &Path,
+) -> Result<(
+    PathBuf,
+    PathBuf,
+    super::private_state::OutputTransactionLock,
+    super::private_state::OutputTransactionLock,
+)> {
+    std::fs::create_dir_all(out).map_err(|error| GraphError::Io(error.to_string()))?;
+    let identity_lock =
+        super::private_state::acquire_output_identity_lock(&out.join("graph.json"))?;
+    let (state, legacy) = prepare_private_state(out)?;
+    let lock = super::private_state::acquire_output_lock(&state)?;
+    super::private_state::ensure_no_pending_full_build_journal(&state)?;
+    super::private_state::ensure_no_pending_add_journals(&state)?;
+    recover_update_journal(out, &state, &legacy)?;
+    super::private_state::remove_orphaned_temporaries(&out.join("graph.json"), &state, &legacy)?;
+    Ok((state, legacy, identity_lock, lock))
+}
+
+const LEGACY_UPDATE_JOURNAL_SCHEMA: &str = "habitat-graph.update-journal.v1";
+const RENDERED_UPDATE_JOURNAL_SCHEMA: &str = "habitat-graph.update-journal.v2";
+const UPDATE_JOURNAL_SCHEMA: &str = "habitat-graph.update-journal.v3";
+
+struct UpdateJournal {
+    before_public_generation: Option<String>,
+    after_public_generation: String,
+    origin_context: Option<String>,
+    origin_lineage: Option<String>,
+    before_private_checksum: Option<String>,
+    after_private_checksum: String,
+    state_graph: Graph,
+}
+
+impl UpdateJournal {
+    fn new(
+        out: &Path,
+        state_path: &Path,
+        state_graph: Graph,
+        before_private_checksum: Option<&str>,
+    ) -> Result<Self> {
+        if before_private_checksum
+            .is_some_and(|checksum| !super::private_state::is_generation(checksum))
+        {
+            return Err(GraphError::Schema(
+                "update journal private generation is invalid".to_owned(),
+            ));
+        }
+        super::private_state::ensure_state_context_current(
+            &out.join("graph.json"),
+            state_path,
+            "update transaction preparation",
+        )?;
+        let public_json = habitat_graph_export::to_node_link(&state_graph)?;
+        let origin = super::private_state::context_identity_for_output(&out.join("graph.json"))?;
+        let journal = Self {
+            before_public_generation: current_public_generation(&out.join("graph.json"))?,
+            after_public_generation: super::private_state::generation(public_json.as_bytes()),
+            origin_context: origin.as_ref().map(|identity| identity.key.clone()),
+            origin_lineage: origin.as_ref().map(|identity| identity.lineage.clone()),
+            before_private_checksum: before_private_checksum.map(str::to_owned),
+            after_private_checksum: private_graph_generation(&state_graph)?,
+            state_graph,
+        };
+        if journal.origin_context != super::private_state::state_context_key(state_path) {
+            return Err(GraphError::Guard(
+                "Git context changed while preparing update transaction".to_owned(),
+            ));
+        }
+        super::private_state::ensure_state_context_current(
+            &out.join("graph.json"),
+            state_path,
+            "update transaction preparation",
+        )?;
+        Ok(journal)
+    }
+}
+
+fn private_graph_generation(graph: &Graph) -> Result<String> {
+    Ok(super::private_state::generation(
+        graph.to_json()?.as_bytes(),
+    ))
+}
+
+fn current_public_generation(path: &Path) -> Result<Option<String>> {
+    let metadata = match std::fs::symlink_metadata(path) {
+        Ok(metadata) => metadata,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(error) => return Err(GraphError::Io(format!("inspect public graph: {error}"))),
+    };
+    if !metadata.file_type().is_file() {
+        return Err(GraphError::Guard(format!(
+            "public graph is not a regular file: {}",
+            path.display()
+        )));
+    }
+    let bytes = std::fs::read(path)
+        .map_err(|error| GraphError::Io(format!("read public graph: {error}")))?;
+    Ok(Some(super::private_state::generation(&bytes)))
+}
+
+fn write_update_journal(state_path: &Path, journal: &UpdateJournal) -> Result<()> {
+    let state_graph = serde_json::to_value(&journal.state_graph)
+        .map_err(|error| GraphError::Schema(format!("update journal serialize: {error}")))?;
+    let bytes = serde_json::to_vec_pretty(&serde_json::json!({
+        "schema": UPDATE_JOURNAL_SCHEMA,
+        "before_public_generation": journal.before_public_generation,
+        "after_public_generation": journal.after_public_generation,
+        "origin_context": journal.origin_context,
+        "origin_lineage": journal.origin_lineage,
+        "before_private_checksum": journal.before_private_checksum,
+        "after_private_checksum": journal.after_private_checksum,
+        "state_graph": state_graph,
+    }))
+    .map_err(|error| GraphError::Schema(format!("update journal serialize: {error}")))?;
+    super::private_state::write(
+        &super::private_state::update_journal_path(state_path)?,
+        &bytes,
+    )
+}
+
+fn journal_generation(
+    value: &serde_json::Value,
+    field: &str,
+    optional: bool,
+) -> Result<Option<String>> {
+    match value.get(field) {
+        Some(serde_json::Value::Null) if optional => Ok(None),
+        Some(serde_json::Value::String(generation))
+            if super::private_state::is_generation(generation) =>
+        {
+            Ok(Some(generation.clone()))
+        }
+        _ => Err(GraphError::Schema(format!(
+            "update journal `{field}` is invalid"
+        ))),
+    }
+}
+
+fn journal_graph(value: &serde_json::Value, field: &str) -> Result<Graph> {
+    let text = serde_json::to_string(value)
+        .map_err(|error| GraphError::Schema(format!("update journal {field}: {error}")))?;
+    let graph = Graph::from_json(&text)?;
+    if graph.schema != SCHEMA_VERSION {
+        return Err(GraphError::Schema(format!(
+            "update journal {field} schema mismatch"
+        )));
+    }
+    Ok(graph)
+}
+
+fn load_update_journal(path: &Path) -> Result<UpdateJournal> {
+    let text = super::private_state::read_text(path, "update journal")?
+        .ok_or_else(|| GraphError::Io("read update journal: file disappeared".to_owned()))?;
+    let value: serde_json::Value = serde_json::from_str(&text)
+        .map_err(|error| GraphError::Schema(format!("update journal parse: {error}")))?;
+    let schema = value["schema"].as_str();
+    if !matches!(
+        schema,
+        Some(LEGACY_UPDATE_JOURNAL_SCHEMA | RENDERED_UPDATE_JOURNAL_SCHEMA | UPDATE_JOURNAL_SCHEMA)
+    ) {
+        return Err(GraphError::Schema(format!(
+            "unsupported update journal schema: {:?}",
+            value["schema"]
+        )));
+    }
+    let origin_context = journal_generation(&value, "origin_context", true)?;
+    let origin_lineage = journal_generation(&value, "origin_lineage", true)?;
+    if origin_context.is_some() != origin_lineage.is_some() {
+        return Err(GraphError::Schema(
+            "update journal origin is invalid".to_owned(),
+        ));
+    }
+    let journal = UpdateJournal {
+        before_public_generation: journal_generation(&value, "before_public_generation", true)?,
+        after_public_generation: journal_generation(&value, "after_public_generation", false)?
+            .ok_or_else(|| GraphError::Schema("update journal generation missing".to_owned()))?,
+        origin_context,
+        origin_lineage,
+        before_private_checksum: journal_generation(&value, "before_private_checksum", true)?,
+        after_private_checksum: journal_generation(&value, "after_private_checksum", false)?
+            .ok_or_else(|| GraphError::Schema("update journal checksum missing".to_owned()))?,
+        state_graph: journal_graph(&value["state_graph"], "state_graph")?,
+    };
+    if schema == Some(LEGACY_UPDATE_JOURNAL_SCHEMA) {
+        let mut legacy_public_graph = journal_graph(&value["public_graph"], "public_graph")?;
+        legacy_public_graph.manifest = journal.state_graph.manifest.clone();
+        if legacy_public_graph != journal.state_graph {
+            return Err(GraphError::Schema(
+                "update journal graph mismatch".to_owned(),
+            ));
+        }
+    }
+    // v1/v2 journals recorded the rendered public bytes. Validate the stored record's own
+    // consistency, but never require a byte-match against a re-render by this binary: the
+    // journal may predate an exporter policy or formatting change, and recovery re-renders
+    // from the checksum-verified raw state below.
+    if let Some(after_public_json) = value["after_public_json"].as_str() {
+        habitat_graph_serve::from_node_link(after_public_json)?;
+        if super::private_state::generation(after_public_json.as_bytes())
+            != journal.after_public_generation
+        {
+            return Err(GraphError::Schema(
+                "update journal generation mismatch".to_owned(),
+            ));
+        }
+    }
+    if private_graph_generation(&journal.state_graph)? != journal.after_private_checksum {
+        return Err(GraphError::Schema(
+            "update journal generation mismatch".to_owned(),
+        ));
+    }
+    Ok(journal)
+}
+
+fn update_journal_state_path(path: &Path) -> Result<PathBuf> {
+    let filename = path
+        .file_name()
+        .and_then(|filename| filename.to_str())
+        .and_then(|filename| filename.strip_suffix(".update-journal"))
+        .ok_or_else(|| GraphError::Schema("invalid update journal path".to_owned()))?;
+    Ok(path.with_file_name(filename))
+}
+
+fn validate_update_journal_origin(
+    out: &Path,
+    current_state_path: &Path,
+    journal_state_path: &Path,
+    journal: &UpdateJournal,
+) -> Result<()> {
+    let current = super::private_state::context_identity_for_output(&out.join("graph.json"))?;
+    let same_context = current_state_path == journal_state_path;
+    let stored_context = super::private_state::state_context_key(journal_state_path);
+    let migrated_unscoped = same_context
+        && journal.origin_context.is_none()
+        && current.is_some()
+        && stored_context == current.as_ref().map(|identity| identity.key.clone());
+    if !migrated_unscoped {
+        if journal.origin_context != stored_context {
+            return Err(GraphError::Guard(
+                "pending update belongs to a different Git context".to_owned(),
+            ));
+        }
+        if same_context {
+            if journal.origin_context != current.as_ref().map(|identity| identity.key.clone()) {
+                return Err(GraphError::Guard(
+                    "pending update belongs to a different Git context".to_owned(),
+                ));
+            }
+        } else {
+            let Some(current) = current.as_ref() else {
+                return Err(GraphError::Guard(
+                    "pending update belongs to a different Git context".to_owned(),
+                ));
+            };
+            if journal.origin_lineage.as_deref() != Some(current.lineage.as_str())
+                || !super::private_state::context_is_verified_ancestor(
+                    journal_state_path,
+                    current_state_path,
+                )?
+            {
+                return Err(GraphError::Guard(
+                    "pending update belongs to a different Git context".to_owned(),
+                ));
+            }
+        }
+    }
+    if !same_context || journal.before_private_checksum.is_some() {
+        let expected = journal.before_private_checksum.as_deref().map_or_else(
+            || vec![journal.after_private_checksum.as_str()],
+            |before| vec![before, journal.after_private_checksum.as_str()],
+        );
+        let target_status =
+            super::private_state::private_checksum_status_at_path(current_state_path, &expected)?;
+        if target_status.any && !target_status.matched {
+            return Err(GraphError::Guard(
+                "pending update private lineage changed".to_owned(),
+            ));
+        }
+    }
+    if let Some(before) = journal.before_private_checksum.as_deref() {
+        let status = super::private_state::private_checksum_status(
+            journal_state_path,
+            &[before, &journal.after_private_checksum],
+        )?;
+        if status.any && !status.matched {
+            return Err(GraphError::Guard(
+                "pending update private lineage changed".to_owned(),
+            ));
+        }
+    }
+    Ok(())
+}
+
+fn commit_update_journal(
+    out: &Path,
+    state_path: &Path,
+    legacy_state_path: &Path,
+    journal_path: &Path,
+    journal: &UpdateJournal,
+) -> Result<()> {
+    super::private_state::ensure_state_context_current(
+        &out.join("graph.json"),
+        state_path,
+        "update transaction commit",
+    )?;
+    super::extract::write_public_artifacts(
+        out,
+        &journal.state_graph,
+        super::extract::ExtractOpts::default(),
+    )?;
+    let public_json = habitat_graph_export::to_node_link(&journal.state_graph)?;
+    let public_graph = habitat_graph_serve::from_node_link(&public_json)?;
+    let state_json = super::private_state::serialize(
+        &journal.state_graph,
+        &super::private_state::generation(public_json.as_bytes()),
+        &super::private_state::semantic_generation(&public_graph)?,
+    )?;
+    super::private_state::write_state(state_path, &state_json)?;
+    if state_path != legacy_state_path {
+        super::private_state::remove(legacy_state_path, "legacy private state")?;
+    }
+    super::private_state::finalize_context_journal(
+        &out.join("graph.json"),
+        state_path,
+        journal_path,
+        "update transaction commit",
+    )
+}
+
+fn recover_update_journal(out: &Path, state_path: &Path, legacy_state_path: &Path) -> Result<bool> {
+    let journals = super::private_state::pending_update_journals(state_path)?;
+    if journals.len() > 1 {
+        return Err(GraphError::Guard(format!(
+            "multiple pending update transactions exist for {}",
+            state_path.display()
+        )));
+    }
+    let Some(journal_path) = journals.first() else {
+        return Ok(false);
+    };
+    let journal_state_path = update_journal_state_path(journal_path)?;
+    let journal = load_update_journal(journal_path)?;
+    validate_update_journal_origin(out, state_path, &journal_state_path, &journal)?;
+    let current = current_public_generation(&out.join("graph.json"))?;
+    if current != journal.before_public_generation
+        && current.as_deref() != Some(journal.after_public_generation.as_str())
+    {
+        return Err(GraphError::Guard(
+            "public graph changed while an update transaction is pending".to_owned(),
+        ));
+    }
+    commit_update_journal(out, state_path, legacy_state_path, journal_path, &journal)?;
+    Ok(true)
+}
+
+/// Attempts to load the prior graph from the context-scoped private state.
 ///
 /// Returns `Ok(None)` when:
-/// - The sidecar does not exist (first run — a full build is needed).
-/// - The sidecar is corrupted / not valid JSON (a warning is printed to stderr).
-/// - The sidecar's `schema` differs from [`SCHEMA_VERSION`] (taxonomy mismatch; warning printed).
+/// - No matching state exists (first run — a full build is needed).
+/// - The state is corrupted / not valid JSON (a warning is printed to stderr).
+/// - The state's `schema` differs from [`SCHEMA_VERSION`] (taxonomy mismatch; warning printed).
 ///
 /// # Errors
 ///
-/// Returns [`GraphError::Io`] only if the sidecar file exists but cannot be read from disk.
-fn try_load_prior(sidecar_path: &Path) -> Result<Option<Graph>> {
-    if !sidecar_path.exists() {
+/// Returns an error if private state or public output cannot be inspected safely.
+fn try_load_prior(sidecar_path: &Path, public: Option<&PublicOutput>) -> Result<Option<Graph>> {
+    let mut state = if let Some(public) = public {
+        match super::private_state::load_matching(
+            sidecar_path,
+            Some(&public.generation),
+            Some(&public.semantic_generation),
+            "incremental private state",
+        ) {
+            Ok(state) => state,
+            Err(error) if error.kind() == "schema" => {
+                eprintln!("warning: sidecar parse failed ({error}): forcing full rebuild");
+                return Ok(None);
+            }
+            Err(error) => return Err(error),
+        }
+    } else {
+        None
+    };
+    if state.is_none() {
+        state = match super::private_state::read(sidecar_path, "incremental private state") {
+            Ok(state) => state,
+            Err(error) if error.kind() == "schema" => {
+                eprintln!("warning: sidecar parse failed ({error}): forcing full rebuild");
+                return Ok(None);
+            }
+            Err(error) => return Err(error),
+        };
+    }
+    let Some(state) = state else {
+        return Ok(None);
+    };
+
+    let public_matches = if let Some(public) = public {
+        if super::private_state::matches_public(
+            &state,
+            Some(&public.generation),
+            Some(&public.semantic_generation),
+        ) {
+            true
+        } else {
+            let projected = habitat_graph_export::to_node_link(&state.graph)?;
+            let projected = habitat_graph_serve::from_node_link(&projected)?;
+            super::private_state::semantic_generation(&projected)? == public.semantic_generation
+        }
+    } else {
+        false
+    };
+    if !public_matches {
+        eprintln!("warning: private state does not match graph.json: forcing full rebuild");
         return Ok(None);
     }
 
-    let bytes = std::fs::read(sidecar_path)
-        .map_err(|e| GraphError::Io(format!("sidecar read: {e}")))?;
-    let text = String::from_utf8_lossy(&bytes);
-
-    let graph = match Graph::from_json(&text) {
-        Ok(g) => g,
-        Err(e) => {
-            eprintln!("warning: sidecar parse failed ({e}): forcing full rebuild");
-            return Ok(None);
-        }
-    };
+    let graph = state.graph;
 
     if graph.schema != SCHEMA_VERSION {
         eprintln!(
@@ -234,35 +728,28 @@ fn try_load_prior(sidecar_path: &Path) -> Result<Option<Graph>> {
 /// Performs a full rebuild from scratch (first run or schema-version mismatch).
 ///
 /// Reads every file in `files`, runs the full pipeline
-/// (extract → assemble → analyze → export), and writes all artifacts including a fresh sidecar.
-///
-/// Files are read twice: once internally by `extract_files` for AST parsing, and once here to
-/// compute the `blake3` content hashes for the sidecar manifest.
+/// (extract → assemble → analyze → export), and writes all artifacts plus fresh private state.
 ///
 /// # Errors
 ///
 /// Returns a [`GraphError`] on extraction, analysis, export, or IO failure.
-fn do_full_build(out: &Path, files: &[PathBuf]) -> Result<()> {
-    // Run the full pipeline (extract_files reads files internally).
-    let extractions = habitat_graph_extract::extract_files(files)?;
-    let mut graph = habitat_graph_build::assemble(extractions);
-    // F12: cluster on the TRUSTED subgraph only (INFERRED/AMBIGUOUS edges excluded).
-    graph.communities =
-        habitat_graph_analyze::detect_communities(&habitat_graph_analyze::trusted_subgraph(&graph));
-    let graph = graph.sorted();
-
-    // Compute the sidecar manifest (second pass over the same files for content hashes).
-    let inputs: Vec<(PathBuf, Vec<u8>)> = files
-        .iter()
-        .map(|p| {
-            let bytes = habitat_graph_source::read_local(p, 0)?;
-            Ok((p.clone(), bytes))
-        })
-        .collect::<Result<_>>()?;
-    let manifest = habitat_graph_source::build_manifest(&inputs, env!("CARGO_PKG_VERSION"));
+fn do_full_build(
+    out: &Path,
+    files: &[PathBuf],
+    sidecar_path: &Path,
+    legacy_sidecar_path: &Path,
+) -> Result<()> {
+    let (graph, manifest) = super::extract::build_full_graph(files)?;
 
     let n = graph.nodes.len();
-    write_artifacts(out, &graph, manifest)?;
+    write_artifacts(
+        out,
+        &graph,
+        manifest,
+        sidecar_path,
+        legacy_sidecar_path,
+        None,
+    )?;
     println!(
         "update: {} changed, {n} nodes (analyze re-run globally)",
         files.len()
@@ -270,44 +757,36 @@ fn do_full_build(out: &Path, files: &[PathBuf]) -> Result<()> {
     Ok(())
 }
 
-/// Writes all three core artifacts (`graph.json`, `GRAPH_REPORT.md`, `graph.html`) and the
-/// sidecar (`<out>/.habitat-graph-state.json`) into `out`, creating the directory if needed.
+/// Writes all three core artifacts (`graph.json`, `GRAPH_REPORT.md`, `graph.html`), refreshes any
+/// existing optional exports, and writes the private state cache.
 ///
-/// The sidecar stores `graph` with `current_manifest` substituted in: this ensures the sidecar
+/// The private state stores `graph` with `current_manifest` substituted in: this ensures the cache
 /// tracks the actual content hashes of the current file-system snapshot, not the empty manifest
-/// produced by [`habitat_graph_build::assemble`].
+/// produced by [`habitat_graph_build::assemble()`].
 ///
 /// # Errors
 ///
 /// Returns [`GraphError::Io`] on any filesystem failure, or [`GraphError::Schema`] on
 /// serialization failure.
-fn write_artifacts(out: &Path, graph: &Graph, current_manifest: Manifest) -> Result<()> {
-    std::fs::create_dir_all(out).map_err(|e| GraphError::Io(e.to_string()))?;
-
-    // graph.json — NetworkX node-link envelope (graphify-compatible; P1-G12 schema_version key).
-    let json = habitat_graph_export::to_node_link(graph)?;
-    std::fs::write(out.join(GRAPH_JSON), json.as_bytes())
-        .map_err(|e| GraphError::Io(e.to_string()))?;
-
-    // GRAPH_REPORT.md — human-facing Markdown summary.
-    let report = habitat_graph_export::render_report(graph);
-    std::fs::write(out.join("GRAPH_REPORT.md"), report.as_bytes())
-        .map_err(|e| GraphError::Io(e.to_string()))?;
-
-    // graph.html — self-contained interactive viewer.
-    let html = habitat_graph_export::render_html(graph)?;
-    std::fs::write(out.join("graph.html"), html.as_bytes())
-        .map_err(|e| GraphError::Io(e.to_string()))?;
-
-    // Sidecar — full internal Graph with the current content-hash manifest, written last so
-    // that if it exists, the other artifacts were (at least attempted to be) written first.
+fn write_artifacts(
+    out: &Path,
+    graph: &Graph,
+    current_manifest: Manifest,
+    sidecar_path: &Path,
+    legacy_sidecar_path: &Path,
+    before_private_checksum: Option<&str>,
+) -> Result<()> {
     let mut sidecar = graph.clone();
     sidecar.manifest = current_manifest;
-    let sidecar_json = sidecar.to_json()?;
-    std::fs::write(out.join(SIDECAR), sidecar_json.as_bytes())
-        .map_err(|e| GraphError::Io(e.to_string()))?;
-
-    Ok(())
+    let journal = UpdateJournal::new(out, sidecar_path, sidecar, before_private_checksum)?;
+    write_update_journal(sidecar_path, &journal)?;
+    commit_update_journal(
+        out,
+        sidecar_path,
+        legacy_sidecar_path,
+        &super::private_state::update_journal_path(sidecar_path)?,
+        &journal,
+    )
 }
 
 /// Returns `graph` with all nodes whose [`habitat_graph_core::Node::source_file`] appears in
@@ -330,6 +809,7 @@ fn prune_graph(mut graph: Graph, stale_files: &HashSet<&str>) -> Graph {
     graph
         .edges
         .retain(|e| kept.contains(&e.source) && kept.contains(&e.target));
+    graph.node_content_ids.retain(|id, _| kept.contains(id));
     // Communities are always re-run globally after the merge; clear to avoid stale data.
     graph.communities.clear();
     graph
@@ -337,8 +817,9 @@ fn prune_graph(mut graph: Graph, stale_files: &HashSet<&str>) -> Graph {
 
 // ── Tests ─────────────────────────────────────────────────────────────────────────────────────
 
-#[cfg(test)]
+#[cfg(all(test, unix))]
 mod tests {
+    use std::collections::HashSet;
     use std::fs;
     use std::path::Path;
 
@@ -394,6 +875,27 @@ mod tests {
         Graph::from_json(&read_sidecar(out)).expect("sidecar must parse as Graph")
     }
 
+    fn git(root: &Path, args: &[&str]) {
+        let output = std::process::Command::new("git")
+            .args(args)
+            .current_dir(root)
+            .output()
+            .unwrap();
+        assert!(output.status.success(), "git {args:?} failed");
+    }
+
+    fn init_git(root: &Path) {
+        git(root, &["init", "-q"]);
+        git(root, &["config", "user.name", "Habitat Graph Tests"]);
+        git(root, &["config", "user.email", "tests@example.invalid"]);
+    }
+
+    fn commit_git(root: &Path, content: &str) {
+        fs::write(root.join("lineage.txt"), content).unwrap();
+        git(root, &["add", "lineage.txt"]);
+        git(root, &["commit", "-q", "-m", content]);
+    }
+
     // ─────────────────────────────────────────────────────────────────────────────
     // T1–T5  First build
     // ─────────────────────────────────────────────────────────────────────────────
@@ -419,12 +921,66 @@ mod tests {
 
     // T3: first build writes the sidecar.
     #[test]
+    fn fresh_dir_writes_sidecar_with_owner_only_permissions() {
+        let src = TempDir::new().unwrap();
+        let out = TempDir::new().unwrap();
+        mk_file(src.path(), "lib.rs", "fn private_cache() {}");
+        let _ = run(src.path(), out.path());
+        let sidecar = out.path().join(SIDECAR);
+        assert!(sidecar.exists(), "sidecar must be written on first build");
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt as _;
+            let mode = fs::metadata(sidecar).unwrap().permissions().mode() & 0o777;
+            assert_eq!(mode, 0o600, "sidecar must be owner-readable/writable only");
+        }
+    }
+
+    #[test]
+    fn git_outputs_store_incremental_state_under_git_metadata() {
+        let repo = TempDir::new().unwrap();
+        fs::create_dir(repo.path().join(".git")).unwrap();
+        fs::create_dir(repo.path().join(".git/objects")).unwrap();
+        fs::write(repo.path().join(".git/HEAD"), "ref: refs/heads/main\n").unwrap();
+        let src = repo.path().join("src");
+        let out = repo.path().join("public");
+        fs::create_dir(&src).unwrap();
+        mk_file(&src, "lib.rs", "fn api_key_private_cache() {}");
+
+        assert_eq!(run(&src, &out), 0);
+        assert_eq!(run(&src, &out), 0);
+        assert!(!out.join(SIDECAR).exists());
+
+        let state_dir = repo.path().join(".git/habitat-graph/state");
+        let states: Vec<_> = fs::read_dir(&state_dir)
+            .unwrap()
+            .filter_map(std::result::Result::ok)
+            .filter(|entry| entry.file_name().to_string_lossy().ends_with(".json"))
+            .collect();
+        assert_eq!(states.len(), 1);
+        assert!(fs::read_to_string(states[0].path())
+            .unwrap()
+            .contains("api_key_private_cache"));
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt as _;
+            assert_eq!(
+                fs::metadata(states[0].path()).unwrap().permissions().mode() & 0o777,
+                0o600
+            );
+        }
+    }
+
+    #[test]
     fn fresh_dir_writes_sidecar() {
         let src = TempDir::new().unwrap();
         let out = TempDir::new().unwrap();
         mk_file(src.path(), "lib.rs", "fn a() {}");
         let _ = run(src.path(), out.path());
-        assert!(out.path().join(SIDECAR).exists(), "sidecar must be written on first build");
+        assert!(
+            out.path().join(SIDECAR).exists(),
+            "sidecar must be written on first build"
+        );
     }
 
     // T4: first build writes GRAPH_REPORT.md.
@@ -474,7 +1030,7 @@ mod tests {
         assert_eq!(before, after, "no-op must leave graph.json byte-identical");
     }
 
-    // T8: no-op leaves the sidecar parseable as a valid Graph.
+    // T8: an unchanged-input refresh leaves the sidecar parseable as a valid Graph.
     #[test]
     fn noop_sidecar_still_parseable() {
         let src = TempDir::new().unwrap();
@@ -482,9 +1038,161 @@ mod tests {
         mk_file(src.path(), "lib.rs", "fn x() {}");
         let _ = run(src.path(), out.path());
         let _ = run(src.path(), out.path());
-        // If the sidecar was not touched, it still deserializes.
         let g = parse_sidecar(out.path());
         assert_eq!(g.nodes.len(), 1);
+    }
+
+    #[test]
+    fn mismatched_public_generation_forces_source_rebuild() {
+        let src = TempDir::new().unwrap();
+        let out = TempDir::new().unwrap();
+        mk_file(src.path(), "lib.rs", "fn source_truth() {}");
+        assert_eq!(run(src.path(), out.path()), 0);
+
+        let committed_public = read_graph_json(out.path());
+        let committed_graph = habitat_graph_serve::from_node_link(&committed_public).unwrap();
+        let mut stale_private = super::super::private_state::parse(&read_sidecar(out.path()))
+            .unwrap()
+            .graph;
+        stale_private.nodes[0].label = "stale_private_cache".to_owned();
+        let stale_bytes = super::super::private_state::serialize(
+            &stale_private,
+            &super::super::private_state::generation(committed_public.as_bytes()),
+            &super::super::private_state::semantic_generation(&committed_graph).unwrap(),
+        )
+        .unwrap();
+        fs::write(out.path().join(SIDECAR), stale_bytes).unwrap();
+
+        let mut checked_out = committed_graph;
+        checked_out.nodes[0].label = "checked_out_public".to_owned();
+        fs::write(
+            out.path().join("graph.json"),
+            habitat_graph_export::to_node_link(&checked_out).unwrap(),
+        )
+        .unwrap();
+
+        assert_eq!(run(src.path(), out.path()), 0);
+        let rebuilt = read_graph_json(out.path());
+        assert!(rebuilt.contains("source_truth"));
+        assert!(!rebuilt.contains("stale_private_cache"));
+    }
+
+    #[test]
+    fn unchanged_input_refreshes_legacy_outputs_and_hardens_sidecar() {
+        let src = TempDir::new().unwrap();
+        let out = TempDir::new().unwrap();
+        let raw_label = "api_key_assignment_refused";
+        mk_file(src.path(), "lib.rs", &format!("fn {raw_label}() {{}}"));
+        assert_eq!(run(src.path(), out.path()), 0);
+
+        for artifact in ["graph.json", "GRAPH_REPORT.md", "graph.html"] {
+            fs::write(out.path().join(artifact), raw_label).unwrap();
+        }
+        for artifact in ["graph.svg", "graph.graphml", "graph.cypher"] {
+            fs::write(out.path().join(artifact), raw_label).unwrap();
+        }
+        fs::write(
+            out.path().join(".habitat-graph-artifacts.json"),
+            serde_json::to_vec_pretty(&serde_json::json!({
+                "schema": "habitat-graph.artifact-manifest.v1",
+                "files": ["graph.svg", "graph.graphml", "graph.cypher"],
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+        let existing_ids: HashSet<u32> = parse_sidecar(out.path())
+            .nodes
+            .iter()
+            .map(|node| node.id.get())
+            .collect();
+        let stale_id = (0..=u32::MAX)
+            .find(|candidate| !existing_ids.contains(candidate))
+            .unwrap();
+        let wiki = out.path().join("wiki");
+        fs::create_dir(&wiki).unwrap();
+        fs::write(wiki.join("index.md"), raw_label).unwrap();
+        fs::write(wiki.join(format!("node-{stale_id}.md")), raw_label).unwrap();
+        fs::write(
+            wiki.join(".habitat-graph-generated.json"),
+            serde_json::to_vec_pretty(&serde_json::json!({
+                "schema": "habitat-graph.wiki-manifest.v1",
+                "files": ["index.md", format!("node-{stale_id}.md")],
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+        fs::write(wiki.join("user.md"), "keep me").unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt as _;
+            fs::set_permissions(out.path().join(SIDECAR), fs::Permissions::from_mode(0o644))
+                .unwrap();
+        }
+
+        assert_eq!(run(src.path(), out.path()), 0);
+        for artifact in [
+            "graph.json",
+            "GRAPH_REPORT.md",
+            "graph.html",
+            "graph.svg",
+            "graph.graphml",
+            "graph.cypher",
+        ] {
+            let refreshed = fs::read_to_string(out.path().join(artifact)).unwrap();
+            assert!(
+                !refreshed.contains(raw_label),
+                "legacy raw label survived refresh in {artifact}"
+            );
+        }
+        assert!(!wiki.join(format!("node-{stale_id}.md")).exists());
+        assert_eq!(fs::read_to_string(wiki.join("user.md")).unwrap(), "keep me");
+        for entry in fs::read_dir(&wiki).unwrap() {
+            let entry = entry.unwrap();
+            if entry.file_name() == "user.md" {
+                continue;
+            }
+            let refreshed = fs::read_to_string(entry.path()).unwrap();
+            assert!(!refreshed.contains(raw_label));
+        }
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt as _;
+            let mode = fs::metadata(out.path().join(SIDECAR))
+                .unwrap()
+                .permissions()
+                .mode()
+                & 0o777;
+            assert_eq!(mode, 0o600);
+        }
+        let temporary_count = fs::read_dir(out.path())
+            .unwrap()
+            .filter_map(std::result::Result::ok)
+            .filter(|entry| {
+                entry
+                    .file_name()
+                    .to_string_lossy()
+                    .contains(".habitat-graph-state.json.tmp")
+            })
+            .count();
+        assert_eq!(temporary_count, 0, "sidecar temp file must not survive");
+    }
+
+    #[test]
+    fn existing_sidecar_is_hardened_before_source_detection_failure() {
+        use std::os::unix::fs::PermissionsExt as _;
+
+        let src = TempDir::new().unwrap();
+        let out = TempDir::new().unwrap();
+        mk_file(src.path(), "lib.rs", "fn private_cache() {}");
+        assert_eq!(run(src.path(), out.path()), 0);
+
+        let sidecar = out.path().join(SIDECAR);
+        fs::set_permissions(&sidecar, fs::Permissions::from_mode(0o644)).unwrap();
+        let missing = src.path().join("missing");
+        assert_eq!(run(&missing, out.path()), 4);
+
+        let mode = fs::metadata(sidecar).unwrap().permissions().mode() & 0o777;
+        assert_eq!(mode, 0o600);
     }
 
     // T9: no-op on an empty source directory exits 0.
@@ -493,7 +1201,11 @@ mod tests {
         let src = TempDir::new().unwrap();
         let out = TempDir::new().unwrap();
         let _ = run(src.path(), out.path()); // first build (empty)
-        assert_eq!(run(src.path(), out.path()), 0, "empty-dir no-op must exit 0");
+        assert_eq!(
+            run(src.path(), out.path()),
+            0,
+            "empty-dir no-op must exit 0"
+        );
     }
 
     // ─────────────────────────────────────────────────────────────────────────────
@@ -572,7 +1284,10 @@ mod tests {
         let g2 = parse_sidecar(out.path());
         let hash2 = &g2.manifest.inputs[0].content_hash;
 
-        assert_ne!(hash1, *hash2, "content_hash must change when file content changes");
+        assert_ne!(
+            hash1, *hash2,
+            "content_hash must change when file content changes"
+        );
     }
 
     // T15: nodes from unchanged files are preserved after an incremental update.
@@ -637,7 +1352,10 @@ mod tests {
         mk_file(src.path(), "b.rs", "fn brand_new() {}");
         let _ = run(src.path(), out.path());
         let json = read_graph_json(out.path());
-        assert!(json.contains("brand_new"), "added file's function must appear");
+        assert!(
+            json.contains("brand_new"),
+            "added file's function must appear"
+        );
     }
 
     // T19: the sidecar tracks the newly added file's path and hash.
@@ -667,7 +1385,10 @@ mod tests {
         mk_file(src.path(), "deep/sub/new.rs", "fn nested_fn() {}");
         let _ = run(src.path(), out.path());
         let json = read_graph_json(out.path());
-        assert!(json.contains("nested_fn"), "deeply nested file must be found after add");
+        assert!(
+            json.contains("nested_fn"),
+            "deeply nested file must be found after add"
+        );
     }
 
     // T21: adding a file increases the node count in graph.json.
@@ -682,7 +1403,10 @@ mod tests {
         mk_file(src.path(), "b.rs", "fn fn_b() {}");
         let _ = run(src.path(), out.path());
         let after = count_nodes(out.path());
-        assert!(after > before, "node count must increase after adding a file");
+        assert!(
+            after > before,
+            "node count must increase after adding a file"
+        );
     }
 
     // ─────────────────────────────────────────────────────────────────────────────
@@ -712,8 +1436,14 @@ mod tests {
         rm_file(src.path(), "b.rs");
         let _ = run(src.path(), out.path());
         let json = read_graph_json(out.path());
-        assert!(!json.contains("gone"), "node from removed file must be absent");
-        assert!(json.contains("keep"), "node from remaining file must still be present");
+        assert!(
+            !json.contains("gone"),
+            "node from removed file must be absent"
+        );
+        assert!(
+            json.contains("keep"),
+            "node from remaining file must still be present"
+        );
     }
 
     // T24: edges whose source or target was in a removed file are also dropped.
@@ -785,13 +1515,15 @@ mod tests {
 
         // Corrupt the sidecar's schema field to simulate a taxonomy version bump.
         let sidecar_str = read_sidecar(out.path());
-        let corrupted = sidecar_str.replace(
-            "habitat-graph.graph.v0",
-            "habitat-graph.graph.OLD_VERSION",
-        );
+        let corrupted =
+            sidecar_str.replace("habitat-graph.graph.v0", "habitat-graph.graph.OLD_VERSION");
         fs::write(out.path().join(SIDECAR), corrupted).unwrap();
 
-        assert_eq!(run(src.path(), out.path()), 0, "schema mismatch must still succeed");
+        assert_eq!(
+            run(src.path(), out.path()),
+            0,
+            "schema mismatch must still succeed"
+        );
     }
 
     // T28: after a schema-mismatch full rebuild the sidecar carries the correct schema.
@@ -803,10 +1535,8 @@ mod tests {
         let _ = run(src.path(), out.path());
 
         let sidecar_str = read_sidecar(out.path());
-        let corrupted = sidecar_str.replace(
-            "habitat-graph.graph.v0",
-            "habitat-graph.graph.OLD_VERSION",
-        );
+        let corrupted =
+            sidecar_str.replace("habitat-graph.graph.v0", "habitat-graph.graph.OLD_VERSION");
         fs::write(out.path().join(SIDECAR), corrupted).unwrap();
         let _ = run(src.path(), out.path());
 
@@ -828,10 +1558,7 @@ mod tests {
 
         // Corrupt → forced full rebuild.
         let sidecar_str = read_sidecar(out.path());
-        let corrupted = sidecar_str.replace(
-            "habitat-graph.graph.v0",
-            "habitat-graph.graph.STALE",
-        );
+        let corrupted = sidecar_str.replace("habitat-graph.graph.v0", "habitat-graph.graph.STALE");
         fs::write(out.path().join(SIDECAR), corrupted).unwrap();
         let _ = run(src.path(), out.path()); // full rebuild
 
@@ -853,7 +1580,11 @@ mod tests {
         mk_file(src.path(), "lib.rs", "fn fn1() {}");
         let _ = run(src.path(), out.path());
         fs::remove_file(out.path().join(SIDECAR)).unwrap();
-        assert_eq!(run(src.path(), out.path()), 0, "missing sidecar must trigger full rebuild");
+        assert_eq!(
+            run(src.path(), out.path()),
+            0,
+            "missing sidecar must trigger full rebuild"
+        );
     }
 
     // T31: a completely fresh output directory (no prior graph.json or sidecar) exits 0.
@@ -875,7 +1606,11 @@ mod tests {
         let _ = run(src.path(), out.path());
         // Overwrite sidecar with garbage.
         fs::write(out.path().join(SIDECAR), b"NOT JSON AT ALL!!!").unwrap();
-        assert_eq!(run(src.path(), out.path()), 0, "corrupt sidecar must still succeed");
+        assert_eq!(
+            run(src.path(), out.path()),
+            0,
+            "corrupt sidecar must still succeed"
+        );
     }
 
     // T33: after a corrupted-sidecar full rebuild the new sidecar is valid.
@@ -909,7 +1644,10 @@ mod tests {
 
         let j1 = fs::read(out1.path().join("graph.json")).unwrap();
         let j2 = fs::read(out2.path().join("graph.json")).unwrap();
-        assert_eq!(j1, j2, "two full builds must produce byte-identical graph.json");
+        assert_eq!(
+            j1, j2,
+            "two full builds must produce byte-identical graph.json"
+        );
     }
 
     // T35: incremental build (re-extract changed file) produces the same graph.json as a
@@ -1105,7 +1843,10 @@ mod tests {
 
         mk_file(src.path(), "extra.rs", "fn extra() {}");
         let _ = run(src.path(), out.path());
-        assert!(count_nodes(out.path()) > original_count, "add must increase count");
+        assert!(
+            count_nodes(out.path()) > original_count,
+            "add must increase count"
+        );
 
         rm_file(src.path(), "extra.rs");
         let _ = run(src.path(), out.path());
@@ -1171,5 +1912,321 @@ mod tests {
         assert!(json.contains("v3"), "v3 must appear after second change");
         assert!(!json.contains("v2"), "v2 must be gone after second change");
         assert!(!json.contains("v1"), "v1 must still be gone");
+    }
+
+    #[test]
+    fn pending_add_transaction_blocks_update_artifact_writes() {
+        let src = TempDir::new().unwrap();
+        let out = TempDir::new().unwrap();
+        mk_file(src.path(), "lib.rs", "fn before_pending_add() {}");
+        assert_eq!(run(src.path(), out.path()), 0);
+        let public_before = read_graph_json(out.path());
+        fs::write(out.path().join(format!("{SIDECAR}.add-journal")), "pending").unwrap();
+        mk_file(src.path(), "lib.rs", "fn changed_during_pending_add() {}");
+
+        assert_eq!(run(src.path(), out.path()), 4);
+        assert_eq!(read_graph_json(out.path()), public_before);
+        assert!(out.path().join(format!("{SIDECAR}.add-journal")).exists());
+    }
+
+    #[test]
+    fn update_journal_stores_one_checksummed_graph_without_public_bytes() {
+        let src = TempDir::new().unwrap();
+        let out = TempDir::new().unwrap();
+        mk_file(src.path(), "lib.rs", "fn journal_node() {}");
+        let graph = habitat_graph_build::assemble(
+            habitat_graph_extract::extract_files(&[src.path().join("lib.rs")]).unwrap(),
+        )
+        .sorted();
+        let (state_path, _) = super::prepare_private_state(out.path()).unwrap();
+        let journal = super::UpdateJournal::new(out.path(), &state_path, graph, None).unwrap();
+        super::write_update_journal(&state_path, &journal).unwrap();
+        let journal_path = super::super::private_state::update_journal_path(&state_path).unwrap();
+        let mut value: serde_json::Value =
+            serde_json::from_str(&fs::read_to_string(&journal_path).unwrap()).unwrap();
+
+        assert_eq!(value["schema"], super::UPDATE_JOURNAL_SCHEMA);
+        assert!(value.get("public_graph").is_none());
+        assert!(value.get("after_public_json").is_none());
+        assert!(super::load_update_journal(&journal_path).is_ok());
+
+        value["state_graph"]["nodes"][0]["source_file"] =
+            serde_json::Value::String("tampered.rs".to_owned());
+        fs::write(&journal_path, serde_json::to_vec_pretty(&value).unwrap()).unwrap();
+
+        let error = super::load_update_journal(&journal_path)
+            .err()
+            .expect("tampered journal must fail");
+        assert_eq!(error.kind(), "schema");
+        assert!(error.to_string().contains("generation mismatch"));
+    }
+
+    #[test]
+    fn pending_update_journal_survives_renderer_drift() {
+        // A v2 journal stores the public bytes the (old) writer rendered. After an exporter
+        // policy or formatting change those bytes no longer byte-match a re-render by this
+        // binary — recovery must still proceed from the checksum-verified raw state instead of
+        // wedging every subsequent update and add.
+        let src = TempDir::new().unwrap();
+        let out = TempDir::new().unwrap();
+        mk_file(src.path(), "lib.rs", "fn drift_node() {}");
+        let graph = habitat_graph_build::assemble(
+            habitat_graph_extract::extract_files(&[src.path().join("lib.rs")]).unwrap(),
+        )
+        .sorted();
+        let (state_path, _) = super::prepare_private_state(out.path()).unwrap();
+        let journal = super::UpdateJournal::new(out.path(), &state_path, graph, None).unwrap();
+        super::write_update_journal(&state_path, &journal).unwrap();
+        let journal_path = super::super::private_state::update_journal_path(&state_path).unwrap();
+        let mut value: serde_json::Value =
+            serde_json::from_str(&fs::read_to_string(&journal_path).unwrap()).unwrap();
+        let drifted = format!(
+            "{}\n",
+            habitat_graph_export::to_node_link(&journal.state_graph).unwrap()
+        );
+        value["schema"] =
+            serde_json::Value::String(super::RENDERED_UPDATE_JOURNAL_SCHEMA.to_owned());
+        value["after_public_json"] = serde_json::Value::String(drifted.clone());
+        value["after_public_generation"] =
+            serde_json::Value::String(super::super::private_state::generation(drifted.as_bytes()));
+        fs::write(&journal_path, serde_json::to_vec_pretty(&value).unwrap()).unwrap();
+        fs::write(out.path().join("graph.json"), &drifted).unwrap();
+
+        assert!(
+            super::load_update_journal(&journal_path).is_ok(),
+            "renderer drift must not make a pending journal unloadable"
+        );
+        assert_eq!(run(src.path(), out.path()), 0, "recovery must succeed");
+        assert!(
+            !journal_path.exists(),
+            "recovered journal must be finalized"
+        );
+        assert!(read_graph_json(out.path()).contains("drift_node"));
+    }
+
+    #[test]
+    fn legacy_update_journal_rejects_divergent_duplicate_graphs() {
+        let src = TempDir::new().unwrap();
+        let out = TempDir::new().unwrap();
+        mk_file(src.path(), "lib.rs", "fn legacy_journal_node() {}");
+        let graph = habitat_graph_build::assemble(
+            habitat_graph_extract::extract_files(&[src.path().join("lib.rs")]).unwrap(),
+        )
+        .sorted();
+        let (state_path, _) = super::prepare_private_state(out.path()).unwrap();
+        let journal = super::UpdateJournal::new(out.path(), &state_path, graph, None).unwrap();
+        super::write_update_journal(&state_path, &journal).unwrap();
+        let journal_path = super::super::private_state::update_journal_path(&state_path).unwrap();
+        let mut value: serde_json::Value =
+            serde_json::from_str(&fs::read_to_string(&journal_path).unwrap()).unwrap();
+        value["schema"] = serde_json::Value::String(super::LEGACY_UPDATE_JOURNAL_SCHEMA.to_owned());
+        value["public_graph"] = value["state_graph"].clone();
+        value["public_graph"]["manifest"]["tool_version"] =
+            serde_json::Value::String("allowed manifest difference".to_owned());
+        fs::write(&journal_path, serde_json::to_vec_pretty(&value).unwrap()).unwrap();
+        assert!(super::load_update_journal(&journal_path).is_ok());
+
+        value["public_graph"]["nodes"][0]["source_file"] =
+            serde_json::Value::String("divergent.rs".to_owned());
+        fs::write(&journal_path, serde_json::to_vec_pretty(&value).unwrap()).unwrap();
+
+        let error = super::load_update_journal(&journal_path)
+            .err()
+            .expect("divergent legacy journal must fail");
+        assert_eq!(error.kind(), "schema");
+        assert!(error.to_string().contains("graph mismatch"));
+    }
+
+    #[test]
+    fn update_commit_rechecks_context_after_journal_creation() {
+        let repo = TempDir::new().unwrap();
+        init_git(repo.path());
+        commit_git(repo.path(), "first");
+        let out = repo.path().join("public");
+        let (state_path, legacy_state_path) = super::prepare_private_state(&out).unwrap();
+        let graph = Graph::new();
+        let journal = super::UpdateJournal::new(&out, &state_path, graph, None).unwrap();
+        super::write_update_journal(&state_path, &journal).unwrap();
+        let journal_path = super::super::private_state::update_journal_path(&state_path).unwrap();
+
+        commit_git(repo.path(), "second");
+
+        let error = super::commit_update_journal(
+            &out,
+            &state_path,
+            &legacy_state_path,
+            &journal_path,
+            &journal,
+        )
+        .unwrap_err();
+        assert_eq!(error.kind(), "guard");
+        assert!(!out.join("graph.json").exists());
+        assert!(journal_path.exists());
+    }
+
+    #[test]
+    fn pending_update_recovers_private_lineage_after_public_commit() {
+        let src = TempDir::new().unwrap();
+        let out = TempDir::new().unwrap();
+        mk_file(src.path(), "lib.rs", "fn local() {}");
+        assert_eq!(run(src.path(), out.path()), 0);
+        let state_path = out.path().join(SIDECAR);
+        let stored = super::super::private_state::read(&state_path, "test state")
+            .unwrap()
+            .unwrap();
+        let before_checksum = super::private_graph_generation(&stored.graph).unwrap();
+
+        let remote = TempDir::new().unwrap();
+        mk_file(remote.path(), "remote.rs", "fn api_key_remote() {}");
+        let remote_graph = habitat_graph_build::assemble(
+            habitat_graph_extract::extract_files(&[remote.path().join("remote.rs")]).unwrap(),
+        );
+        let pending = habitat_graph_build::merge(remote_graph, stored.graph.clone()).sorted();
+        let mut state_graph = pending.clone();
+        state_graph.manifest = stored.graph.manifest;
+        let journal =
+            super::UpdateJournal::new(out.path(), &state_path, state_graph, Some(&before_checksum))
+                .unwrap();
+        super::write_update_journal(&state_path, &journal).unwrap();
+        fs::write(
+            out.path().join("graph.json"),
+            habitat_graph_export::to_node_link(&pending).unwrap(),
+        )
+        .unwrap();
+
+        assert_eq!(run(src.path(), out.path()), 0);
+        let private = fs::read_to_string(&state_path).unwrap();
+        assert!(private.contains("api_key_remote"));
+        assert!(
+            !super::super::private_state::update_journal_path(&state_path)
+                .unwrap()
+                .exists()
+        );
+    }
+
+    #[test]
+    fn same_context_update_rejects_a_conflicting_target_despite_a_matching_snapshot() {
+        let src = TempDir::new().unwrap();
+        let out = TempDir::new().unwrap();
+        mk_file(src.path(), "lib.rs", "fn original() {}");
+        assert_eq!(run(src.path(), out.path()), 0);
+        let state_path = out.path().join(SIDECAR);
+        let stored = super::super::private_state::read(&state_path, "test state")
+            .unwrap()
+            .unwrap();
+        let before_checksum = super::private_graph_generation(&stored.graph).unwrap();
+        let mut pending_state = stored.graph.clone();
+        pending_state.manifest.tool_version = "pending lineage".to_owned();
+        let journal = super::UpdateJournal::new(
+            out.path(),
+            &state_path,
+            pending_state,
+            Some(&before_checksum),
+        )
+        .unwrap();
+        super::write_update_journal(&state_path, &journal).unwrap();
+
+        let mut replacement = stored.graph.clone();
+        replacement.nodes[0].source_file = "replacement.rs".to_owned();
+        let replacement_public = habitat_graph_export::to_node_link(&replacement).unwrap();
+        let replacement_public_graph =
+            habitat_graph_serve::from_node_link(&replacement_public).unwrap();
+        let replacement_bytes = super::super::private_state::serialize(
+            &replacement,
+            &super::super::private_state::generation(replacement_public.as_bytes()),
+            &super::super::private_state::semantic_generation(&replacement_public_graph).unwrap(),
+        )
+        .unwrap();
+        super::super::private_state::write_state(&state_path, &replacement_bytes).unwrap();
+        let public_before = read_graph_json(out.path());
+
+        assert_eq!(run(src.path(), out.path()), 4);
+        assert_eq!(read_graph_json(out.path()), public_before);
+        assert!(fs::read_to_string(&state_path)
+            .unwrap()
+            .contains("replacement"));
+        assert!(
+            super::super::private_state::update_journal_path(&state_path)
+                .unwrap()
+                .exists()
+        );
+    }
+
+    #[test]
+    fn ancestor_update_journal_rejects_conflicting_target_lineage() {
+        for include_before_checksum in [true, false] {
+            let repo = TempDir::new().unwrap();
+            init_git(repo.path());
+            commit_git(repo.path(), "first");
+            let src = repo.path().join("src");
+            let out = repo.path().join("public");
+            mk_file(&src, "lib.rs", "fn api_key_original() {}");
+            assert_eq!(run(&src, &out), 0);
+
+            let (origin_state, _) = super::prepare_private_state(&out).unwrap();
+            let stored = super::super::private_state::read(&origin_state, "test state")
+                .unwrap()
+                .unwrap();
+            let before_checksum = super::private_graph_generation(&stored.graph).unwrap();
+            let mut pending_state = stored.graph.clone();
+            pending_state.manifest.tool_version = "pending lineage".to_owned();
+            if !include_before_checksum {
+                fs::remove_file(&origin_state).unwrap();
+            }
+            let journal = super::UpdateJournal::new(
+                &out,
+                &origin_state,
+                pending_state,
+                include_before_checksum.then_some(before_checksum.as_str()),
+            )
+            .unwrap();
+            super::write_update_journal(&origin_state, &journal).unwrap();
+
+            let public_before = read_graph_json(&out);
+            let public_graph = habitat_graph_serve::from_node_link(&public_before).unwrap();
+            commit_git(repo.path(), "second");
+            let (target_state, _) = super::prepare_private_state(&out).unwrap();
+            assert_ne!(origin_state, target_state);
+            let mut replacement = stored.graph.clone();
+            replacement.manifest.tool_version = "conflicting target lineage".to_owned();
+            let replacement_bytes = super::super::private_state::serialize(
+                &replacement,
+                &super::super::private_state::generation(public_before.as_bytes()),
+                &super::super::private_state::semantic_generation(&public_graph).unwrap(),
+            )
+            .unwrap();
+            super::super::private_state::write_state(&target_state, &replacement_bytes).unwrap();
+
+            assert_eq!(run(&src, &out), 4);
+            assert_eq!(read_graph_json(&out), public_before);
+            assert!(fs::read_to_string(&target_state)
+                .unwrap()
+                .contains("conflicting target lineage"));
+            assert!(
+                super::super::private_state::update_journal_path(&origin_state)
+                    .unwrap()
+                    .exists()
+            );
+        }
+    }
+}
+
+#[cfg(all(test, not(unix)))]
+mod non_unix_tests {
+    use std::fs;
+
+    use tempfile::TempDir;
+
+    use super::{run, SIDECAR};
+
+    #[test]
+    fn update_rejects_and_removes_unsupported_sidecar() {
+        let source = TempDir::new().unwrap();
+        let output = TempDir::new().unwrap();
+        let sidecar = output.path().join(SIDECAR);
+        fs::write(&sidecar, "private").unwrap();
+
+        assert_eq!(run(source.path(), output.path()), 4);
+        assert!(!sidecar.exists());
     }
 }

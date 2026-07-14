@@ -1,18 +1,19 @@
-//! Load a node-link `graph.json` back into a queryable [`Graph`](habitat_graph_core::Graph).
+//! Load a node-link `graph.json` back into a queryable [`Graph`].
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashSet};
 
 use habitat_graph_core::{
-    Community, CommunityId, Confidence, Edge, Graph, GraphError, Manifest, Node, NodeId, Result,
-    Span, SCHEMA_VERSION,
+    is_canonical_redaction_marker, Community, CommunityId, Confidence, Edge, Graph, GraphError,
+    Manifest, Node, NodeId, Result, Span, SCHEMA_VERSION,
 };
 
 /// Parses `NetworkX` node-link JSON (the envelope written by `habitat-graph-export`) into a
 /// [`Graph`].
 ///
-/// Reconstructs nodes (`id`, `label`, `source_file`, `community`) and links (`source`, `target`,
-/// `relation`, `confidence`). `source_location` is rebuilt from the `"Lnn"` line marker only —
-/// byte offsets are not present in node-link form, so the span carries the line on both axes.
+/// Reconstructs nodes (`id`, optional collision `content_id`, `label`, `source_file`, `community`)
+/// and links (`source`, `target`, `relation`, `confidence`). `source_location` is rebuilt from the
+/// `"Lnn"` line marker only — byte offsets are not present in node-link form, so the span carries
+/// the line on both axes.
 ///
 /// Community membership is reconstructed by grouping all node ids sharing the same `"community"`
 /// `u32` value; nodes whose `"community"` field is `null` (or absent) belong to no community.
@@ -21,7 +22,7 @@ use habitat_graph_core::{
 /// communities by id with members ascending), satisfying the determinism invariant R4.
 ///
 /// # Errors
-/// Returns [`GraphError::Schema`](habitat_graph_core::GraphError::Schema) if `json` is not a valid
+/// Returns [`GraphError::Schema`] if `json` is not a valid
 /// node-link document (missing `nodes`/`links`, wrong field types, unknown confidence value, etc.).
 pub fn from_node_link(json: &str) -> Result<Graph> {
     let root: serde_json::Value =
@@ -41,11 +42,27 @@ pub fn from_node_link(json: &str) -> Result<Graph> {
 
     // community_id → member NodeIds (encounter order; sorted before building Community).
     let mut community_map: BTreeMap<u32, Vec<NodeId>> = BTreeMap::new();
+    let mut node_content_ids = BTreeMap::new();
+    let mut seen_ids: HashSet<NodeId> = HashSet::with_capacity(nodes_arr.len());
     let mut nodes: Vec<Node> = Vec::with_capacity(nodes_arr.len());
     for (i, node_val) in nodes_arr.iter().enumerate() {
-        let (node, opt_cid) = parse_node(i, node_val)?;
+        let (node, opt_cid, content_id) = parse_node(i, node_val)?;
+        if !seen_ids.insert(node.id) {
+            return Err(GraphError::Schema(format!(
+                "node[{i}]: duplicate node id {}",
+                node.id.get()
+            )));
+        }
         if let Some(cid) = opt_cid {
             community_map.entry(cid).or_default().push(node.id);
+        }
+        if content_id.is_some() && !is_canonical_redaction_marker(&node.label) {
+            return Err(GraphError::Schema(format!(
+                "node[{i}]: 'content_id' is only valid for a redacted label"
+            )));
+        }
+        if let Some(content_id) = content_id.filter(|content_id| *content_id != node.id) {
+            node_content_ids.insert(node.id, content_id);
         }
         nodes.push(node);
     }
@@ -77,6 +94,7 @@ pub fn from_node_link(json: &str) -> Result<Graph> {
     Ok(Graph {
         schema: SCHEMA_VERSION.to_owned(),
         nodes,
+        node_content_ids,
         edges,
         communities,
         manifest: Manifest::default(),
@@ -92,13 +110,25 @@ pub fn from_node_link(json: &str) -> Result<Graph> {
 ///
 /// # Errors
 /// Returns [`GraphError::Schema`] on any type mismatch or missing required field.
-fn parse_node(i: usize, v: &serde_json::Value) -> Result<(Node, Option<u32>)> {
+fn parse_node(i: usize, v: &serde_json::Value) -> Result<(Node, Option<u32>, Option<NodeId>)> {
     let raw_id = v
         .get("id")
         .and_then(serde_json::Value::as_u64)
         .ok_or_else(|| GraphError::Schema(format!("node[{i}]: missing or invalid 'id'")))?;
     let id = u32::try_from(raw_id)
         .map_err(|_| GraphError::Schema(format!("node[{i}]: 'id' {raw_id} exceeds u32 range")))?;
+
+    let content_id = match v.get("content_id") {
+        None => None,
+        Some(value) => {
+            let raw = value.as_u64().ok_or_else(|| {
+                GraphError::Schema(format!("node[{i}]: 'content_id' must be a u32 integer"))
+            })?;
+            Some(NodeId::new(u32::try_from(raw).map_err(|_| {
+                GraphError::Schema(format!("node[{i}]: 'content_id' {raw} exceeds u32 range"))
+            })?))
+        }
+    };
 
     let label = v
         .get("label")
@@ -149,7 +179,7 @@ fn parse_node(i: usize, v: &serde_json::Value) -> Result<(Node, Option<u32>)> {
         source_file,
         source_location: Span::new(0, 0, line, line),
     };
-    Ok((node, opt_cid))
+    Ok((node, opt_cid, content_id))
 }
 
 /// Parses a single link object from the `"links"` array into an [`Edge`].
@@ -258,6 +288,21 @@ mod tests {
         let ids: Vec<u32> = g.nodes.iter().map(|n| n.id.get()).collect();
         assert!(ids.contains(&1));
         assert!(ids.contains(&2));
+    }
+
+    #[test]
+    fn collision_content_id_preserved() {
+        let json = r#"{
+            "directed": true, "multigraph": false, "graph": {},
+            "nodes": [
+                {"id": 2, "content_id": 1, "label": "[REDACTED:api_key]", "source_file": "a.rs", "source_location": "L1", "community": null}
+            ],
+            "links": []
+        }"#;
+
+        let graph = from_node_link(json).expect("parse");
+
+        assert_eq!(graph.node_content_id(NodeId::new(2)), NodeId::new(1));
     }
 
     #[test]
@@ -543,6 +588,37 @@ mod tests {
             "links": []
         }"#;
         let err = from_node_link(json).expect_err("must fail on missing id");
+        assert!(matches!(err, habitat_graph_core::GraphError::Schema(_)));
+    }
+
+    #[test]
+    fn duplicate_node_id_returns_schema_error() {
+        let json = r#"{
+            "directed": false, "multigraph": false, "graph": {},
+            "nodes": [
+                {"id": 1, "label": "A", "source_file": "a.rs", "source_location": "L1", "community": null},
+                {"id": 1, "label": "B", "source_file": "b.rs", "source_location": "L2", "community": null}
+            ],
+            "links": []
+        }"#;
+        let err = from_node_link(json).expect_err("duplicate node ids must fail");
+        assert!(matches!(err, habitat_graph_core::GraphError::Schema(_)));
+        assert!(err.to_string().contains("duplicate node id 1"), "{err}");
+    }
+
+    #[test]
+    fn duplicate_node_id_cannot_alias_content_id_displacement() {
+        // A clean node must never inherit a displaced content_id through an id collision with a
+        // marker-labeled sibling — the document is rejected before the mapping is built.
+        let json = r#"{
+            "directed": false, "multigraph": false, "graph": {},
+            "nodes": [
+                {"id": 2, "content_id": 1, "label": "[REDACTED:api_key]", "source_file": "a.rs", "source_location": "L1", "community": null},
+                {"id": 2, "label": "clean", "source_file": "b.rs", "source_location": "L2", "community": null}
+            ],
+            "links": []
+        }"#;
+        let err = from_node_link(json).expect_err("duplicate node ids must fail");
         assert!(matches!(err, habitat_graph_core::GraphError::Schema(_)));
     }
 

@@ -215,7 +215,10 @@ mod tests {
     #[test]
     fn pack_output_starts_with_header() {
         let out = pack("HEADER\n", Some("seed\n"), &["cand\n".to_owned()], 100);
-        assert!(out.starts_with("HEADER\n"), "output must start with header: {out:?}");
+        assert!(
+            out.starts_with("HEADER\n"),
+            "output must start with header: {out:?}"
+        );
     }
 
     #[test]
@@ -250,7 +253,10 @@ mod tests {
     fn pack_seed_always_included_at_max_tokens_zero_with_candidates() {
         let cands = vec!["cand\n".to_owned()];
         let out = pack("H", Some("SEED"), &cands, 0);
-        assert!(out.contains("SEED"), "seed must appear even at max_tokens=0: {out:?}");
+        assert!(
+            out.contains("SEED"),
+            "seed must appear even at max_tokens=0: {out:?}"
+        );
     }
 
     #[test]
@@ -264,13 +270,19 @@ mod tests {
         // seed = 100-char ASCII string → 25 tokens; max_tokens=1: seed must still appear
         let big_seed = "x".repeat(100);
         let out = pack("H", Some(&big_seed), &[], 1);
-        assert!(out.contains(&big_seed), "seed must be in output even over budget: {out:?}");
+        assert!(
+            out.contains(&big_seed),
+            "seed must be in output even over budget: {out:?}"
+        );
     }
 
     #[test]
     fn pack_seed_immediately_follows_header() {
         let out = pack("HDR", Some("SEED"), &["cand".to_owned()], 100);
-        assert!(out.starts_with("HDRSEED"), "seed must follow header directly: {out:?}");
+        assert!(
+            out.starts_with("HDRSEED"),
+            "seed must follow header directly: {out:?}"
+        );
     }
 
     #[test]
@@ -308,7 +320,10 @@ mod tests {
     fn pack_max_zero_seed_with_candidates_note_shows_all_dropped() {
         let cands: Vec<String> = vec!["a".to_owned(), "b".to_owned(), "c".to_owned()];
         let out = pack("H", Some("S"), &cands, 0);
-        assert!(out.contains("3 more omitted"), "all 3 must be noted as dropped: {out:?}");
+        assert!(
+            out.contains("3 more omitted"),
+            "all 3 must be noted as dropped: {out:?}"
+        );
     }
 
     #[test]
@@ -374,8 +389,14 @@ mod tests {
         let cands: Vec<String> = vec!["aaaa".to_owned(), "bbbb".to_owned()];
         let out = pack("", None, &cands, 1);
         assert!(out.contains("1 more omitted"), "{out:?}");
-        assert!(out.contains("aaaa"), "first cand must be in output: {out:?}");
-        assert!(!out.contains("bbbb"), "second cand must be dropped: {out:?}");
+        assert!(
+            out.contains("aaaa"),
+            "first cand must be in output: {out:?}"
+        );
+        assert!(
+            !out.contains("bbbb"),
+            "second cand must be dropped: {out:?}"
+        );
     }
 
     #[test]
@@ -383,7 +404,10 @@ mod tests {
         // 4 candidates × 1 token each = 4 tokens = max_tokens → all fit, no note
         let cands: Vec<String> = (0..4).map(|_| "aaaa".to_owned()).collect();
         let out = pack("", None, &cands, 4);
-        assert!(!out.contains("omitted"), "all fit exactly, no note expected: {out:?}");
+        assert!(
+            !out.contains("omitted"),
+            "all fit exactly, no note expected: {out:?}"
+        );
         assert_eq!(out, "aaaa".repeat(4));
     }
 
@@ -402,7 +426,10 @@ mod tests {
     fn pack_note_starts_with_ellipsis_space_count() {
         let cands: Vec<String> = vec!["x".to_owned(), "y".to_owned()];
         let out = pack("", None, &cands, 0);
-        assert!(out.contains("… 2 more omitted"), "note format incorrect: {out:?}");
+        assert!(
+            out.contains("… 2 more omitted"),
+            "note format incorrect: {out:?}"
+        );
     }
 
     #[test]
@@ -417,7 +444,10 @@ mod tests {
         // candidate too large to fit; note must show max_tokens = 42
         let cands = vec!["x".repeat(200)]; // 200 bytes = 50 tokens; won't fit in 42
         let out = pack("", None, &cands, 42);
-        assert!(out.contains("token budget 42"), "budget value must be in note: {out:?}");
+        assert!(
+            out.contains("token budget 42"),
+            "budget value must be in note: {out:?}"
+        );
     }
 
     #[test]
@@ -441,7 +471,11 @@ mod tests {
 
     #[test]
     fn pack_candidates_appear_in_input_order() {
-        let cands: Vec<String> = vec!["first\n".to_owned(), "second\n".to_owned(), "third\n".to_owned()];
+        let cands: Vec<String> = vec![
+            "first\n".to_owned(),
+            "second\n".to_owned(),
+            "third\n".to_owned(),
+        ];
         let out = pack("", None, &cands, 10_000);
         let pos_first = out.find("first").unwrap_or(usize::MAX);
         let pos_second = out.find("second").unwrap_or(0);
@@ -459,7 +493,10 @@ mod tests {
         let cands: Vec<String> = vec![large, "tiny".to_owned()];
         let out = pack("", None, &cands, 2);
         // budget=2; large needs 100 (doesn't fit) → break; "tiny" never tried
-        assert!(out.contains("2 more omitted"), "both must be dropped: {out:?}");
+        assert!(
+            out.contains("2 more omitted"),
+            "both must be dropped: {out:?}"
+        );
         assert!(!out.contains("tiny"), "tiny must not appear: {out:?}");
     }
 
@@ -556,8 +593,14 @@ mod tests {
         // candidate "ab" = 2 bytes = 1 token; used=2 after seed → 2+1>1 → dropped
         let cands: Vec<String> = vec!["ab".to_owned()];
         let out = pack("", Some("中中"), &cands, 1);
-        assert!(out.contains("中中"), "multibyte seed must be present: {out:?}");
-        assert!(out.contains("1 more omitted"), "candidate must be dropped: {out:?}");
+        assert!(
+            out.contains("中中"),
+            "multibyte seed must be present: {out:?}"
+        );
+        assert!(
+            out.contains("1 more omitted"),
+            "candidate must be dropped: {out:?}"
+        );
     }
 
     #[test]

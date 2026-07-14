@@ -127,7 +127,9 @@ impl<T: HttpTransport> Backend for OpenAiCompatBackend<T> {
             .choices
             .first()
             .map(|c| c.message.content.as_str())
-            .ok_or_else(|| GraphError::Backend("chat-completions returned no choices".to_string()))?;
+            .ok_or_else(|| {
+                GraphError::Backend("chat-completions returned no choices".to_string())
+            })?;
         parse_semantic(content, source_file)
     }
 }
@@ -204,7 +206,10 @@ mod tests {
     #[test]
     fn extracts_through_the_envelope() {
         let inner = r#"{"nodes":[{"label":"X"},{"label":"Y"}],"edges":[{"source":"X","target":"Y","relation":"links"}]}"#;
-        let b = OpenAiCompatBackend::new(StaticTransport::ok(envelope(inner)), "http://localhost:8000");
+        let b = OpenAiCompatBackend::new(
+            StaticTransport::ok(envelope(inner)),
+            "http://localhost:8000",
+        );
         let e = b.extract_semantic("prose", "n.md").expect("ok");
         assert_eq!(e.counts(), (2, 1));
         assert_eq!(e.edges[0].relation, "links");
@@ -212,8 +217,11 @@ mod tests {
 
     #[test]
     fn api_key_becomes_authorization_header() {
-        let b = OpenAiCompatBackend::new(StaticTransport::ok(envelope("{}")), "https://api.openai.com")
-            .with_api_key("secret");
+        let b = OpenAiCompatBackend::new(
+            StaticTransport::ok(envelope("{}")),
+            "https://api.openai.com",
+        )
+        .with_api_key("secret");
         let _ = b.extract_semantic("x", "f");
         let rec = b.transport().last_request().expect("recorded");
         assert!(rec
@@ -223,7 +231,8 @@ mod tests {
 
     #[test]
     fn without_api_key_sends_no_auth_header() {
-        let b = OpenAiCompatBackend::new(StaticTransport::ok(envelope("{}")), "http://localhost:8000");
+        let b =
+            OpenAiCompatBackend::new(StaticTransport::ok(envelope("{}")), "http://localhost:8000");
         let _ = b.extract_semantic("x", "f");
         let rec = b.transport().last_request().expect("recorded");
         assert!(rec.headers.is_empty());
@@ -256,7 +265,10 @@ mod tests {
 
     #[test]
     fn malformed_inner_payload_is_rejected() {
-        let b = OpenAiCompatBackend::new(StaticTransport::ok(envelope("not json")), "http://localhost");
+        let b = OpenAiCompatBackend::new(
+            StaticTransport::ok(envelope("not json")),
+            "http://localhost",
+        );
         assert!(b.extract_semantic("x", "f").is_err());
     }
 }

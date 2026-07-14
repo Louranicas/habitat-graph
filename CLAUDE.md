@@ -1,7 +1,7 @@
 # habitat-graph — Crate Charter
 
 > Back to: [[CLAUDE.md]] (workspace root) · [[CLAUDE.local.md]] · framework: [[DEPLOYMENT_FRAMEWORK]] · [[MODULE_STRUCTURE_PLAN]]
-> **STATUS: BUILT (S1008796).** 13-crate workspace, gate-green, 1225 all-targets tests / 0 failed. D0→D6 + semantic backend + MCP organ sealed (see `EVIDENCE.md`). D7 release gated on Luke @ 0.A (port-claim + remotes + no-mistakes seal).
+> **STATUS: BUILT (S1008796).** 13-crate workspace, gate-green, 4173 all-targets tests / 0 failed. D0→D6 + semantic backend + MCP organ sealed (see `EVIDENCE.md`). D7 release gated on Luke @ 0.A (port-claim + remotes + no-mistakes seal).
 
 ## What this is
 
@@ -26,6 +26,9 @@ ULTRAPLATE factory. Planning corpus: `README.md` → `ai_docs/00_DEPLOYMENT_PLAN
 - **Local-first:** code extraction defaults to AST-only (no network). LLM path routes through TIERWRIGHT/Ollama — never a raw external call on source.
 - **graph.json schema-compat (R2)** with graphify during migration.
 - **Determinism (R4):** sorted node/edge ordering — required for the git merge driver.
+- **Public/private boundary:** every public graph projection uses one deterministic secret-redaction
+  policy without changing node IDs or topology; raw `update`/`add` state is owner-only and scoped to
+  the output plus Git context.
 
 ## Quality gate (mandatory, before every commit)
 

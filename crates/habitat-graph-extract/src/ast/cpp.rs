@@ -394,7 +394,15 @@ fn extract_namespace(
         let Some(child) = body.named_child(i) else {
             continue;
         };
-        walk_node(&child, source, b, &ns_label, source_file, local_types, result);
+        walk_node(
+            &child,
+            source,
+            b,
+            &ns_label,
+            source_file,
+            local_types,
+            result,
+        );
     }
 }
 
@@ -404,12 +412,7 @@ fn extract_namespace(
 /// angle-bracketed). The surrounding delimiters are stripped and the path is lowercased. Includes
 /// always anchor to the file node `b`, not the current `container`, because `#include` directives
 /// appear at translation-unit scope.
-fn extract_include(
-    node: &tree_sitter::Node<'_>,
-    source: &[u8],
-    b: &str,
-    result: &mut Extraction,
-) {
+fn extract_include(node: &tree_sitter::Node<'_>, source: &[u8], b: &str, result: &mut Extraction) {
     let Some(path_node) = node.child_by_field_name("path") else {
         return;
     };
@@ -508,10 +511,12 @@ impl Extractor for CppExtractor {
                 message: e.to_string(),
             })?;
 
-        let tree = parser.parse(source, None).ok_or_else(|| GraphError::Parse {
-            file: source_file.clone(),
-            message: "parse returned None".into(),
-        })?;
+        let tree = parser
+            .parse(source, None)
+            .ok_or_else(|| GraphError::Parse {
+                file: source_file.clone(),
+                message: "parse returned None".into(),
+            })?;
 
         let root = tree.root_node();
 
@@ -532,7 +537,15 @@ impl Extractor for CppExtractor {
             let Some(child) = root.named_child(i) else {
                 continue;
             };
-            walk_node(&child, source, &b, &b, &source_file, &local_types, &mut result);
+            walk_node(
+                &child,
+                source,
+                &b,
+                &b,
+                &source_file,
+                &local_types,
+                &mut result,
+            );
         }
 
         Ok(result)
@@ -585,10 +598,7 @@ mod tests {
     }
 
     /// Returns all edges with the given relation.
-    fn edges_with_rel<'e>(
-        ex: &'e Extraction,
-        rel: &str,
-    ) -> Vec<&'e habitat_graph_core::RawEdge> {
+    fn edges_with_rel<'e>(ex: &'e Extraction, rel: &str) -> Vec<&'e habitat_graph_core::RawEdge> {
         ex.edges.iter().filter(|e| e.relation == rel).collect()
     }
 
@@ -974,10 +984,14 @@ mod tests {
         // The only non-helper, non-file node would be a (wrongly-emitted) anon namespace node.
         // We just check that no contains edge originates from an empty-named or "anon_" prefix
         // that represents the anon namespace itself — i.e., there's no node for the ns.
-        let has_anon_ns = ex.nodes.iter().any(|n| {
-            n.label.starts_with("anon_") && !n.label.ends_with("_helper")
-        });
-        assert!(!has_anon_ns || ns_nodes.is_empty(), "anonymous namespace must not emit a node");
+        let has_anon_ns = ex
+            .nodes
+            .iter()
+            .any(|n| n.label.starts_with("anon_") && !n.label.ends_with("_helper"));
+        assert!(
+            !has_anon_ns || ns_nodes.is_empty(),
+            "anonymous namespace must not emit a node"
+        );
     }
 
     // ── H. #include → imports_from ─────────────────────────────────────────────────────────────
@@ -1175,7 +1189,10 @@ mod tests {
         let src = "class Widget {};\n";
         let ex = extract(src, "ui.cpp");
         // File stem = "ui", class = "widget" → label = "ui_widget"
-        assert!(has_node(&ex, "ui_widget"), "class label must be b_classname");
+        assert!(
+            has_node(&ex, "ui_widget"),
+            "class label must be b_classname"
+        );
     }
 
     #[test]
@@ -1309,14 +1326,20 @@ public:
         );
 
         // Component class.
-        assert!(has_node(&ex, "component_component"), "Component class missing");
+        assert!(
+            has_node(&ex, "component_component"),
+            "Component class missing"
+        );
         assert!(
             has_edge(&ex, "component_engine", "component_component", "contains"),
             "ns→Component contains missing"
         );
 
         // Transform class.
-        assert!(has_node(&ex, "component_transform"), "Transform class missing");
+        assert!(
+            has_node(&ex, "component_transform"),
+            "Transform class missing"
+        );
 
         // Transform inherits Component (local).
         assert!(

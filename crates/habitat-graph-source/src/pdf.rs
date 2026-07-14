@@ -97,12 +97,10 @@ mod tests {
         // Content stream.
         let content = format!("BT /F1 12 Tf 72 720 Td ({text}) Tj ET");
         let content_bytes = content.into_bytes();
-        let stream_len =
-            i64::try_from(content_bytes.len()).expect("content length fits i64");
+        let stream_len = i64::try_from(content_bytes.len()).expect("content length fits i64");
         let mut sd = Dictionary::new();
         sd.set("Length", Object::Integer(stream_len));
-        let stream_id =
-            doc.add_object(Object::Stream(Stream::new(sd, content_bytes)));
+        let stream_id = doc.add_object(Object::Stream(Stream::new(sd, content_bytes)));
 
         // Resources dictionary.
         let mut font_res = Dictionary::new();
@@ -129,10 +127,7 @@ mod tests {
         // Page tree (Pages) object.
         let mut tree_obj = Dictionary::new();
         tree_obj.set("Type", Object::Name(b"Pages".to_vec()));
-        tree_obj.set(
-            "Kids",
-            Object::Array(vec![Object::Reference(leaf_id)]),
-        );
+        tree_obj.set("Kids", Object::Array(vec![Object::Reference(leaf_id)]));
         tree_obj.set("Count", Object::Integer(1));
         let tree_id = doc.add_object(Object::Dictionary(tree_obj));
 
@@ -152,7 +147,8 @@ mod tests {
         doc.trailer.set("Root", Object::Reference(cat_id));
 
         let mut buf = Vec::new();
-        doc.save_to(&mut buf).expect("test PDF serialisation failed");
+        doc.save_to(&mut buf)
+            .expect("test PDF serialisation failed");
         buf
     }
 
@@ -256,10 +252,7 @@ mod tests {
         // Pages tree also has no `MediaBox` (so inherited lookup also fails).
         let mut tree = Dictionary::new();
         tree.set("Type", Object::Name(b"Pages".to_vec()));
-        tree.set(
-            "Kids",
-            Object::Array(vec![Object::Reference(pg_id)]),
-        );
+        tree.set("Kids", Object::Array(vec![Object::Reference(pg_id)]));
         tree.set("Count", Object::Integer(1));
         let tree_id = doc.add_object(Object::Dictionary(tree));
 
@@ -507,8 +500,7 @@ mod tests {
     /// A `PDF` with `startxref` pointing past the end of the buffer must error.
     #[test]
     fn pdf_with_bad_xref_offset_errors() {
-        let bad =
-            b"%PDF-1.4\ntrailer\n<< /Size 1 /Root 1 0 R >>\nstartxref\n999999\n%%EOF\n";
+        let bad = b"%PDF-1.4\ntrailer\n<< /Size 1 /Root 1 0 R >>\nstartxref\n999999\n%%EOF\n";
         assert!(extract_text(bad).is_err());
     }
 
@@ -531,16 +523,14 @@ mod tests {
     /// A truncated stream declaration must error.
     #[test]
     fn pdf_with_truncated_stream_errors() {
-        let truncated =
-            b"%PDF-1.4\n5 0 obj\n<< /Length 100 >>\nstream\nhello\nendstream\n%%EOF\n";
+        let truncated = b"%PDF-1.4\n5 0 obj\n<< /Length 100 >>\nstream\nhello\nendstream\n%%EOF\n";
         assert!(extract_text(truncated).is_err());
     }
 
     /// An empty trailer dictionary must produce an error, not a panic.
     #[test]
     fn pdf_with_empty_trailer_errors_not_panics() {
-        let bad =
-            b"%PDF-1.4\nxref\n0 0\ntrailer\n<<>>\nstartxref\n9\n%%EOF\n";
+        let bad = b"%PDF-1.4\nxref\n0 0\ntrailer\n<<>>\nstartxref\n9\n%%EOF\n";
         assert!(extract_text(bad).is_err());
     }
 

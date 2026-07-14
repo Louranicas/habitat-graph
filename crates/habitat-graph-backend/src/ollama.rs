@@ -205,7 +205,9 @@ mod tests {
 
     #[test]
     fn source_file_threads_through() {
-        let b = OllamaBackend::new(StaticTransport::ok(envelope(r#"{"nodes":[{"label":"A"}]}"#)));
+        let b = OllamaBackend::new(StaticTransport::ok(envelope(
+            r#"{"nodes":[{"label":"A"}]}"#,
+        )));
         let e = b.extract_semantic("x", "path/to.md").expect("ok");
         assert_eq!(e.nodes[0].source_file, "path/to.md");
     }

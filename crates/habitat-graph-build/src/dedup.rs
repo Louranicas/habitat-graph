@@ -44,9 +44,13 @@ pub fn dedup(graph: Graph) -> Graph {
         .filter(|e| seen_edges.insert((e.source, e.target, e.relation.clone())))
         .collect();
 
+    let mut node_content_ids = graph.node_content_ids;
+    node_content_ids.retain(|id, _| seen_nodes.contains(id));
+
     Graph {
         schema: graph.schema,
         nodes,
+        node_content_ids,
         edges,
         communities: graph.communities,
         manifest: graph.manifest,

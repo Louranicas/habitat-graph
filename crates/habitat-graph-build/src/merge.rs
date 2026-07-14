@@ -1,37 +1,48 @@
 //! Merge two graphs (incremental-rebuild support).
 
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet};
 
-use habitat_graph_core::{content_id, Edge, Graph, Manifest, Node, NodeId};
+use habitat_graph_core::{Community, Edge, Graph, Manifest, Node, NodeId};
 use indexmap::IndexMap;
+
+use crate::merge_identity::{
+    allocate_node_id, node_identity, node_identity_maps, relation_identities, NodeIdentity,
+    NodeIdentityMap, RelationIdentity,
+};
 
 /// Merges two [`Graph`]s whose [`NodeId`] spaces are **independent** into one coherent graph.
 ///
 /// ## Algorithm
 ///
-/// 1. A fresh `IndexMap<label, NodeId>` is built; labels are interned in first-seen order
-///    (all of `a` before all of `b`).  When the same label appears in both graphs only one
-///    node is kept — the one from `a`.
+/// 1. A fresh node-identity map is built in first-seen order (all of `a` before all of `b`).
+///    Clean nodes use label identity, while publicly redacted nodes retain stable
+///    `(id, provenance)` identity.
+///    When the same identity appears in both graphs only one node is kept — the one from `a`.
 /// 2. Per-graph `old_id → new_id` maps let each graph's edges be remapped into the merged id
 ///    space.  An edge whose source **or** target lacks a mapping is silently dropped
-///    (dangling-edge policy).
+///    (dangling-edge policy). Exact relations share identity across inputs, while lossy public
+///    projections retain input provenance.
 /// 3. Communities from both graphs are concatenated (higher-level callers may further dedup
 ///    them later).
 /// 4. Manifests are combined: inputs are concatenated; `tool_version` and `schema` are taken
 ///    from `a`; `generated_at` uses `a`'s value when present, falling back to `b`'s.
-/// 5. [`crate::dedup`] removes duplicate nodes (same id) and edges (same
-///    `source`/`target`/`relation`), then [`Graph::sorted`] canonicalizes the output (R4).
+/// 5. [`Graph::sorted`] canonicalizes the identity-interned output (R4).
 ///
 /// # Errors
 ///
 /// This function is infallible.
 #[must_use]
 pub fn merge(a: Graph, b: Graph) -> Graph {
+    let identity_maps = node_identity_maps(&[&a, &b], None);
+    let a_identities = &identity_maps[0];
+    let b_identities = &identity_maps[1];
+
     // Destructure both graphs upfront so individual fields can be moved or borrowed
     // independently without triggering partial-move conflicts.
     let Graph {
         schema: a_schema,
         nodes: a_nodes,
+        node_content_ids: _,
         edges: a_edges,
         communities: a_communities,
         manifest: a_manifest,
@@ -39,17 +50,26 @@ pub fn merge(a: Graph, b: Graph) -> Graph {
     let Graph {
         schema: _,
         nodes: b_nodes,
+        node_content_ids: _,
         edges: b_edges,
         communities: b_communities,
         manifest: b_manifest,
     } = b;
 
-    // ── Phase 1: label interning + per-graph old → new id maps ───────────────
+    // ── Phase 1: identity interning + per-graph old → new id maps ────────────
 
     let capacity = a_nodes.len().saturating_add(b_nodes.len());
-    let mut label_to_new_id: IndexMap<String, NodeId> = IndexMap::with_capacity(capacity);
-    // Content-addressed ids (FO-4): every label maps to content_id(label) so a merge produces the
-    // SAME ids as a full assemble of the same labels — incremental update == full rebuild (R4).
+    let reserved_projected_ids: HashSet<u32> = a_nodes
+        .iter()
+        .filter_map(|node| node_identity(node, a_identities).projected_id())
+        .chain(
+            b_nodes
+                .iter()
+                .filter_map(|node| node_identity(node, b_identities).projected_id()),
+        )
+        .map(NodeId::get)
+        .collect();
+    let mut identity_to_new_id: IndexMap<NodeIdentity, NodeId> = IndexMap::with_capacity(capacity);
     let mut used_ids: HashSet<u32> = HashSet::with_capacity(capacity);
     let mut merged_nodes: Vec<Node> = Vec::with_capacity(capacity);
 
@@ -59,13 +79,27 @@ pub fn merge(a: Graph, b: Graph) -> Graph {
 
     // Walk a first: its nodes (and its version of shared labels) take priority.
     for node in &a_nodes {
-        let new_id = intern_label(&mut label_to_new_id, &mut used_ids, &mut merged_nodes, node);
+        let new_id = intern_node(
+            &mut identity_to_new_id,
+            &mut used_ids,
+            &mut merged_nodes,
+            node,
+            a_identities,
+            &reserved_projected_ids,
+        );
         a_remap.insert(node.id, new_id);
     }
 
-    // Walk b second: new labels get fresh ids; existing labels reuse a's id.
+    // Walk b second: new identities get ids; existing identities reuse a's id.
     for node in &b_nodes {
-        let new_id = intern_label(&mut label_to_new_id, &mut used_ids, &mut merged_nodes, node);
+        let new_id = intern_node(
+            &mut identity_to_new_id,
+            &mut used_ids,
+            &mut merged_nodes,
+            node,
+            b_identities,
+            &reserved_projected_ids,
+        );
         b_remap.insert(node.id, new_id);
     }
 
@@ -73,80 +107,79 @@ pub fn merge(a: Graph, b: Graph) -> Graph {
 
     let edge_cap = a_edges.len().saturating_add(b_edges.len());
     let mut merged_edges: Vec<Edge> = Vec::with_capacity(edge_cap);
+    let mut edge_identities: HashSet<(NodeId, NodeId, RelationIdentity)> =
+        HashSet::with_capacity(edge_cap);
+    let a_relation_identities = relation_identities(&a_edges, 0);
+    let b_relation_identities = relation_identities(&b_edges, 1);
 
-    for edge in a_edges {
-        if let (Some(&src), Some(&tgt)) = (a_remap.get(&edge.source), a_remap.get(&edge.target)) {
-            merged_edges.push(Edge {
-                source: src,
-                target: tgt,
-                relation: edge.relation,
-                confidence: edge.confidence,
-            });
-        }
-        // else: dangling endpoint — silently drop the edge.
-    }
-
-    for edge in b_edges {
-        if let (Some(&src), Some(&tgt)) = (b_remap.get(&edge.source), b_remap.get(&edge.target)) {
-            merged_edges.push(Edge {
-                source: src,
-                target: tgt,
-                relation: edge.relation,
-                confidence: edge.confidence,
-            });
-        }
-        // else: dangling endpoint — silently drop the edge.
-    }
+    append_remapped_edges(
+        a_edges,
+        a_relation_identities,
+        &a_remap,
+        &mut merged_edges,
+        &mut edge_identities,
+    );
+    append_remapped_edges(
+        b_edges,
+        b_relation_identities,
+        &b_remap,
+        &mut merged_edges,
+        &mut edge_identities,
+    );
 
     // ── Phase 3: community concatenation ─────────────────────────────────────
 
-    let mut merged_communities = a_communities;
-    merged_communities.extend(b_communities);
+    let mut merged_communities = remap_communities(a_communities, &a_remap);
+    merged_communities.extend(remap_communities(b_communities, &b_remap));
 
     // ── Phase 4: manifest merge ───────────────────────────────────────────────
 
-    let mut merged_inputs = a_manifest.inputs;
-    merged_inputs.extend(b_manifest.inputs);
-    let manifest = Manifest {
-        inputs: merged_inputs,
-        tool_version: a_manifest.tool_version,
-        generated_at: a_manifest.generated_at.or(b_manifest.generated_at),
-    };
+    let manifest = merge_manifests(a_manifest, b_manifest);
 
-    // ── Phase 5: dedup → sorted ───────────────────────────────────────────────
+    let node_content_ids: BTreeMap<NodeId, NodeId> = identity_to_new_id
+        .iter()
+        .filter_map(|(identity, assigned)| {
+            let content_id = identity.content_id();
+            (content_id != *assigned).then_some((*assigned, content_id))
+        })
+        .collect();
 
-    crate::dedup(Graph {
+    // ── Phase 5: sorted ───────────────────────────────────────────────────────
+
+    Graph {
         schema: a_schema,
         nodes: merged_nodes,
+        node_content_ids,
         edges: merged_edges,
         communities: merged_communities,
         manifest,
-    })
+    }
     .sorted()
 }
 
-/// Interns `node.label` into `label_to_new_id`, assigning a fresh monotonically-incrementing
-/// [`NodeId`] when the label is seen for the first time, and pushing a copy of the node (with
-/// the fresh id) into `merged_nodes`.  When the label already exists the existing id is returned
-/// immediately and `merged_nodes` is left unchanged (first-occurrence wins).
-///
-/// Returns the [`NodeId`] associated with `node.label` in the merged graph.
-fn intern_label(
-    label_to_new_id: &mut IndexMap<String, NodeId>,
+fn merge_manifests(mut first: Manifest, second: Manifest) -> Manifest {
+    first.inputs.extend(second.inputs);
+    Manifest {
+        inputs: first.inputs,
+        tool_version: first.tool_version,
+        generated_at: first.generated_at.or(second.generated_at),
+    }
+}
+
+fn intern_node(
+    identity_to_new_id: &mut IndexMap<NodeIdentity, NodeId>,
     used_ids: &mut HashSet<u32>,
     merged_nodes: &mut Vec<Node>,
     node: &Node,
+    identities: &NodeIdentityMap,
+    reserved_projected_ids: &HashSet<u32>,
 ) -> NodeId {
     use indexmap::map::Entry;
-    match label_to_new_id.entry(node.label.clone()) {
+    let identity = node_identity(node, identities);
+    match identity_to_new_id.entry(identity.clone()) {
         Entry::Occupied(e) => *e.get(),
         Entry::Vacant(e) => {
-            // Content-addressed id (FO-4): content_id(label), probing forward on a u32 collision.
-            let mut raw = content_id(&node.label);
-            while !used_ids.insert(raw) {
-                raw = raw.wrapping_add(1);
-            }
-            let new_id = NodeId::new(raw);
+            let new_id = allocate_node_id(&identity, used_ids, reserved_projected_ids);
             let _ = e.insert(new_id);
             merged_nodes.push(Node {
                 id: new_id,
@@ -159,11 +192,54 @@ fn intern_label(
     }
 }
 
+fn append_remapped_edges(
+    edges: Vec<Edge>,
+    relation_identities: Vec<RelationIdentity>,
+    remap: &HashMap<NodeId, NodeId>,
+    merged_edges: &mut Vec<Edge>,
+    edge_identities: &mut HashSet<(NodeId, NodeId, RelationIdentity)>,
+) {
+    for (edge, relation_identity) in edges.into_iter().zip(relation_identities) {
+        let (Some(&source), Some(&target)) = (remap.get(&edge.source), remap.get(&edge.target))
+        else {
+            continue;
+        };
+        let identity = (source, target, relation_identity);
+        if edge_identities.insert(identity) {
+            merged_edges.push(Edge {
+                source,
+                target,
+                relation: edge.relation,
+                confidence: edge.confidence,
+            });
+        }
+    }
+}
+
+fn remap_communities(
+    communities: Vec<Community>,
+    remap: &HashMap<NodeId, NodeId>,
+) -> Vec<Community> {
+    communities
+        .into_iter()
+        .map(|mut community| {
+            community.members = community
+                .members
+                .into_iter()
+                .filter_map(|member| remap.get(&member).copied())
+                .collect();
+            community.members.sort_unstable();
+            community.members.dedup();
+            community
+        })
+        .collect()
+}
+
 #[cfg(test)]
 mod tests {
     use habitat_graph_core::{
-        content_id, Community, CommunityId, Confidence, Edge, Graph, InputRecord, Node, NodeId,
-        Span, SCHEMA_VERSION,
+        content_id, project_public_relation, Community, CommunityId, Confidence, Edge, Graph,
+        InputRecord, Node, NodeId, Span, SCHEMA_VERSION,
     };
 
     use super::merge;
@@ -542,10 +618,17 @@ mod tests {
         // FO-4: ids are reassigned to content_id(label) — NOT the arbitrary input ids — so a merge
         // produces the same ids as a full assemble of the same labels.
         for n in &result.nodes {
-            assert_eq!(n.id.get(), content_id(&n.label), "id must be content_id(label)");
+            assert_eq!(
+                n.id.get(),
+                content_id(&n.label),
+                "id must be content_id(label)"
+            );
         }
         assert!(
-            result.nodes.iter().all(|n| n.id.get() != 1_000 && n.id.get() != 2_000),
+            result
+                .nodes
+                .iter()
+                .all(|n| n.id.get() != 1_000 && n.id.get() != 2_000),
             "original input ids must not be retained"
         );
         assert_eq!(result.counts().1, 1, "edge must survive remapping");
@@ -684,6 +767,359 @@ mod tests {
             result.manifest.inputs.len(),
             2,
             "inputs from both manifests concatenated"
+        );
+    }
+
+    #[test]
+    fn ambiguous_raw_and_public_nodes_keep_independent_topology() {
+        let secret_id = content_id("api_key_alpha");
+        let mut new_graph = Graph::new();
+        new_graph
+            .nodes
+            .push(node(secret_id, "api_key_alpha", "new.rs"));
+        new_graph.nodes.push(node(20, "Safe", "new.rs"));
+        new_graph.edges.push(edge(secret_id, 20, "calls"));
+
+        let mut prior_public = Graph::new();
+        prior_public
+            .nodes
+            .push(node(secret_id, "[REDACTED:api_key]", "old.rs"));
+        prior_public
+            .nodes
+            .push(node(30, "[REDACTED:api_key]", "other.rs"));
+        prior_public.nodes.push(node(40, "Other", "old.rs"));
+        prior_public.edges.push(edge(30, 40, "calls"));
+
+        let result = merge(new_graph, prior_public);
+        assert_eq!(result.nodes.len(), 5);
+        let raw = result
+            .nodes
+            .iter()
+            .find(|node| node.label == "api_key_alpha")
+            .unwrap();
+        let projected = result
+            .nodes
+            .iter()
+            .find(|node| node.id.get() == secret_id)
+            .unwrap();
+        assert_ne!(raw.id, projected.id);
+        assert_eq!(
+            projected.label, "[REDACTED:api_key]",
+            "an unverified public node must retain its own identity"
+        );
+        assert!(result.nodes.iter().any(|node| node.id.get() == 30));
+        assert_eq!(result.edges.len(), 2, "both independent edges survive");
+        assert!(result
+            .edges
+            .iter()
+            .any(|edge| edge.source == raw.id && edge.relation == "calls"));
+        assert!(result
+            .edges
+            .iter()
+            .any(|edge| edge.source == NodeId::new(30) && edge.relation == "calls"));
+    }
+
+    #[test]
+    fn redaction_uses_hybrid_identity_for_unrelated_clean_nodes() {
+        let mut a = Graph::new();
+        a.nodes.push(node(90, "[REDACTED:api_key]", "public.rs"));
+        a.nodes.push(node(1, "Shared", "a.rs"));
+        a.nodes.push(node(2, "Alpha", "a.rs"));
+        a.edges.push(edge(1, 2, "a-edge"));
+
+        let mut b = Graph::new();
+        b.nodes.push(node(11, "Shared", "b.rs"));
+        b.nodes.push(node(2, "Beta", "b.rs"));
+        b.edges.push(edge(11, 2, "b-edge"));
+
+        let result = merge(a, b);
+        assert_eq!(
+            result
+                .nodes
+                .iter()
+                .filter(|node| node.label == "Shared")
+                .count(),
+            1
+        );
+        assert!(result.nodes.iter().any(|node| node.label == "Alpha"));
+        assert!(result.nodes.iter().any(|node| node.label == "Beta"));
+
+        let shared = result
+            .nodes
+            .iter()
+            .find(|node| node.label == "Shared")
+            .unwrap()
+            .id;
+        let alpha = result
+            .nodes
+            .iter()
+            .find(|node| node.label == "Alpha")
+            .unwrap()
+            .id;
+        let beta = result
+            .nodes
+            .iter()
+            .find(|node| node.label == "Beta")
+            .unwrap()
+            .id;
+        assert!(result
+            .edges
+            .iter()
+            .any(|edge| edge.source == shared && edge.target == alpha));
+        assert!(result
+            .edges
+            .iter()
+            .any(|edge| edge.source == shared && edge.target == beta));
+    }
+
+    #[test]
+    fn redacted_id_collision_does_not_conflate_clean_node() {
+        let collision_id = content_id("Safe");
+        let mut public = Graph::new();
+        public
+            .nodes
+            .push(node(collision_id, "[REDACTED:api_key]", "public.rs"));
+        public.nodes.push(node(1, "PublicTarget", "public.rs"));
+        public.edges.push(edge(collision_id, 1, "public-edge"));
+
+        let mut clean = Graph::new();
+        clean.nodes.push(node(collision_id, "Safe", "clean.rs"));
+        clean.nodes.push(node(2, "CleanTarget", "clean.rs"));
+        clean.edges.push(edge(collision_id, 2, "clean-edge"));
+
+        let result = merge(public, clean);
+        let marker = result
+            .nodes
+            .iter()
+            .find(|node| node.label == "[REDACTED:api_key]")
+            .unwrap()
+            .id;
+        let safe = result
+            .nodes
+            .iter()
+            .find(|node| node.label == "Safe")
+            .unwrap()
+            .id;
+        assert_eq!(marker.get(), collision_id);
+        assert_ne!(marker, safe);
+        assert_eq!(result.nodes.len(), 4);
+        assert!(result
+            .edges
+            .iter()
+            .any(|edge| edge.source == marker && edge.relation == "public-edge"));
+        assert!(result
+            .edges
+            .iter()
+            .any(|edge| edge.source == safe && edge.relation == "clean-edge"));
+    }
+
+    #[test]
+    fn collision_probed_secret_does_not_alias_unverified_public_node() {
+        let probed_id = content_id("api_key_alpha").wrapping_add(1);
+        let mut raw = Graph::new();
+        raw.nodes.push(node(probed_id, "api_key_alpha", "raw.rs"));
+        let mut public = Graph::new();
+        public
+            .nodes
+            .push(node(probed_id, "[REDACTED:api_key]", "public.rs"));
+
+        let result = merge(raw, public);
+        assert_eq!(result.nodes.len(), 2);
+        let raw = result
+            .nodes
+            .iter()
+            .find(|node| node.label == "api_key_alpha")
+            .unwrap();
+        let projected = result
+            .nodes
+            .iter()
+            .find(|node| node.label == "[REDACTED:api_key]")
+            .unwrap();
+        assert_ne!(raw.id, projected.id);
+        assert_eq!(projected.id.get(), probed_id);
+    }
+
+    #[test]
+    fn raw_and_unverified_projected_relations_remain_distinct() {
+        let mut raw = Graph::new();
+        raw.nodes.push(node(1, "A", "raw.rs"));
+        raw.nodes.push(node(2, "B", "raw.rs"));
+        raw.edges.push(edge(1, 2, "api_key=alpha"));
+
+        let mut public = Graph::new();
+        public.nodes.push(node(10, "A", "public.rs"));
+        public.nodes.push(node(20, "B", "public.rs"));
+        public
+            .edges
+            .push(edge(10, 20, &project_public_relation("api_key=alpha")));
+
+        let result = merge(raw, public);
+        assert_eq!(result.edges.len(), 2);
+        assert!(result
+            .edges
+            .iter()
+            .any(|edge| edge.relation == "api_key=alpha"));
+        assert!(result
+            .edges
+            .iter()
+            .any(|edge| edge.relation == "[REDACTED:api_key]"));
+    }
+
+    #[test]
+    fn independent_secret_relations_do_not_share_projected_ordinals() {
+        let mut a = Graph::new();
+        a.nodes.push(node(1, "A", "a.rs"));
+        a.nodes.push(node(2, "B", "a.rs"));
+        a.edges.push(edge(1, 2, "api_key=alpha"));
+
+        let mut b = Graph::new();
+        b.nodes.push(node(10, "A", "b.rs"));
+        b.nodes.push(node(20, "B", "b.rs"));
+        b.edges.push(edge(10, 20, "api_key=beta"));
+
+        let result = merge(a, b);
+        assert_eq!(result.edges.len(), 2);
+        assert!(result
+            .edges
+            .iter()
+            .any(|edge| edge.relation == "api_key=alpha"));
+        assert!(result
+            .edges
+            .iter()
+            .any(|edge| edge.relation == "api_key=beta"));
+    }
+
+    #[test]
+    fn identical_raw_secret_relations_deduplicate() {
+        let mut a = Graph::new();
+        a.nodes.push(node(1, "A", "a.rs"));
+        a.nodes.push(node(2, "B", "a.rs"));
+        a.edges.push(edge(1, 2, "api_key=same"));
+
+        let mut b = Graph::new();
+        b.nodes.push(node(10, "A", "b.rs"));
+        b.nodes.push(node(20, "B", "b.rs"));
+        b.edges.push(edge(10, 20, "api_key=same"));
+
+        let result = merge(a, b);
+        assert_eq!(result.edges.len(), 1);
+        assert_eq!(result.edges[0].relation, "api_key=same");
+    }
+
+    #[test]
+    fn independent_projected_relations_keep_distinct_provenance() {
+        let mut a = Graph::new();
+        a.nodes.push(node(1, "A", "a.rs"));
+        a.nodes.push(node(2, "B", "a.rs"));
+        a.edges.push(edge(1, 2, "[REDACTED:api_key]#e0"));
+
+        let mut b = Graph::new();
+        b.nodes.push(node(10, "A", "b.rs"));
+        b.nodes.push(node(20, "B", "b.rs"));
+        b.edges.push(edge(10, 20, "[REDACTED:api_key]#e0"));
+
+        let result = merge(a, b);
+        assert_eq!(result.edges.len(), 2);
+    }
+
+    #[test]
+    fn different_redaction_markers_sharing_an_input_id_remain_distinct() {
+        let mut a = Graph::new();
+        a.nodes.push(node(7, "[REDACTED:api_key]", "a.rs"));
+        a.nodes.push(node(8, "ATarget", "a.rs"));
+        a.edges.push(edge(7, 8, "a-edge"));
+
+        let mut b = Graph::new();
+        b.nodes.push(node(7, "[REDACTED:bearer_token]", "b.rs"));
+        b.nodes.push(node(8, "BTarget", "b.rs"));
+        b.edges.push(edge(7, 8, "b-edge"));
+
+        let result = merge(a, b);
+        let api = result
+            .nodes
+            .iter()
+            .find(|node| node.label == "[REDACTED:api_key]")
+            .unwrap();
+        let bearer = result
+            .nodes
+            .iter()
+            .find(|node| node.label == "[REDACTED:bearer_token]")
+            .unwrap();
+        let a_target = result
+            .nodes
+            .iter()
+            .find(|node| node.label == "ATarget")
+            .unwrap();
+        let b_target = result
+            .nodes
+            .iter()
+            .find(|node| node.label == "BTarget")
+            .unwrap();
+
+        assert_eq!(result.nodes.len(), 4);
+        assert_ne!(api.id, bearer.id);
+        assert!(result
+            .edges
+            .iter()
+            .any(|edge| edge.source == api.id && edge.target == a_target.id));
+        assert!(result
+            .edges
+            .iter()
+            .any(|edge| edge.source == bearer.id && edge.target == b_target.id));
+    }
+
+    #[test]
+    fn identical_markers_from_independent_graphs_keep_edges_and_communities_distinct() {
+        let mut a = Graph::new();
+        a.nodes.push(node(7, "[REDACTED:api_key]", "a.rs"));
+        a.nodes.push(node(8, "ATarget", "a.rs"));
+        a.edges.push(edge(7, 8, "a-edge"));
+        a.communities.push(community(10, "a-community", &[7]));
+
+        let mut b = Graph::new();
+        b.nodes.push(node(7, "[REDACTED:api_key]", "b.rs"));
+        b.nodes.push(node(8, "BTarget", "b.rs"));
+        b.edges.push(edge(7, 8, "b-edge"));
+        b.communities.push(community(11, "b-community", &[7]));
+
+        let result = merge(a, b);
+        let a_marker = result
+            .nodes
+            .iter()
+            .find(|node| node.source_file == "a.rs" && node.label == "[REDACTED:api_key]")
+            .unwrap();
+        let b_marker = result
+            .nodes
+            .iter()
+            .find(|node| node.source_file == "b.rs" && node.label == "[REDACTED:api_key]")
+            .unwrap();
+
+        assert_ne!(a_marker.id, b_marker.id);
+        assert!(result
+            .edges
+            .iter()
+            .any(|edge| edge.source == a_marker.id && edge.relation == "a-edge"));
+        assert!(result
+            .edges
+            .iter()
+            .any(|edge| edge.source == b_marker.id && edge.relation == "b-edge"));
+        assert_eq!(
+            result
+                .communities
+                .iter()
+                .find(|community| community.label == "a-community")
+                .unwrap()
+                .members,
+            vec![a_marker.id]
+        );
+        assert_eq!(
+            result
+                .communities
+                .iter()
+                .find(|community| community.label == "b-community")
+                .unwrap()
+                .members,
+            vec![b_marker.id]
         );
     }
 }

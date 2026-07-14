@@ -37,8 +37,7 @@ const GITATTRIBUTES_LINE: &str = "graph.json merge=habitat-graph";
 const MERGE_DRIVER_SECTION: &str = "[merge \"habitat-graph\"]";
 
 /// `git config` driver value written under [`MERGE_DRIVER_SECTION`].
-const MERGE_DRIVER_VALUE: &str =
-    "\tdriver = habitat-graph merge-driver %O %A %B\n\
+const MERGE_DRIVER_VALUE: &str = "\tdriver = habitat-graph merge-driver %O %A %B\n\
      \tname = habitat-graph deterministic graph.json merge\n";
 
 // ── Git repo discovery ────────────────────────────────────────────────────────
@@ -259,7 +258,10 @@ fn run_install_inner(start_dir: &Path) -> Result<String> {
     } else {
         "post-commit hook already present (no-op)"
     };
-    Ok(format!("{status} in {}", root.join(".git").join("hooks").display()))
+    Ok(format!(
+        "{status} in {}",
+        root.join(".git").join("hooks").display()
+    ))
 }
 
 /// Runs `hook install-merge-driver` from `start_dir`.
@@ -294,8 +296,16 @@ fn run_install_merge_driver_inner(start_dir: &Path) -> Result<String> {
     })?;
     let cfg_added = install_git_config(&root)?;
     let attr_added = install_gitattributes(&root)?;
-    let cfg_status = if cfg_added { "added" } else { "already present" };
-    let attr_status = if attr_added { "added" } else { "already present" };
+    let cfg_status = if cfg_added {
+        "added"
+    } else {
+        "already present"
+    };
+    let attr_status = if attr_added {
+        "added"
+    } else {
+        "already present"
+    };
     Ok(format!(
         ".git/config merge driver: {cfg_status}; .gitattributes: {attr_status}"
     ))
@@ -331,8 +341,11 @@ mod tests {
         let git_dir = dir.join(".git");
         fs::create_dir_all(&git_dir).expect("create .git");
         // Minimal config so .git/config reads don't error.
-        fs::write(git_dir.join("config"), "[core]\n\trepositoryformatversion = 0\n")
-            .expect("write config");
+        fs::write(
+            git_dir.join("config"),
+            "[core]\n\trepositoryformatversion = 0\n",
+        )
+        .expect("write config");
         dir.to_path_buf()
     }
 
@@ -340,7 +353,10 @@ mod tests {
 
     #[test]
     fn line_present_exact_match() {
-        assert!(line_present("graph.json merge=habitat-graph\n", GITATTRIBUTES_LINE));
+        assert!(line_present(
+            "graph.json merge=habitat-graph\n",
+            GITATTRIBUTES_LINE
+        ));
     }
 
     #[test]
@@ -356,7 +372,10 @@ mod tests {
 
     #[test]
     fn line_present_respects_trimming() {
-        assert!(line_present("  graph.json merge=habitat-graph  \n", GITATTRIBUTES_LINE));
+        assert!(line_present(
+            "  graph.json merge=habitat-graph  \n",
+            GITATTRIBUTES_LINE
+        ));
     }
 
     #[test]
@@ -393,8 +412,8 @@ mod tests {
     fn discover_returns_none_outside_any_repo() {
         // A temp dir with no `.git` ancestor — use a path we control.
         let _d = tdir(); // no .git here
-        // Walk up from inside an empty dir; must reach root and return None.
-        // We can't guarantee no `.git` in a parent on CI; use a dedicated tmp dir.
+                         // Walk up from inside an empty dir; must reach root and return None.
+                         // We can't guarantee no `.git` in a parent on CI; use a dedicated tmp dir.
         let isolated = tdir();
         let result = discover_repo_root(&isolated);
         // Either None (isolated dir truly outside a repo) or Some (if tmp is inside a repo).
@@ -423,7 +442,10 @@ mod tests {
     fn install_post_commit_returns_true_on_new_install() {
         let d = tdir();
         make_fake_repo(&d);
-        assert!(install_post_commit(&d).expect("install"), "must return true for new install");
+        assert!(
+            install_post_commit(&d).expect("install"),
+            "must return true for new install"
+        );
     }
 
     #[test]
@@ -483,8 +505,14 @@ mod tests {
         let added = install_post_commit(&d).expect("install");
         assert!(added, "must return true when appending");
         let text = fs::read_to_string(&hook_path).expect("read");
-        assert!(text.contains("existing_hook_command"), "prior hook content preserved");
-        assert!(text.contains(HOOK_BODY.trim()), "habitat-graph hook appended");
+        assert!(
+            text.contains("existing_hook_command"),
+            "prior hook content preserved"
+        );
+        assert!(
+            text.contains(HOOK_BODY.trim()),
+            "habitat-graph hook appended"
+        );
     }
 
     #[test]
@@ -544,7 +572,10 @@ mod tests {
         let d = tdir();
         make_fake_repo(&d);
         install_gitattributes(&d).expect("first");
-        assert!(!install_gitattributes(&d).expect("second"), "second must be no-op");
+        assert!(
+            !install_gitattributes(&d).expect("second"),
+            "second must be no-op"
+        );
     }
 
     #[test]
@@ -554,8 +585,14 @@ mod tests {
         fs::write(d.join(".gitattributes"), "*.png binary\n").expect("seed");
         install_gitattributes(&d).expect("install");
         let text = fs::read_to_string(d.join(".gitattributes")).expect("read");
-        assert!(text.contains("*.png binary"), "prior content must be preserved");
-        assert!(text.contains(GITATTRIBUTES_LINE), "routing line must be added");
+        assert!(
+            text.contains("*.png binary"),
+            "prior content must be preserved"
+        );
+        assert!(
+            text.contains(GITATTRIBUTES_LINE),
+            "routing line must be added"
+        );
     }
 
     #[test]
@@ -595,7 +632,10 @@ mod tests {
         let d = tdir();
         make_fake_repo(&d);
         install_git_config(&d).expect("first");
-        assert!(!install_git_config(&d).expect("second"), "second must be no-op");
+        assert!(
+            !install_git_config(&d).expect("second"),
+            "second must be no-op"
+        );
     }
 
     #[test]
@@ -638,7 +678,7 @@ mod tests {
     fn run_install_creates_post_commit_hook() {
         let d = tdir();
         make_fake_repo(&d);
-        run_install(&d);
+        assert_eq!(run_install(&d), 0);
         assert!(d.join(".git").join("hooks").join("post-commit").exists());
     }
 
@@ -672,7 +712,7 @@ mod tests {
     fn run_install_merge_driver_creates_gitattributes() {
         let d = tdir();
         make_fake_repo(&d);
-        run_install_merge_driver(&d);
+        assert_eq!(run_install_merge_driver(&d), 0);
         assert!(d.join(".gitattributes").exists());
     }
 
@@ -680,7 +720,7 @@ mod tests {
     fn run_install_merge_driver_updates_git_config() {
         let d = tdir();
         make_fake_repo(&d);
-        run_install_merge_driver(&d);
+        assert_eq!(run_install_merge_driver(&d), 0);
         let text = fs::read_to_string(d.join(".git").join("config")).expect("read");
         assert!(text.contains(MERGE_DRIVER_SECTION));
     }
@@ -697,8 +737,8 @@ mod tests {
     fn run_install_merge_driver_gitattributes_has_line_once() {
         let d = tdir();
         make_fake_repo(&d);
-        run_install_merge_driver(&d);
-        run_install_merge_driver(&d);
+        assert_eq!(run_install_merge_driver(&d), 0);
+        assert_eq!(run_install_merge_driver(&d), 0);
         let text = fs::read_to_string(d.join(".gitattributes")).expect("read");
         assert_eq!(text.matches(GITATTRIBUTES_LINE).count(), 1);
     }
@@ -776,8 +816,8 @@ mod tests {
     fn run_install_merge_driver_config_section_once_on_double_call() {
         let d = tdir();
         make_fake_repo(&d);
-        run_install_merge_driver(&d);
-        run_install_merge_driver(&d);
+        assert_eq!(run_install_merge_driver(&d), 0);
+        assert_eq!(run_install_merge_driver(&d), 0);
         let text = fs::read_to_string(d.join(".git").join("config")).expect("read");
         assert_eq!(
             text.matches(MERGE_DRIVER_SECTION).count(),
@@ -793,7 +833,10 @@ mod tests {
         install_git_config(&d).expect("install");
         let text = fs::read_to_string(d.join(".git").join("config")).expect("read");
         // The config must include the `driver =` line pointing to the CLI.
-        assert!(text.contains("driver = "), "config must specify a driver command");
+        assert!(
+            text.contains("driver = "),
+            "config must specify a driver command"
+        );
     }
 
     #[test]
@@ -834,7 +877,10 @@ mod tests {
         assert_eq!(run_install(&d), 0);
         // .gitattributes must be untouched by run_install.
         let text = fs::read_to_string(d.join(".gitattributes")).expect("read");
-        assert_eq!(text, "# pre-existing\n", "run_install must not touch .gitattributes");
+        assert_eq!(
+            text, "# pre-existing\n",
+            "run_install must not touch .gitattributes"
+        );
     }
 
     #[test]
@@ -842,7 +888,7 @@ mod tests {
         let d = tdir();
         make_fake_repo(&d);
         fs::write(d.join(".gitattributes"), "*.png binary\n").expect("seed");
-        run_install_merge_driver(&d);
+        assert_eq!(run_install_merge_driver(&d), 0);
         let text = fs::read_to_string(d.join(".gitattributes")).expect("read");
         assert!(
             text.contains("*.png binary"),

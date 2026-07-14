@@ -149,7 +149,7 @@ fn filter_edges(graph: &Graph, pred: impl Fn(Confidence) -> bool) -> Graph {
 #[cfg(test)]
 mod tests {
     use habitat_graph_core::{
-        CommunityId, Confidence, Community, Edge, Graph, InputRecord, Node, NodeId, Span,
+        Community, CommunityId, Confidence, Edge, Graph, InputRecord, Node, NodeId, Span,
         SCHEMA_VERSION,
     };
 
@@ -232,15 +232,15 @@ mod tests {
         ]);
         let out = trusted_subgraph(&g);
         assert_eq!(out.edges.len(), 3);
-        assert!(out.edges.iter().all(|e| e.confidence == Confidence::Extracted));
+        assert!(out
+            .edges
+            .iter()
+            .all(|e| e.confidence == Confidence::Extracted));
     }
 
     #[test]
     fn trusted_all_inferred_none_kept() {
-        let g = bare_graph([
-            e(1, 2, Confidence::Inferred),
-            e(2, 3, Confidence::Inferred),
-        ]);
+        let g = bare_graph([e(1, 2, Confidence::Inferred), e(2, 3, Confidence::Inferred)]);
         let out = trusted_subgraph(&g);
         assert_eq!(out.edges.len(), 0);
     }
@@ -292,7 +292,10 @@ mod tests {
         ]);
         let out = trusted_subgraph(&g);
         assert_eq!(out.edges.len(), 2, "only extracted edges should survive");
-        assert!(out.edges.iter().all(|e| e.confidence == Confidence::Extracted));
+        assert!(out
+            .edges
+            .iter()
+            .all(|e| e.confidence == Confidence::Extracted));
     }
 
     #[test]
@@ -374,7 +377,10 @@ mod tests {
         ]);
         let out = untrusted_subgraph(&g);
         assert_eq!(out.edges.len(), 2);
-        assert!(out.edges.iter().all(|e| e.confidence == Confidence::Ambiguous));
+        assert!(out
+            .edges
+            .iter()
+            .all(|e| e.confidence == Confidence::Ambiguous));
     }
 
     #[test]
@@ -601,7 +607,10 @@ mod tests {
 
     #[test]
     fn partition_all_extracted_trusted_full_untrusted_empty() {
-        let g = bare_graph([e(1, 2, Confidence::Extracted), e(2, 3, Confidence::Extracted)]);
+        let g = bare_graph([
+            e(1, 2, Confidence::Extracted),
+            e(2, 3, Confidence::Extracted),
+        ]);
         assert_eq!(trusted_subgraph(&g).edges.len(), 2);
         assert_eq!(untrusted_subgraph(&g).edges.len(), 0);
     }
@@ -615,7 +624,10 @@ mod tests {
 
     #[test]
     fn partition_all_ambiguous_trusted_empty_untrusted_full() {
-        let g = bare_graph([e(1, 2, Confidence::Ambiguous), e(2, 3, Confidence::Ambiguous)]);
+        let g = bare_graph([
+            e(1, 2, Confidence::Ambiguous),
+            e(2, 3, Confidence::Ambiguous),
+        ]);
         assert_eq!(trusted_subgraph(&g).edges.len(), 0);
         assert_eq!(untrusted_subgraph(&g).edges.len(), 2);
     }
@@ -862,11 +874,11 @@ mod tests {
     fn untrusted_preserves_relative_order_of_nontrusted_edges() {
         // Insert non-trusted edges in a specific order; they must survive in the same relative order.
         let g = bare_graph([
-            e(3, 4, Confidence::Inferred),   // index 0 after filter
-            e(1, 2, Confidence::Extracted),  // dropped
-            e(1, 3, Confidence::Ambiguous),  // index 1 after filter
-            e(2, 4, Confidence::Extracted),  // dropped
-            e(5, 6, Confidence::Inferred),   // index 2 after filter
+            e(3, 4, Confidence::Inferred),  // index 0 after filter
+            e(1, 2, Confidence::Extracted), // dropped
+            e(1, 3, Confidence::Ambiguous), // index 1 after filter
+            e(2, 4, Confidence::Extracted), // dropped
+            e(5, 6, Confidence::Inferred),  // index 2 after filter
         ]);
         let out = untrusted_subgraph(&g);
         assert_eq!(out.edges.len(), 3);
@@ -1003,7 +1015,10 @@ mod tests {
         g.manifest.generated_at = Some("2026-06-29T12:00:00Z".into());
         g.edges.push(e(1, 2, Confidence::Inferred));
         let out = trusted_subgraph(&g);
-        assert_eq!(out.manifest.generated_at, Some("2026-06-29T12:00:00Z".into()));
+        assert_eq!(
+            out.manifest.generated_at,
+            Some("2026-06-29T12:00:00Z".into())
+        );
     }
 
     #[test]
@@ -1012,7 +1027,10 @@ mod tests {
         g.manifest.generated_at = Some("2026-06-29T12:00:00Z".into());
         g.edges.push(e(1, 2, Confidence::Extracted));
         let out = untrusted_subgraph(&g);
-        assert_eq!(out.manifest.generated_at, Some("2026-06-29T12:00:00Z".into()));
+        assert_eq!(
+            out.manifest.generated_at,
+            Some("2026-06-29T12:00:00Z".into())
+        );
     }
 
     // ── 14. Only-edges-differ invariant ───────────────────────────────────────────────────────────

@@ -17,7 +17,7 @@ pub struct Cli {
 /// Top-level subcommands.
 #[derive(Subcommand, Debug)]
 enum Command {
-    /// Extract a knowledge graph from a directory of Rust source.
+    /// Extract a public, deterministically redacted knowledge graph from a source directory.
     Extract {
         /// Root directory to scan.
         dir: PathBuf,
@@ -28,20 +28,20 @@ enum Command {
         /// this directory — open it with Obsidian's graph view for interactive interconnection.
         #[arg(long)]
         vault: Option<PathBuf>,
-        /// Also emit `graph.svg` (a deterministically laid-out drawing).
+        /// Also emit/adopt `graph.svg` (later runs refresh it from its ownership manifest).
         #[arg(long)]
         svg: bool,
-        /// Also emit `graph.graphml` (Gephi/yEd import).
+        /// Also emit/adopt `graph.graphml` (later runs refresh it from its ownership manifest).
         #[arg(long)]
         graphml: bool,
-        /// Also emit `graph.cypher` (Neo4j import script).
+        /// Also emit/adopt `graph.cypher` (later runs refresh it from its ownership manifest).
         #[arg(long)]
         neo4j: bool,
-        /// Also emit a `wiki/` directory (one Markdown article per node + `index.md`).
+        /// Also emit/adopt a generated `wiki/` (unowned pages are never overwritten).
         #[arg(long)]
         wiki: bool,
     },
-    /// Incrementally rebuild the graph for a directory, reusing cached extractions.
+    /// Incrementally rebuild using owner-only raw state and refresh public redacted artifacts.
     Update {
         /// Root directory to scan.
         dir: PathBuf,
@@ -82,7 +82,7 @@ enum Command {
         #[arg(long, default_value = "graphify-out/graph.json")]
         graph: PathBuf,
     },
-    /// Git merge driver for `graph.json` (invoked by git as `merge-driver %O %A %B`).
+    /// Git merge driver preserving redacted IDs/provenance (`merge-driver %O %A %B`).
     MergeDriver {
         /// Base (`%O`) — the merge ancestor `graph.json`.
         base: PathBuf,
@@ -134,9 +134,9 @@ enum Command {
         #[arg(long, default_value = commands::watch::DEFAULT_OUT)]
         out: PathBuf,
     },
-    /// Fetch a remote source file and merge it into the graph (requires --features live).
+    /// Fetch a remote source without redirects and merge it (requires --features live).
     Add {
-        /// URL to fetch.  Must be `http://` or `https://` and must not target private/internal IPs.
+        /// Public HTTP(S) URL to fetch; private/internal targets and redirects are refused.
         url: String,
         /// Output `graph.json` to merge the new nodes into.
         #[arg(long, default_value = "graphify-out/graph.json")]

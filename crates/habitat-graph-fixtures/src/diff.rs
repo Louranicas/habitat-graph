@@ -38,7 +38,8 @@ impl ParityReport {
 /// * The three `edges_*` fields follow the same semantics for `(src, tgt, relation)` triples.
 ///
 /// Output Vecs are **deterministically sorted** because the inputs are [`BTreeSet`]s and
-/// [`BTreeSet::difference`] / [`BTreeSet::intersection`] iterate in ascending order.
+/// [`std::collections::BTreeSet::difference`] and
+/// [`std::collections::BTreeSet::intersection`] iterate in ascending order.
 ///
 /// [`BTreeSet`]: std::collections::BTreeSet
 #[must_use]

@@ -296,12 +296,7 @@ fn extract_var_decl(
 /// Side-effect-only imports (`import 'polyfill'`) are included — the source string is always
 /// present. Dynamic `import()` calls are `call_expression` nodes and are therefore silently
 /// omitted.
-fn extract_import(
-    node: &tree_sitter::Node<'_>,
-    source: &[u8],
-    b: &str,
-    result: &mut Extraction,
-) {
+fn extract_import(node: &tree_sitter::Node<'_>, source: &[u8], b: &str, result: &mut Extraction) {
     let Some(source_node) = node.child_by_field_name("source") else {
         return;
     };
@@ -547,13 +542,19 @@ mod tests {
     #[test]
     fn mjs_extension_parses_and_yields_file_node() {
         let ex = extract("export const x = 1;\n", "module.mjs");
-        assert!(has_node(&ex, "module"), "file node must be present for .mjs");
+        assert!(
+            has_node(&ex, "module"),
+            "file node must be present for .mjs"
+        );
     }
 
     #[test]
     fn cjs_extension_parses_and_yields_file_node() {
         let ex = extract("const x = require('fs');\n", "loader.cjs");
-        assert!(has_node(&ex, "loader"), "file node must be present for .cjs");
+        assert!(
+            has_node(&ex, "loader"),
+            "file node must be present for .cjs"
+        );
     }
 
     #[test]
@@ -816,7 +817,11 @@ mod tests {
         let method_nodes: Vec<_> = ex
             .nodes
             .iter()
-            .filter(|n| ex.edges.iter().any(|e| e.target == n.label && e.relation == "method"))
+            .filter(|n| {
+                ex.edges
+                    .iter()
+                    .any(|e| e.target == n.label && e.relation == "method")
+            })
             .collect();
         assert!(
             method_nodes.is_empty(),
@@ -899,8 +904,14 @@ mod tests {
     fn multiple_imports_all_emitted() {
         let src = "import a from 'axios';\nimport b from 'lodash';\n";
         let ex = extract(src, "deps.js");
-        assert!(has_edge(&ex, "deps", "axios", "imports_from"), "axios edge missing");
-        assert!(has_edge(&ex, "deps", "lodash", "imports_from"), "lodash edge missing");
+        assert!(
+            has_edge(&ex, "deps", "axios", "imports_from"),
+            "axios edge missing"
+        );
+        assert!(
+            has_edge(&ex, "deps", "lodash", "imports_from"),
+            "lodash edge missing"
+        );
     }
 
     // ── 10. Export statement ──────────────────────────────────────────────────────────────────
@@ -908,7 +919,10 @@ mod tests {
     #[test]
     fn exported_function_declaration_emits_fn_node() {
         let ex = extract("export function exported() {}\n", "api.js");
-        assert!(has_node(&ex, "api_exported"), "exported function node missing");
+        assert!(
+            has_node(&ex, "api_exported"),
+            "exported function node missing"
+        );
         assert!(has_edge(&ex, "api", "api_exported", "contains"));
     }
 
@@ -922,7 +936,10 @@ mod tests {
     #[test]
     fn exported_const_arrow_emits_fn_node() {
         let ex = extract("export const handler = () => {};\n", "routes.js");
-        assert!(has_node(&ex, "routes_handler"), "exported arrow node missing");
+        assert!(
+            has_node(&ex, "routes_handler"),
+            "exported arrow node missing"
+        );
         assert!(has_edge(&ex, "routes", "routes_handler", "contains"));
     }
 
@@ -948,8 +965,7 @@ mod tests {
 
     #[test]
     fn no_calls_edges_ever_emitted() {
-        let src =
-            "class Foo { bar() { baz(); } }\nfunction baz() {}\nconst x = baz();\n";
+        let src = "class Foo { bar() { baz(); } }\nfunction baz() {}\nconst x = baz();\n";
         let ex = extract(src, "noisy.js");
         for edge in &ex.edges {
             assert_ne!(
@@ -1028,7 +1044,10 @@ mod tests {
         let src = "class Foo {}\n";
         let ex = extract(src, "x.js");
         let n = node(&ex, "x_foo");
-        assert_eq!(n.span.start_line, 1, "class on line 1 must have start_line=1");
+        assert_eq!(
+            n.span.start_line, 1,
+            "class on line 1 must have start_line=1"
+        );
     }
 
     #[test]
@@ -1083,7 +1102,10 @@ mod tests {
     fn nested_function_inside_function_not_emitted() {
         let src = "function outer() { function inner() {} }\n";
         let ex = extract(src, "funcs.js");
-        assert!(has_node(&ex, "funcs_outer"), "outer function must be present");
+        assert!(
+            has_node(&ex, "funcs_outer"),
+            "outer function must be present"
+        );
         assert!(
             !has_node(&ex, "funcs_inner"),
             "nested function must NOT be emitted"
@@ -1111,13 +1133,14 @@ mod tests {
 
     #[test]
     fn two_classes_two_methods_each_produce_correct_totals() {
-        let src = concat!(
-            "class A { x() {} y() {} }\n",
-            "class B { p() {} q() {} }\n",
-        );
+        let src = concat!("class A { x() {} y() {} }\n", "class B { p() {} q() {} }\n",);
         let ex = extract(src, "ab.js");
         // file + 2 classes + 4 methods = 7 nodes
-        assert_eq!(ex.nodes.len(), 7, "expected 7 nodes (1 file + 2 class + 4 method)");
+        assert_eq!(
+            ex.nodes.len(),
+            7,
+            "expected 7 nodes (1 file + 2 class + 4 method)"
+        );
         let method_edges = ex.edges.iter().filter(|e| e.relation == "method").count();
         let contains_edges = ex.edges.iter().filter(|e| e.relation == "contains").count();
         assert_eq!(method_edges, 4, "expected 4 method edges");

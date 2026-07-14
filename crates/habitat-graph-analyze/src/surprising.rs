@@ -73,10 +73,11 @@ fn community_of(graph: &Graph) -> HashMap<NodeId, CommunityId> {
 
 /// Returns all trusted edges that bridge two distinct communities, in [`Graph`]`::edges` order.
 ///
-/// A "surprising" connection is a [`Confidence::Extracted`] edge whose source and target nodes
+/// A "surprising" connection is a
+/// [`Confidence::Extracted`](habitat_graph_core::Confidence::Extracted) edge whose source and target nodes
 /// belong to **different** communities.  Edges where either endpoint has no community assignment,
 /// where both endpoints share the same community, or whose confidence is not
-/// [`Confidence::Extracted`] are silently excluded.
+/// [`Confidence::Extracted`](habitat_graph_core::Confidence::Extracted) are silently excluded.
 ///
 /// The output is deterministic (R4): iteration follows `graph.edges` insertion order and no
 /// `HashMap` iteration order leaks into the result.
@@ -347,8 +348,16 @@ mod tests {
         g.communities.push(comm(1, &[9]));
         g.edges.push(edge(5, 9, Confidence::Extracted));
         let result = surprising_connections(&g);
-        assert_eq!(result[0].source, nid(5), "source must be 5, not swapped with target");
-        assert_eq!(result[0].target, nid(9), "target must be 9, not swapped with source");
+        assert_eq!(
+            result[0].source,
+            nid(5),
+            "source must be 5, not swapped with target"
+        );
+        assert_eq!(
+            result[0].target,
+            nid(9),
+            "target must be 9, not swapped with source"
+        );
     }
 
     /// The `relation` field is cloned verbatim from the edge's relation string.
@@ -357,7 +366,8 @@ mod tests {
         let mut g = Graph::new();
         g.communities.push(comm(0, &[1]));
         g.communities.push(comm(1, &[2]));
-        g.edges.push(edge_rel(1, 2, "imports", Confidence::Extracted));
+        g.edges
+            .push(edge_rel(1, 2, "imports", Confidence::Extracted));
         let result = surprising_connections(&g);
         assert_eq!(result[0].relation, "imports");
     }
@@ -420,8 +430,16 @@ mod tests {
         g.edges.push(edge(1, 2, Confidence::Extracted)); // comms 0→1
         let result = surprising_connections(&g);
         assert_eq!(result.len(), 2);
-        assert_eq!(result[0].source, nid(3), "first result must match first edge");
-        assert_eq!(result[1].source, nid(1), "second result must match second edge");
+        assert_eq!(
+            result[0].source,
+            nid(3),
+            "first result must match first edge"
+        );
+        assert_eq!(
+            result[1].source,
+            nid(1),
+            "second result must match second edge"
+        );
     }
 
     /// Non-surprising edges interleaved with surprising ones do not shift the order of bridges.
@@ -453,7 +471,10 @@ mod tests {
         g.edges.push(edge(4, 2, Confidence::Extracted));
         let first = surprising_connections(&g);
         let second = surprising_connections(&g);
-        assert_eq!(first, second, "surprising_connections must be deterministic");
+        assert_eq!(
+            first, second,
+            "surprising_connections must be deterministic"
+        );
     }
 
     // ── Group 6: Self-loop handling ───────────────────────────────────────────────────────────
@@ -573,7 +594,8 @@ mod tests {
         let mut g = Graph::new();
         g.communities.push(comm(0, &[1]));
         g.communities.push(comm(1, &[2]));
-        g.edges.push(edge_rel(1, 2, "imports", Confidence::Extracted));
+        g.edges
+            .push(edge_rel(1, 2, "imports", Confidence::Extracted));
         assert_eq!(surprising_connections(&g)[0].relation, "imports");
     }
 
@@ -583,7 +605,8 @@ mod tests {
         let mut g = Graph::new();
         g.communities.push(comm(0, &[1]));
         g.communities.push(comm(1, &[2]));
-        g.edges.push(edge_rel(1, 2, "defines", Confidence::Extracted));
+        g.edges
+            .push(edge_rel(1, 2, "defines", Confidence::Extracted));
         assert_eq!(surprising_connections(&g)[0].relation, "defines");
     }
 
@@ -603,7 +626,8 @@ mod tests {
         let mut g = Graph::new();
         g.communities.push(comm(0, &[1]));
         g.communities.push(comm(1, &[2]));
-        g.edges.push(edge_rel(1, 2, "calls → via::trait", Confidence::Extracted));
+        g.edges
+            .push(edge_rel(1, 2, "calls → via::trait", Confidence::Extracted));
         assert_eq!(surprising_connections(&g)[0].relation, "calls → via::trait");
     }
 
@@ -618,7 +642,11 @@ mod tests {
         g.edges.push(edge(1, 2, Confidence::Extracted));
         g.edges.push(edge(1, 2, Confidence::Inferred));
         let result = surprising_connections(&g);
-        assert_eq!(result.len(), 1, "only the EXTRACTED edge is a surprising connection");
+        assert_eq!(
+            result.len(),
+            1,
+            "only the EXTRACTED edge is a surprising connection"
+        );
     }
 
     /// Trusted cross-community edge plus `AMBIGUOUS` cross-community edge → only trusted returned.
@@ -639,7 +667,7 @@ mod tests {
         g.communities.push(comm(0, &[1, 2]));
         g.communities.push(comm(1, &[3]));
         g.edges.push(edge(1, 2, Confidence::Extracted)); // same community: not surprising
-        g.edges.push(edge(1, 3, Confidence::Inferred));  // cross-community but untrusted
+        g.edges.push(edge(1, 3, Confidence::Inferred)); // cross-community but untrusted
         assert!(surprising_connections(&g).is_empty());
     }
 
@@ -752,7 +780,7 @@ mod tests {
         // 2 trusted bridges + 1 untrusted bridge + 2 same-community trusted.
         g.edges.push(edge(1, 3, Confidence::Extracted)); // bridge
         g.edges.push(edge(2, 4, Confidence::Extracted)); // bridge
-        g.edges.push(edge(1, 4, Confidence::Inferred));  // untrusted → excluded
+        g.edges.push(edge(1, 4, Confidence::Inferred)); // untrusted → excluded
         g.edges.push(edge(1, 2, Confidence::Extracted)); // same community → not surprising
         g.edges.push(edge(3, 4, Confidence::Extracted)); // same community → not surprising
         assert_eq!(surprising_connections(&g).len(), 2);
@@ -778,7 +806,8 @@ mod tests {
         }
         // Chain: 0→10, 10→20, 20→30, 30→40 (all cross-community).
         for i in 0_u32..4 {
-            g.edges.push(edge(i * 10, (i + 1) * 10, Confidence::Extracted));
+            g.edges
+                .push(edge(i * 10, (i + 1) * 10, Confidence::Extracted));
         }
         assert_eq!(surprising_connections(&g).len(), 4);
     }

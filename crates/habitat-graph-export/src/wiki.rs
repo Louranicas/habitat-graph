@@ -11,23 +11,29 @@
 //!
 //! # Security (STRIDE-T)
 //!
-//! Every attacker-influenced string (node label, source path, relation) is routed through
-//! [`display_safe`](habitat_graph_core::display_safe) before embedding in the output.
+//! Every attacker-influenced string (node label, source path, relation) first uses the shared
+//! deterministic secret redaction and is then routed through
+//! [`display_safe`] before embedding in the output.
 //! Labels used inside `[text](url)` link text are additionally bracket-escaped (`]` → `\]`,
 //! `[` → `\[`) to prevent link-injection attacks such as `](evil)` breaking out of the intended
 //! link target.
 //!
 //! # Determinism (R4)
 //!
-//! Output is byte-identical across calls for the same [`Graph`].  The function iterates
-//! `graph.nodes` / `graph.edges` in the given order and uses [`BTreeMap`] for auxiliary lookups
-//! whose key traversal order contributes to the rendered text.  No `HashMap` iteration order
-//! leaks into the output.
+//! Output is byte-identical across calls for the same [`Graph`]. The function follows node order,
+//! projects edges into public-field order, and uses [`BTreeMap`] for auxiliary lookups whose key
+//! traversal order contributes to the rendered text. No `HashMap` iteration order leaks into the
+//! output.
 
 use std::collections::BTreeMap;
 use std::fmt::Write as FmtWrite;
 
 use habitat_graph_core::{display_safe, sanitize_label, Graph, NodeId};
+
+use crate::escape::{markdown_code_span, markdown_text, project_public_edges, redact_public_text};
+
+/// Ownership marker embedded near the top of every generated wiki page.
+pub const GENERATED_WIKI_SIGNATURE: &str = "<!-- habitat-graph-generated:wiki:v1 -->";
 
 /// Renders `graph` as a plain-Markdown wiki: one article per node plus an `index.md`.
 ///
@@ -48,7 +54,9 @@ use habitat_graph_core::{display_safe, sanitize_label, Graph, NodeId};
 ///
 /// # Security
 ///
-/// All labels, paths, and relations pass through [`sanitize_label`] and [`display_safe`].
+/// All labels, paths, and relations first use deterministic secret redaction, then pass through
+/// [`sanitize_label`] and [`display_safe`]. The projection keeps every original `node-{id}.md`
+/// filename and edge link, so IDs and topology do not change.
 /// Labels embedded in Markdown link text also pass through the internal bracket-escaper so
 /// that `]` inside a label cannot close the link text early.
 #[must_use]
@@ -66,16 +74,18 @@ pub fn render_wiki(graph: &Graph) -> Vec<(String, String)> {
     let mut outbound: BTreeMap<NodeId, Vec<(String, NodeId)>> = BTreeMap::new();
     let mut inbound: BTreeMap<NodeId, Vec<(String, NodeId)>> = BTreeMap::new();
 
-    for edge in &graph.edges {
+    for projected in project_public_edges(graph) {
+        let edge = projected.edge;
         if label_map.contains_key(&edge.source) && label_map.contains_key(&edge.target) {
+            let relation = projected.relation;
             outbound
                 .entry(edge.source)
                 .or_default()
-                .push((edge.relation.clone(), edge.target));
+                .push((relation.clone(), edge.target));
             inbound
                 .entry(edge.target)
                 .or_default()
-                .push((edge.relation.clone(), edge.source));
+                .push((relation, edge.source));
         }
     }
 
@@ -128,23 +138,15 @@ fn node_filename(id: NodeId) -> String {
 /// close the link text bracket early and redirect the link destination (link-injection defense).
 #[must_use]
 fn md_link_text(label: &str) -> String {
-    let safe = display_safe(label);
-    // Capacity hint: add a small margin for potential escapes.
-    let mut out = String::with_capacity(safe.len().saturating_add(8));
-    for ch in safe.chars() {
-        match ch {
-            '[' => out.push_str("\\["),
-            ']' => out.push_str("\\]"),
-            c => out.push(c),
-        }
-    }
-    out
+    let redacted = redact_public_text(label);
+    markdown_text(&display_safe(&redacted))
 }
 
 /// Renders the `index.md` listing every node as a plain Markdown link.
 #[must_use]
 fn render_index(graph: &Graph, label_map: &BTreeMap<NodeId, &str>) -> String {
     let mut out = String::from("# Index\n\n");
+    let _ = writeln!(out, "{GENERATED_WIKI_SIGNATURE}\n");
     for node in &graph.nodes {
         let label = label_map.get(&node.id).copied().unwrap_or("");
         let link_text = md_link_text(&sanitize_label(label));
@@ -173,25 +175,31 @@ fn render_node_article(
     inbound: &BTreeMap<NodeId, Vec<(String, NodeId)>>,
     label_map: &BTreeMap<NodeId, &str>,
 ) -> String {
-    let safe_label = display_safe(&sanitize_label(label));
-    let safe_file = display_safe(source_file);
+    let redacted_label = redact_public_text(label);
+    let redacted_file = redact_public_text(source_file);
+    let safe_label = markdown_text(&display_safe(&sanitize_label(&redacted_label)));
+    let safe_file = display_safe(&redacted_file);
+    let safe_file = markdown_code_span(&safe_file);
 
     let mut out = String::new();
     // H1 title.
     let _ = writeln!(out, "# {safe_label}\n");
+    let _ = writeln!(out, "{GENERATED_WIKI_SIGNATURE}\n");
     // Source location.
-    let _ = writeln!(out, "Source: `{safe_file}` line {start_line}\n");
+    let _ = writeln!(out, "Source: {safe_file} line {start_line}\n");
 
     // Outbound section.
     out.push_str("## Outbound\n\n");
-    let ob_edges = outbound.get(&id).map_or(&[] as &[(String, NodeId)], Vec::as_slice);
+    let ob_edges = outbound
+        .get(&id)
+        .map_or(&[] as &[(String, NodeId)], Vec::as_slice);
     if ob_edges.is_empty() {
         out.push_str("_none_\n");
     } else {
         for (relation, target_id) in ob_edges {
             let target_label = label_map.get(target_id).copied().unwrap_or("");
             let link_text = md_link_text(&sanitize_label(target_label));
-            let safe_rel = display_safe(&sanitize_label(relation));
+            let safe_rel = markdown_text(&display_safe(&sanitize_label(relation)));
             let _ = writeln!(
                 out,
                 "- [{link_text}](node-{}.md) ({safe_rel})",
@@ -204,14 +212,16 @@ fn render_node_article(
 
     // Inbound section.
     out.push_str("## Inbound\n\n");
-    let ib_edges = inbound.get(&id).map_or(&[] as &[(String, NodeId)], Vec::as_slice);
+    let ib_edges = inbound
+        .get(&id)
+        .map_or(&[] as &[(String, NodeId)], Vec::as_slice);
     if ib_edges.is_empty() {
         out.push_str("_none_\n");
     } else {
         for (relation, source_id) in ib_edges {
             let source_label = label_map.get(source_id).copied().unwrap_or("");
             let link_text = md_link_text(&sanitize_label(source_label));
-            let safe_rel = display_safe(&sanitize_label(relation));
+            let safe_rel = markdown_text(&display_safe(&sanitize_label(relation)));
             let _ = writeln!(
                 out,
                 "- [{link_text}](node-{}.md) ({safe_rel})",
@@ -304,10 +314,10 @@ mod tests {
 
     /// Find the content for a given filename, panicking if absent.
     fn content_of<'a>(pages: &'a [(String, String)], fname: &str) -> &'a str {
-        pages
-            .iter()
-            .find(|(f, _)| f == fname)
-            .map_or_else(|| panic!("file '{fname}' not found in result"), |(_, c)| c.as_str())
+        pages.iter().find(|(f, _)| f == fname).map_or_else(
+            || panic!("file '{fname}' not found in result"),
+            |(_, c)| c.as_str(),
+        )
     }
 
     // ── T01: empty graph yields only index.md ─────────────────────────────────
@@ -383,10 +393,7 @@ mod tests {
 
     #[test]
     fn index_always_present_with_nodes() {
-        let g = graph_nodes(vec![
-            make_node(1, "a", "a.rs"),
-            make_node(2, "b", "b.rs"),
-        ]);
+        let g = graph_nodes(vec![make_node(1, "a", "a.rs"), make_node(2, "b", "b.rs")]);
         let pages = render_wiki(&g);
         assert!(
             pages.iter().any(|(f, _)| f == "index.md"),
@@ -455,7 +462,10 @@ mod tests {
         let pages = render_wiki(&g);
         let index = content_of(&pages, "index.md");
         let bullet_count = index.lines().filter(|l| l.starts_with("- [")).count();
-        assert_eq!(bullet_count, 5, "expected 5 index bullets; got {bullet_count}");
+        assert_eq!(
+            bullet_count, 5,
+            "expected 5 index bullets; got {bullet_count}"
+        );
     }
 
     // ── T13: all index link targets resolve ───────────────────────────────────
@@ -879,7 +889,10 @@ mod tests {
     fn deterministic_empty_graph() {
         let first = render_wiki(&Graph::default());
         let second = render_wiki(&Graph::default());
-        assert_eq!(first, second, "render_wiki must be deterministic on empty graph");
+        assert_eq!(
+            first, second,
+            "render_wiki must be deterministic on empty graph"
+        );
     }
 
     // ── T36: deterministic — with nodes and edges ─────────────────────────────
@@ -1041,10 +1054,7 @@ mod tests {
 
     #[test]
     fn bidi_override_in_relation_escaped() {
-        let mut g = graph_nodes(vec![
-            make_node(1, "a", "a.rs"),
-            make_node(2, "b", "b.rs"),
-        ]);
+        let mut g = graph_nodes(vec![make_node(1, "a", "a.rs"), make_node(2, "b", "b.rs")]);
         g.edges.push(make_edge(1, 2, "calls\u{202E}evil"));
         let pages = render_wiki(&g);
         for (fname, content) in &pages {
@@ -1084,10 +1094,7 @@ mod tests {
     fn cypher_injection_in_relation_neutralized() {
         // Classic Cypher injection: "' DETACH DELETE n //" must not break structure.
         let evil_rel = "' DETACH DELETE n //";
-        let mut g = graph_nodes(vec![
-            make_node(1, "a", "a.rs"),
-            make_node(2, "b", "b.rs"),
-        ]);
+        let mut g = graph_nodes(vec![make_node(1, "a", "a.rs"), make_node(2, "b", "b.rs")]);
         g.edges.push(make_edge(1, 2, evil_rel));
         let pages = render_wiki(&g);
         // The raw string is plain text in Markdown — display_safe leaves non-bidi chars alone.
@@ -1110,7 +1117,7 @@ mod tests {
         let article = content_of(&pages, "node-1.md");
         // The heading should contain the label with pipe.
         assert!(
-            article.contains("a|b"),
+            article.contains("a\\|b"),
             "pipe in label should appear literally in H1: {article}"
         );
     }
@@ -1163,8 +1170,14 @@ mod tests {
         let pos2 = ob_section.find("node-2.md").unwrap_or(usize::MAX);
         let pos4 = ob_section.find("node-4.md").unwrap_or(usize::MAX);
         let pos3 = ob_section.find("node-3.md").unwrap_or(usize::MAX);
-        assert!(pos2 < pos4, "node-2.md must come before node-4.md (same relation, lower id)");
-        assert!(pos4 < pos3, "calls edges must come before imports edge (alpha order)");
+        assert!(
+            pos2 < pos4,
+            "node-2.md must come before node-4.md (same relation, lower id)"
+        );
+        assert!(
+            pos4 < pos3,
+            "calls edges must come before imports edge (alpha order)"
+        );
     }
 
     // ── T49: inbound edges sorted by (relation, source_id) ────────────────────
@@ -1188,7 +1201,10 @@ mod tests {
         let pos2 = ib_section.find("node-2.md").unwrap_or(usize::MAX);
         let pos4 = ib_section.find("node-4.md").unwrap_or(usize::MAX);
         let pos3 = ib_section.find("node-3.md").unwrap_or(usize::MAX);
-        assert!(pos2 < pos4, "inbound from node-2 before node-4 (same relation)");
+        assert!(
+            pos2 < pos4,
+            "inbound from node-2 before node-4 (same relation)"
+        );
         assert!(pos4 < pos3, "calls before imports in inbound");
     }
 
@@ -1203,7 +1219,8 @@ mod tests {
         ]);
         g.edges.push(make_edge(5, 10, "calls"));
         let pages = render_wiki(&g);
-        let names: std::collections::HashSet<&str> = pages.iter().map(|(f, _)| f.as_str()).collect();
+        let names: std::collections::HashSet<&str> =
+            pages.iter().map(|(f, _)| f.as_str()).collect();
         let expected: std::collections::HashSet<&str> =
             ["node-5.md", "node-10.md", "node-15.md", "index.md"]
                 .iter()
@@ -1253,7 +1270,10 @@ mod tests {
     #[test]
     fn md_link_text_helper_bidi_override_escaped() {
         let out = md_link_text("x\u{202E}y");
-        assert!(!out.contains('\u{202E}'), "raw bidi in md_link_text output: {out:?}");
+        assert!(
+            !out.contains('\u{202E}'),
+            "raw bidi in md_link_text output: {out:?}"
+        );
         assert!(out.contains("\\u{202E}"), "escaped form missing: {out:?}");
     }
 
@@ -1294,6 +1314,42 @@ mod tests {
     // ── T57: all control chars in label stripped by sanitize_label ────────────
 
     #[test]
+    fn secret_patterns_are_redacted_in_articles_index_and_edges() {
+        let mut g = graph_nodes(vec![
+            make_node(1, "api_key_assignment_refused", "src/api_key.rs"),
+            make_node(2, "safe", "safe.rs"),
+        ]);
+        g.edges.push(make_edge(1, 2, "Authorization: Bearer token"));
+        let pages = render_wiki(&g);
+        let joined = pages
+            .iter()
+            .map(|(_, content)| content.as_str())
+            .collect::<String>();
+        assert!(!joined.contains("api_key_assignment_refused"));
+        assert!(!joined.contains("src/api_key.rs"));
+        assert!(!joined.contains("Authorization: Bearer token"));
+        assert!(joined.contains("\\[REDACTED:api_key\\]"));
+        assert!(joined.contains("\\[REDACTED:bearer_token\\]"));
+    }
+
+    #[test]
+    fn markdown_entities_cannot_reconstruct_secret_wiki_text() {
+        let g = graph_nodes(vec![make_node(
+            1,
+            "api&#95;key=SECRET",
+            "safe<em>path</em>.rs",
+        )]);
+        let joined = render_wiki(&g)
+            .into_iter()
+            .map(|(_, content)| content)
+            .collect::<String>();
+
+        assert!(!joined.contains("api&#95;key=SECRET"));
+        assert!(joined.contains("\\[REDACTED:api_key\\]"));
+        assert!(joined.contains("safe<em>path</em>.rs"));
+    }
+
+    #[test]
     fn label_with_control_chars_sanitized() {
         // Control chars are stripped by sanitize_label before display_safe.
         let label = "ab\x07\x0Bcd";
@@ -1315,10 +1371,7 @@ mod tests {
 
     #[test]
     fn communities_do_not_affect_file_set() {
-        let mut g = graph_nodes(vec![
-            make_node(1, "a", "a.rs"),
-            make_node(2, "b", "b.rs"),
-        ]);
+        let mut g = graph_nodes(vec![make_node(1, "a", "a.rs"), make_node(2, "b", "b.rs")]);
         g.communities.push(make_community(0, &[1, 2]));
         let pages_with = render_wiki(&g);
         g.communities.clear();

@@ -46,6 +46,7 @@ pub const DEBOUNCE: Duration = Duration::from_millis(200);
 pub const DEFAULT_OUT: &str = "graphify-out";
 
 /// Primary artifact name inside the output directory.
+#[cfg(all(feature = "watch", feature = "live-bridges"))]
 const GRAPH_JSON: &str = "graph.json";
 
 // ── Single-writer lock ────────────────────────────────────────────────────────
@@ -61,8 +62,8 @@ pub static REBUILD_LOCK: Mutex<()> = Mutex::new(());
 
 // ── Core rebuild ──────────────────────────────────────────────────────────────
 
-/// Extracts a graph from every recognised source file under `dir` and writes the core artifacts
-/// (at minimum `graph.json`) into `out`.
+/// Extracts a graph from every recognised source file under `dir`, writes the core artifacts, and
+/// refreshes optional public artifacts whose ownership manifests already claim them in `out`.
 ///
 /// Returns the number of nodes in the resulting graph.
 ///
@@ -72,28 +73,44 @@ pub static REBUILD_LOCK: Mutex<()> = Mutex::new(());
 /// - [`GraphError::Parse`] — a source file could not be extracted.
 /// - [`GraphError::Schema`] — graph serialisation failed.
 pub fn rebuild(dir: &Path, out: &Path) -> Result<usize> {
+    std::fs::create_dir_all(out).map_err(|error| GraphError::Io(error.to_string()))?;
+    let out = super::private_state::resolve_output_directory(out)?;
+    let legacy_state = out.join(".habitat-graph-state.json");
+    let _identity_lock =
+        super::private_state::acquire_output_identity_lock(&out.join("graph.json"))?;
+    #[cfg(unix)]
+    let full_build_state =
+        super::private_state::prepare_full_build_state(&out.join("graph.json"), &legacy_state)?;
+    #[cfg(not(unix))]
+    let state_path = legacy_state.as_path();
+    #[cfg(unix)]
+    let state_path = full_build_state.path();
+    let _output_lock = super::private_state::acquire_output_lock(state_path)?;
+    #[cfg(unix)]
+    {
+        super::private_state::ensure_no_pending_add_journals(state_path)?;
+        super::private_state::ensure_no_pending_update_journals(state_path)?;
+    }
+    #[cfg(not(unix))]
+    super::private_state::remove_unsupported_state(&out.join("graph.json"), &legacy_state)?;
+
     // Detect source files (all extractor-supported extensions).
     let files = habitat_graph_source::detect(dir, &["rs", "ts", "tsx", "js", "jsx", "go", "py"])?;
-
-    let extractions = habitat_graph_extract::extract_files(&files)?;
-    let mut graph = habitat_graph_build::assemble(extractions);
-
-    // Re-run community detection on the trusted subgraph (consistent with F12).
-    graph.communities = habitat_graph_analyze::detect_communities(
-        &habitat_graph_analyze::trusted_subgraph(&graph),
-    );
-    let graph = graph.sorted();
+    let full_build = super::extract::build_full_graph(&files)?;
+    let graph = full_build.0;
 
     let n = graph.nodes.len();
 
-    // Ensure output directory exists.
-    std::fs::create_dir_all(out)
-        .map_err(|e| GraphError::Io(format!("create out dir {}: {e}", out.display())))?;
-
-    // Write graph.json.
-    let json = habitat_graph_export::to_node_link(&graph)?;
-    std::fs::write(out.join(GRAPH_JSON), json.as_bytes())
-        .map_err(|e| GraphError::Io(format!("write graph.json: {e}")))?;
+    #[cfg(unix)]
+    super::extract::write_full_build_artifacts(
+        &full_build_state,
+        &graph,
+        &full_build.1,
+        &out,
+        super::extract::ExtractOpts::default(),
+    )?;
+    #[cfg(not(unix))]
+    super::extract::write_public_artifacts(&out, &graph, super::extract::ExtractOpts::default())?;
 
     Ok(n)
 }
@@ -142,26 +159,20 @@ pub fn try_rebuild_locked(dir: &Path, out: &Path) -> Result<usize> {
 /// Returns an empty `Vec` on any parse failure (I/O, malformed JSON, missing fields) so the
 /// watch loop can keep running without a hard error.
 #[cfg(all(feature = "watch", feature = "live-bridges"))]
-fn extract_arcs_from_out(
-    out: &Path,
-) -> Vec<habitat_graph_habitat::arc_graph::Arc> {
+fn extract_arcs_from_out(out: &Path) -> Vec<habitat_graph_habitat::arc_graph::Arc> {
     use std::collections::{HashMap, HashSet};
 
     let json = match std::fs::read_to_string(out.join(GRAPH_JSON)) {
         Ok(s) => s,
         Err(e) => {
-            eprintln!(
-                "[habitat-graph] arc-delta: failed to read graph.json: {e}"
-            );
+            eprintln!("[habitat-graph] arc-delta: failed to read graph.json: {e}");
             return Vec::new();
         }
     };
     let v: serde_json::Value = match serde_json::from_str(&json) {
         Ok(v) => v,
         Err(e) => {
-            eprintln!(
-                "[habitat-graph] arc-delta: graph.json is not valid JSON: {e}"
-            );
+            eprintln!("[habitat-graph] arc-delta: graph.json is not valid JSON: {e}");
             return Vec::new();
         }
     };
@@ -180,11 +191,10 @@ fn extract_arcs_from_out(
         .collect();
 
     // Materialise the default relation filter once.
-    let arc_relations: HashSet<&str> =
-        habitat_graph_habitat::arc_graph::default_arc_relations()
-            .iter()
-            .copied()
-            .collect();
+    let arc_relations: HashSet<&str> = habitat_graph_habitat::arc_graph::default_arc_relations()
+        .iter()
+        .copied()
+        .collect();
 
     let Some(links) = v.get("links").and_then(serde_json::Value::as_array) else {
         return Vec::new();
@@ -259,9 +269,7 @@ fn push_arc_delta(
     };
 
     if let Err(e) = pusher.push_delta(&delta) {
-        eprintln!(
-            "[habitat-graph] arc-delta: push_delta serialisation error (non-fatal): {e}"
-        );
+        eprintln!("[habitat-graph] arc-delta: push_delta serialisation error (non-fatal): {e}");
     }
 }
 
@@ -326,7 +334,10 @@ fn run_with_notify(dir: &Path, out: &Path) -> u8 {
     };
 
     if let Err(e) = watcher.watch(dir, RecursiveMode::Recursive) {
-        eprintln!("habitat-graph watch: failed to watch {}: {e}", dir.display());
+        eprintln!(
+            "habitat-graph watch: failed to watch {}: {e}",
+            dir.display()
+        );
         return 1;
     }
 
@@ -485,6 +496,59 @@ mod tests {
     }
 
     #[test]
+    fn rebuild_refreshes_all_existing_public_artifacts() {
+        let src = tdir();
+        let out = tdir();
+        let raw_label = "api_key_assignment_refused";
+        mk(&src, "lib.rs", &format!("fn {raw_label}() {{}}"));
+        for artifact in ["graph.svg", "graph.graphml", "graph.cypher"] {
+            fs::write(out.join(artifact), raw_label).unwrap();
+        }
+        fs::write(
+            out.join(".habitat-graph-artifacts.json"),
+            serde_json::to_vec_pretty(&serde_json::json!({
+                "schema": "habitat-graph.artifact-manifest.v1",
+                "files": ["graph.svg", "graph.graphml", "graph.cypher"],
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+        let wiki = out.join("wiki");
+        fs::create_dir(&wiki).unwrap();
+        fs::write(wiki.join("index.md"), raw_label).unwrap();
+        fs::write(wiki.join("node-4294967295.md"), raw_label).unwrap();
+        fs::write(
+            wiki.join(".habitat-graph-generated.json"),
+            serde_json::to_vec_pretty(&serde_json::json!({
+                "schema": "habitat-graph.wiki-manifest.v1",
+                "files": ["index.md", "node-4294967295.md"],
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+
+        rebuild(&src, &out).expect("rebuild");
+
+        for artifact in [
+            "graph.json",
+            "GRAPH_REPORT.md",
+            "graph.html",
+            "graph.svg",
+            "graph.graphml",
+            "graph.cypher",
+        ] {
+            assert!(!fs::read_to_string(out.join(artifact))
+                .unwrap()
+                .contains(raw_label));
+        }
+        for entry in fs::read_dir(&wiki).unwrap() {
+            assert!(!fs::read_to_string(entry.unwrap().path())
+                .unwrap()
+                .contains(raw_label));
+        }
+    }
+
+    #[test]
     fn rebuild_returns_node_count() {
         let src = tdir();
         let out = tdir();
@@ -552,7 +616,10 @@ mod tests {
         mk(&src, "lib.rs", "fn f() {}");
         rebuild(&src, &out).expect("rebuild");
         let text = read_graph_json(&out);
-        assert!(text.contains("\"nodes\""), "graph.json must have 'nodes' key");
+        assert!(
+            text.contains("\"nodes\""),
+            "graph.json must have 'nodes' key"
+        );
     }
 
     #[test]
@@ -562,7 +629,10 @@ mod tests {
         mk(&src, "lib.rs", "fn f() {}");
         rebuild(&src, &out).expect("rebuild");
         let text = read_graph_json(&out);
-        assert!(text.contains("\"links\""), "graph.json must have 'links' key");
+        assert!(
+            text.contains("\"links\""),
+            "graph.json must have 'links' key"
+        );
     }
 
     // ── rebuild: after source changes ─────────────────────────────────────────
@@ -580,6 +650,27 @@ mod tests {
         let json = read_graph_json(&out);
         assert!(!json.contains("old_fn"), "old function must be gone");
         assert!(json.contains("new_fn"), "new function must appear");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn rebuild_refreshes_private_state_when_public_bytes_are_unchanged() {
+        let src = tdir();
+        let out = tdir();
+        let first = "api_key=first-secret.rs";
+        let second = "api_key=second-secret.rs";
+        mk(&src, first, "fn stable() {}");
+        rebuild(&src, &out).unwrap();
+        let public = read_graph_json(&out);
+
+        fs::remove_file(src.join(first)).unwrap();
+        mk(&src, second, "fn stable() {}");
+        rebuild(&src, &out).unwrap();
+
+        assert_eq!(read_graph_json(&out), public);
+        let private = fs::read_to_string(out.join(".habitat-graph-state.json")).unwrap();
+        assert!(!private.contains(first));
+        assert!(private.contains(second));
     }
 
     #[test]
@@ -637,7 +728,10 @@ mod tests {
 
         let j1 = fs::read(out1.join("graph.json")).expect("j1");
         let j2 = fs::read(out2.join("graph.json")).expect("j2");
-        assert_eq!(j1, j2, "two full rebuilds must produce byte-identical output");
+        assert_eq!(
+            j1, j2,
+            "two full rebuilds must produce byte-identical output"
+        );
     }
 
     #[test]
@@ -649,7 +743,10 @@ mod tests {
         let first = fs::read(out.join("graph.json")).expect("read");
         rebuild(&src, &out).expect("second");
         let second = fs::read(out.join("graph.json")).expect("read");
-        assert_eq!(first, second, "repeated rebuild on unchanged source must be byte-identical");
+        assert_eq!(
+            first, second,
+            "repeated rebuild on unchanged source must be byte-identical"
+        );
     }
 
     // ── rebuild: error handling ───────────────────────────────────────────────
@@ -658,7 +755,10 @@ mod tests {
     fn rebuild_nonexistent_src_returns_error() {
         let phantom = PathBuf::from("/nonexistent_hg_watch_src_xyz");
         let out = tdir();
-        assert!(rebuild(&phantom, &out).is_err(), "nonexistent source must error");
+        assert!(
+            rebuild(&phantom, &out).is_err(),
+            "nonexistent source must error"
+        );
     }
 
     // ── try_rebuild_locked / do_try_rebuild_locked ───────────────────────────
@@ -689,8 +789,8 @@ mod tests {
         // Hold the local lock in the current thread.
         let _guard = local.lock().expect("acquire");
         // try_lock on a mutex already held → WouldBlock → Guard error.
-        let err = super::do_try_rebuild_locked(&local, &src, &out)
-            .expect_err("must fail when locked");
+        let err =
+            super::do_try_rebuild_locked(&local, &src, &out).expect_err("must fail when locked");
         assert!(
             matches!(err, habitat_graph_core::GraphError::Guard(_)),
             "expected Guard error, got {err:?}"
@@ -741,6 +841,34 @@ mod tests {
         );
     }
 
+    #[cfg(unix)]
+    #[test]
+    fn rebuild_respects_the_cross_process_output_lock() {
+        let src = tdir();
+        let out = tdir();
+        mk(&src, "lib.rs", "fn locked() {}");
+        let state = out.join(".habitat-graph-state.json");
+        let lock = super::super::private_state::acquire_output_lock(&state).unwrap();
+
+        let error = rebuild(&src, &out).unwrap_err();
+        assert_eq!(error.kind(), "guard");
+        assert!(!out.join("graph.json").exists());
+        drop(lock);
+        rebuild(&src, &out).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn rebuild_acquires_output_lock_before_source_scan() {
+        let out = tdir();
+        let state = out.join(".habitat-graph-state.json");
+        let lock = super::super::private_state::acquire_output_lock(&state).unwrap();
+
+        let error = rebuild(Path::new("/nonexistent_hg_watch_locked_src_xyz"), &out).unwrap_err();
+        assert_eq!(error.kind(), "guard");
+        drop(lock);
+    }
+
     // ── run: no-feature one-shot mode ─────────────────────────────────────────
 
     #[test]
@@ -758,8 +886,11 @@ mod tests {
         let src = tdir();
         let out = tdir();
         mk(&src, "lib.rs", "fn g() {}");
-        super::run(&src, &out);
-        assert!(out.join("graph.json").exists(), "graph.json must be created");
+        assert_eq!(super::run(&src, &out), 0);
+        assert!(
+            out.join("graph.json").exists(),
+            "graph.json must be created"
+        );
     }
 
     // ── rebuild: node-count correctness ───────────────────────────────────────
@@ -835,7 +966,10 @@ mod tests {
         let out = tdir();
         mk(&src, "lib.rs", "fn named_output() {}");
         rebuild(&src, &out).expect("rebuild");
-        assert!(out.join("graph.json").exists(), "output file must be named graph.json");
+        assert!(
+            out.join("graph.json").exists(),
+            "output file must be named graph.json"
+        );
     }
 
     #[test]
@@ -845,7 +979,10 @@ mod tests {
         mk(&src, "lib.rs", "fn utf8_check() {}");
         rebuild(&src, &out).expect("rebuild");
         let bytes = fs::read(out.join("graph.json")).expect("read");
-        assert!(std::str::from_utf8(&bytes).is_ok(), "graph.json must be valid UTF-8");
+        assert!(
+            std::str::from_utf8(&bytes).is_ok(),
+            "graph.json must be valid UTF-8"
+        );
     }
 
     #[test]
@@ -887,7 +1024,10 @@ mod tests {
         let nodes = v["nodes"].as_array().expect("nodes array");
         assert!(!nodes.is_empty(), "must have at least one node");
         for node in nodes {
-            assert!(node.get("id").is_some(), "every node must have an 'id' field");
+            assert!(
+                node.get("id").is_some(),
+                "every node must have an 'id' field"
+            );
         }
     }
 
@@ -901,7 +1041,10 @@ mod tests {
         let v: serde_json::Value = serde_json::from_str(&text).expect("parse");
         let nodes = v["nodes"].as_array().expect("nodes array");
         for node in nodes {
-            assert!(node.get("label").is_some(), "every node must have a 'label' field");
+            assert!(
+                node.get("label").is_some(),
+                "every node must have a 'label' field"
+            );
         }
     }
 
@@ -942,7 +1085,10 @@ mod tests {
         mk(&src, "a/b/c/d/e.rs", "fn very_deep() {}");
         rebuild(&src, &out).expect("rebuild");
         let text = read_graph_json(&out);
-        assert!(text.contains("very_deep"), "deeply nested function must appear in graph");
+        assert!(
+            text.contains("very_deep"),
+            "deeply nested function must appear in graph"
+        );
     }
 
     #[test]
@@ -981,8 +1127,7 @@ mod tests {
     fn try_rebuild_locked_error_variant_is_guard() {
         let local = Mutex::new(());
         let _guard = local.lock().expect("acquire");
-        let err = super::do_try_rebuild_locked(&local, &tdir(), &tdir())
-            .expect_err("must fail");
+        let err = super::do_try_rebuild_locked(&local, &tdir(), &tdir()).expect_err("must fail");
         assert!(
             matches!(err, habitat_graph_core::GraphError::Guard(_)),
             "locked → must be Guard, not Io or Schema"
@@ -993,11 +1138,18 @@ mod tests {
     fn rebuild_multiple_functions_same_file_all_in_graph() {
         let src = tdir();
         let out = tdir();
-        mk(&src, "lib.rs", "fn one() {} fn two() {} fn three() {} fn four() {} fn five() {}");
+        mk(
+            &src,
+            "lib.rs",
+            "fn one() {} fn two() {} fn three() {} fn four() {} fn five() {}",
+        );
         rebuild(&src, &out).expect("rebuild");
         let text = read_graph_json(&out);
         for name in ["one", "two", "three", "four", "five"] {
-            assert!(text.contains(name), "function '{name}' must appear in graph");
+            assert!(
+                text.contains(name),
+                "function '{name}' must appear in graph"
+            );
         }
     }
 
@@ -1012,6 +1164,9 @@ mod tests {
         rebuild(&src, &out).expect("second");
         let text = read_graph_json(&out);
         // The graph must reflect the SECOND state, not the first.
-        assert!(text.contains("second_fn"), "second rebuild must overwrite first");
+        assert!(
+            text.contains("second_fn"),
+            "second rebuild must overwrite first"
+        );
     }
 }

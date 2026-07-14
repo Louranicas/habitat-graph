@@ -1,9 +1,17 @@
-//! Obsidian vault export: one note per node with `[[wikilinks]]`.
+//! Obsidian vault export: one deterministically redacted note per node with `[[wikilinks]]`.
 
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::fmt::Write as FmtWrite;
 
-use habitat_graph_core::{display_safe, sanitize_label, CommunityId, Graph, Node, NodeId};
+use habitat_graph_core::{
+    display_safe, is_canonical_redaction_marker, sanitize_label, CommunityId, Graph, Node, NodeId,
+};
+use unicode_normalization::UnicodeNormalization as _;
+
+use crate::escape::{markdown_code_span, markdown_text, project_public_edges, redact_public_text};
+
+const MAX_FILENAME_BYTES: usize = 255;
+const NOTE_EXTENSION: &str = ".md";
 
 /// Renders `graph` as an Obsidian vault: a deterministic list of `(filename, markdown)` pairs —
 /// one note per node (its `source_file` + `[[wikilinks]]` to connected nodes) plus a
@@ -13,9 +21,13 @@ use habitat_graph_core::{display_safe, sanitize_label, CommunityId, Graph, Node,
 /// # Filename rules
 ///
 /// Each node filename is derived from its label via [`sanitize_label`] (strips control chars,
-/// caps at 256), then replacing any remaining `/` or whitespace characters with `_`, then
-/// appending `.md`. When two or more nodes produce the same stem both are disambiguated by
-/// appending the [`NodeId`] before the extension (e.g. `foo_n1.md`, `foo_n2.md`).
+/// caps at 256), then replacing path/Obsidian-link metacharacters and whitespace with `_`, then
+/// appending `.md`. Secret-bearing labels use a filesystem-safe `REDACTED_<tags>_<NodeId>` stem so
+/// their filenames remain stable as other redacted nodes are added. When two or more clean nodes
+/// produce the same stem both are disambiguated by appending the [`NodeId`] before the extension
+/// (e.g. `foo_n1.md`, `foo_n2.md`). Portable filename equivalence includes case folding and
+/// Unicode compatibility normalization; Windows-reserved stems are always qualified. Every final
+/// filename is truncated at a UTF-8 boundary to fit a 255-byte filesystem component.
 ///
 /// # Note content
 ///
@@ -25,11 +37,15 @@ use habitat_graph_core::{display_safe, sanitize_label, CommunityId, Graph, Node,
 /// Source: `{source_file}`
 ///
 /// ## Links
-/// - {relation} [[{display_safe(neighbour_label)}]]
+/// - {relation} [[{assigned_filename_stem}|{display_safe(neighbour_label)}]]
 /// …
 /// ```
 ///
 /// An edge appears at **both** endpoints (source and target). Self-loops appear once.
+/// Labels, source paths, and relations use the shared deterministic secret redaction before
+/// Markdown/Obsidian escaping. The projection retains one note per original [`NodeId`], the same
+/// links, and the same community membership; redacted filenames include that ID to avoid marker
+/// collisions.
 ///
 /// # MOC
 ///
@@ -41,6 +57,12 @@ use habitat_graph_core::{display_safe, sanitize_label, CommunityId, Graph, Node,
 pub fn render_vault(graph: &Graph) -> Vec<(String, String)> {
     let label_map = collect_labels(graph);
     let filenames = assign_filenames(graph);
+    let filename_map: HashMap<NodeId, String> = graph
+        .nodes
+        .iter()
+        .zip(filenames.iter())
+        .map(|(node, filename)| (node.id, filename.clone()))
+        .collect();
     let adj = build_adjacency(graph);
     let node_to_comm = node_community_map(graph);
 
@@ -51,12 +73,15 @@ pub fn render_vault(graph: &Graph) -> Vec<(String, String)> {
         .map(|(node, fname)| {
             (
                 fname.clone(),
-                render_node_note(node, &adj, &label_map, &node_to_comm),
+                render_node_note(node, &adj, &label_map, &filename_map, &node_to_comm),
             )
         })
         .collect();
 
-    result.push(("_MOC.md".to_owned(), render_moc(graph, &label_map)));
+    result.push((
+        "_MOC.md".to_owned(),
+        render_moc(graph, &label_map, &filename_map),
+    ));
     result.sort_unstable_by(|a, b| a.0.cmp(&b.0));
     result
 }
@@ -104,34 +129,152 @@ fn collect_labels(graph: &Graph) -> HashMap<NodeId, String> {
     graph
         .nodes
         .iter()
-        .map(|n| (n.id, n.label.clone()))
+        .map(|n| (n.id, redact_public_text(&n.label).into_owned()))
         .collect()
 }
 
 /// Assigns each node (in `graph.nodes` order) a `.md` filename based on the sanitized label,
-/// disambiguating stem collisions by appending the [`NodeId`].
+/// disambiguating portable stem collisions by appending the [`NodeId`].
 #[must_use]
 fn assign_filenames(graph: &Graph) -> Vec<String> {
     let stems: Vec<String> = graph.nodes.iter().map(|n| make_stem(&n.label)).collect();
+    let stem_keys: Vec<String> = stems
+        .iter()
+        .map(|stem| portable_filename_key(&format!("{stem}.md")))
+        .collect();
 
-    // Count occurrences so collisions can be detected in a single pass.
     let mut stem_count: HashMap<&str, usize> = HashMap::new();
-    for s in &stems {
-        *stem_count.entry(s.as_str()).or_default() += 1;
+    for key in &stem_keys {
+        *stem_count.entry(key.as_str()).or_default() += 1;
     }
 
-    graph
+    let qualified: Vec<bool> = graph
         .nodes
         .iter()
         .zip(stems.iter())
-        .map(|(node, stem)| {
-            if stem_count.get(stem.as_str()).copied().unwrap_or(0) > 1 {
-                format!("{}_{}.md", stem, node.id)
+        .zip(stem_keys.iter())
+        .map(|((node, stem), stem_key)| {
+            let projected = redact_public_text(&node.label);
+            is_canonical_redaction_marker(&projected)
+                || stem_count.get(stem_key.as_str()).copied().unwrap_or(0) > 1
+                || windows_reserved_stem(stem)
+                || !stem.is_ascii()
+        })
+        .collect();
+    let preferred: Vec<String> = graph
+        .nodes
+        .iter()
+        .zip(stems.iter())
+        .zip(qualified.iter())
+        .map(|((node, stem), qualified)| {
+            if *qualified {
+                qualified_filename(stem, node.id, None)
             } else {
-                format!("{stem}.md")
+                plain_filename(stem)
             }
         })
-        .collect()
+        .collect();
+    let preferred_keys: Vec<String> = preferred
+        .iter()
+        .map(|filename| portable_filename_key(filename))
+        .collect();
+
+    let mut preferred_count: HashMap<&str, usize> = HashMap::new();
+    let moc_key = portable_filename_key("_MOC.md");
+    preferred_count.insert(moc_key.as_str(), 1);
+    for key in &preferred_keys {
+        *preferred_count.entry(key.as_str()).or_default() += 1;
+    }
+    let reserved: HashSet<&str> = preferred_count.keys().copied().collect();
+    let mut assigned = vec![String::new(); graph.nodes.len()];
+    let mut used = HashSet::from([moc_key.clone()]);
+    let mut order: Vec<usize> = (0..graph.nodes.len()).collect();
+    order.sort_unstable_by_key(|index| (!qualified[*index], graph.nodes[*index].id, *index));
+
+    for index in order {
+        let candidate = &preferred[index];
+        let candidate_key = &preferred_keys[index];
+        if !used.contains(candidate_key)
+            && (qualified[index] || preferred_count.get(candidate_key.as_str()) == Some(&1))
+        {
+            assigned[index].clone_from(candidate);
+            used.insert(candidate_key.clone());
+            continue;
+        }
+
+        let mut attempt = 1_usize;
+        loop {
+            let fallback = qualified_filename(
+                &stems[index],
+                graph.nodes[index].id,
+                (attempt > 1).then_some(attempt),
+            );
+            let fallback_key = portable_filename_key(&fallback);
+            if !used.contains(&fallback_key) && !reserved.contains(fallback_key.as_str()) {
+                used.insert(fallback_key);
+                assigned[index] = fallback;
+                break;
+            }
+            attempt = attempt.saturating_add(1);
+        }
+    }
+
+    assigned
+}
+
+fn portable_filename_key(filename: &str) -> String {
+    filename.nfkd().flat_map(char::to_lowercase).collect()
+}
+
+fn plain_filename(stem: &str) -> String {
+    let budget = MAX_FILENAME_BYTES.saturating_sub(NOTE_EXTENSION.len());
+    format!("{}{NOTE_EXTENSION}", truncate_utf8(stem, budget))
+}
+
+fn qualified_filename(stem: &str, id: NodeId, attempt: Option<usize>) -> String {
+    let identity = format!("_{id}");
+    let collision = attempt.map_or_else(String::new, |attempt| format!("_{attempt}"));
+    let budget = MAX_FILENAME_BYTES
+        .saturating_sub(NOTE_EXTENSION.len())
+        .saturating_sub(identity.len())
+        .saturating_sub(collision.len());
+    let stem = truncate_utf8(stem, budget);
+    let qualified = if let Some(separator) = stem.find('.').filter(|_| windows_reserved_stem(stem))
+    {
+        format!("{}{}{}", &stem[..separator], identity, &stem[separator..])
+    } else {
+        format!("{stem}{identity}")
+    };
+    format!("{qualified}{collision}{NOTE_EXTENSION}")
+}
+
+fn truncate_utf8(input: &str, max_bytes: usize) -> &str {
+    if input.len() <= max_bytes {
+        return input;
+    }
+    let mut end = max_bytes;
+    while !input.is_char_boundary(end) {
+        end = end.saturating_sub(1);
+    }
+    &input[..end]
+}
+
+fn windows_reserved_stem(stem: &str) -> bool {
+    let basename: String = stem
+        .split('.')
+        .next()
+        .unwrap_or_default()
+        .trim_end_matches([' ', '.'])
+        .nfkc()
+        .collect();
+    let basename = basename.to_ascii_uppercase();
+    matches!(basename.as_str(), "CON" | "PRN" | "AUX" | "NUL" | "CLOCK$")
+        || basename
+            .strip_prefix("COM")
+            .or_else(|| basename.strip_prefix("LPT"))
+            .is_some_and(|suffix| {
+                matches!(suffix, "1" | "2" | "3" | "4" | "5" | "6" | "7" | "8" | "9")
+            })
 }
 
 /// Builds a per-node sorted adjacency list: `NodeId → [(relation, neighbour_id)]`.
@@ -141,14 +284,16 @@ fn assign_filenames(graph: &Graph) -> Vec<String> {
 #[must_use]
 fn build_adjacency(graph: &Graph) -> HashMap<NodeId, Vec<(String, NodeId)>> {
     let mut adj: HashMap<NodeId, Vec<(String, NodeId)>> = HashMap::new();
-    for edge in &graph.edges {
+    for projected in project_public_edges(graph) {
+        let edge = projected.edge;
+        let relation = projected.relation;
         adj.entry(edge.source)
             .or_default()
-            .push((edge.relation.clone(), edge.target));
+            .push((relation.clone(), edge.target));
         if edge.source != edge.target {
             adj.entry(edge.target)
                 .or_default()
-                .push((edge.relation.clone(), edge.source));
+                .push((relation, edge.source));
         }
     }
     for neighbours in adj.values_mut() {
@@ -183,10 +328,11 @@ fn yaml_dq(s: &str) -> String {
 /// (`[`, `]`, `:`) (STRIDE-T hardening — closes the raw-`relation` boundary that `node.label`
 /// already guards).
 fn field_key(relation: &str) -> String {
-    display_safe(relation)
+    let key: String = display_safe(relation)
         .chars()
         .filter(|c| !matches!(c, '[' | ']' | ':'))
-        .collect()
+        .collect();
+    markdown_text(&key)
 }
 
 /// Renders the Markdown content for one node note — YAML frontmatter (for Dataview / Juggl / the
@@ -197,11 +343,14 @@ fn render_node_note(
     node: &Node,
     adj: &HashMap<NodeId, Vec<(String, NodeId)>>,
     label_map: &HashMap<NodeId, String>,
+    filename_map: &HashMap<NodeId, String>,
     node_to_comm: &HashMap<NodeId, CommunityId>,
 ) -> String {
-    let safe_label = display_safe(&node.label);
-    let krate = yaml_token(&crate_of(&node.source_file));
-    let lang = lang_of(&node.source_file);
+    let redacted_label = redact_public_text(&node.label);
+    let redacted_file = redact_public_text(&node.source_file);
+    let safe_label = wikilink_alias(&redacted_label);
+    let krate = yaml_token(&crate_of(&redacted_file));
+    let lang = lang_of(&redacted_file);
     let line = node.source_location.start_line;
     let degree = adj.get(&node.id).map_or(0, Vec::len);
     let community = node_to_comm.get(&node.id).map(|c| c.get());
@@ -216,7 +365,7 @@ fn render_node_note(
     let _ = writeln!(
         content,
         "file: \"{}\"",
-        yaml_dq(&display_safe(&node.source_file))
+        yaml_dq(&display_safe(&redacted_file))
     );
     let _ = writeln!(content, "line: {line}");
     let _ = writeln!(content, "degree: {degree}");
@@ -229,22 +378,22 @@ fn render_node_note(
     content.push_str("]\n---\n\n");
 
     let _ = writeln!(content, "# {safe_label}\n");
+    let location = markdown_code_span(&format!("{}:{line}", display_safe(&redacted_file)));
+    let crate_name = markdown_code_span(&krate);
     let _ = writeln!(
         content,
-        "> `{}:{line}` · crate `{krate}` · degree {degree}\n",
-        display_safe(&node.source_file)
+        "> {location} · crate {crate_name} · degree {degree}\n"
     );
     content.push_str("## Links\n");
     if let Some(neighbours) = adj.get(&node.id) {
         for (relation, neighbour_id) in neighbours {
-            let neighbour_label = label_map.get(neighbour_id).map_or("", String::as_str);
-            let safe_neighbour = display_safe(neighbour_label);
+            let neighbour_link = render_wikilink(*neighbour_id, label_map, filename_map);
             // `relation:: [[x]]` = a Dataview inline field (queryable typed edge) + Breadcrumbs relation.
             // `relation` is attacker-influenced → field_key strips bidi/controls + `[`/`]`/`:` so it
             // cannot inject a spurious wikilink or break the field (STRIDE-T, parity with node.label).
             // write! on String is infallible (OOM is the only failure, which aborts).
             let safe_relation = field_key(relation);
-            let _ = writeln!(content, "- {safe_relation}:: [[{safe_neighbour}]]");
+            let _ = writeln!(content, "- {safe_relation}:: {neighbour_link}");
         }
     }
     content
@@ -252,7 +401,11 @@ fn render_node_note(
 
 /// Renders the `_MOC.md` Map-of-Content note grouping every node by community.
 #[must_use]
-fn render_moc(graph: &Graph, label_map: &HashMap<NodeId, String>) -> String {
+fn render_moc(
+    graph: &Graph,
+    label_map: &HashMap<NodeId, String>,
+    filename_map: &HashMap<NodeId, String>,
+) -> String {
     // Map NodeId → CommunityId for grouping.
     let mut node_to_comm: HashMap<NodeId, CommunityId> = HashMap::new();
     for community in &graph.communities {
@@ -280,33 +433,69 @@ fn render_moc(graph: &Graph, label_map: &HashMap<NodeId, String>) -> String {
     for (comm_id, members) in &comm_members {
         let _ = write!(moc, "\n## community {comm_id}\n\n");
         for &nid in members {
-            let label = label_map.get(&nid).map_or("", String::as_str);
-            let _ = writeln!(moc, "- [[{}]]", display_safe(label));
+            let _ = writeln!(moc, "- {}", render_wikilink(nid, label_map, filename_map));
         }
     }
 
     if !unclustered.is_empty() {
         moc.push_str("\n## Unclustered\n\n");
         for nid in &unclustered {
-            let label = label_map.get(nid).map_or("", String::as_str);
-            let _ = writeln!(moc, "- [[{}]]", display_safe(label));
+            let _ = writeln!(moc, "- {}", render_wikilink(*nid, label_map, filename_map));
         }
     }
 
     moc
 }
 
-/// Converts a node label to a filesystem-safe filename stem (no `/`, no whitespace, no controls).
+/// Renders an Obsidian wikilink using the assigned filename as the target and the redacted label
+/// as an optional display alias. Filename identity keeps colliding redaction markers distinct.
+fn render_wikilink(
+    node_id: NodeId,
+    label_map: &HashMap<NodeId, String>,
+    filename_map: &HashMap<NodeId, String>,
+) -> String {
+    let label = label_map.get(&node_id).map_or("", String::as_str);
+    let display = wikilink_alias(label);
+    let target = filename_map
+        .get(&node_id)
+        .and_then(|filename| filename.strip_suffix(".md"))
+        .unwrap_or("");
+    if target == display {
+        format!("[[{target}]]")
+    } else {
+        format!("[[{target}|{display}]]")
+    }
+}
+
+fn wikilink_alias(label: &str) -> String {
+    markdown_text(&display_safe(label))
+}
+
+/// Converts a node label to a filesystem-safe filename stem (no path/link metacharacters,
+/// whitespace, or controls).
 ///
 /// [`sanitize_label`] strips control characters first; this function then replaces `/` and
 /// whitespace with `_`. Returns `"_"` if the resulting stem would be empty (all-control label).
 #[must_use]
 fn make_stem(label: &str) -> String {
-    let sanitized = sanitize_label(label);
+    let redacted = redact_public_text(label);
+    if is_canonical_redaction_marker(&redacted) {
+        let tags = redacted
+            .strip_prefix("[REDACTED:")
+            .and_then(|rest| rest.strip_suffix(']'))
+            .unwrap_or_default();
+        return format!("REDACTED_{}", tags.replace(',', "_"));
+    }
+    let sanitized = display_safe(&sanitize_label(&redacted));
     let stem: String = sanitized
         .chars()
         .map(|c| {
-            if c == '/' || c.is_whitespace() {
+            if c.is_whitespace()
+                || matches!(
+                    c,
+                    '/' | '\\' | ':' | '*' | '?' | '"' | '<' | '>' | '|' | '[' | ']' | '#' | '^'
+                )
+            {
                 '_'
             } else {
                 c
@@ -322,6 +511,8 @@ fn make_stem(label: &str) -> String {
 
 #[cfg(test)]
 mod tests {
+    use std::collections::HashSet;
+
     use habitat_graph_core::{
         Community, CommunityId, Confidence, Edge, Graph, Manifest, Node, NodeId, Span,
     };
@@ -372,6 +563,7 @@ mod tests {
         Graph {
             schema: "test".to_owned(),
             nodes,
+            node_content_ids: std::collections::BTreeMap::default(),
             edges: Vec::new(),
             communities: Vec::new(),
             manifest: empty_manifest(),
@@ -491,7 +683,10 @@ mod tests {
         let (_, content) = pairs.iter().find(|(f, _)| f == "beta.md").unwrap();
         assert!(content.contains("lang: python"), "{content}");
         assert!(content.contains("crate: pkg"), "{content}");
-        assert!(!content.contains("community:"), "should omit community: {content}");
+        assert!(
+            !content.contains("community:"),
+            "should omit community: {content}"
+        );
     }
 
     /// T08: the target node of an edge also sees a link back to the source node.
@@ -615,6 +810,105 @@ mod tests {
             fnames.contains(&"foo_bar_n2.md"),
             "expected foo_bar_n2.md in {fnames:?}"
         );
+    }
+
+    #[test]
+    fn filenames_are_unique_on_case_insensitive_filesystems() {
+        let g = graph_with_nodes(vec![
+            make_node(1, "Foo", "a.rs"),
+            make_node(2, "foo", "b.rs"),
+            make_node(3, "_moc", "c.rs"),
+            make_node(4, "CON", "d.rs"),
+        ]);
+        let pairs = render_vault(&g);
+        let filenames: Vec<&str> = pairs
+            .iter()
+            .map(|(filename, _)| filename.as_str())
+            .collect();
+        assert!(filenames.contains(&"Foo_n1.md"));
+        assert!(filenames.contains(&"foo_n2.md"));
+        assert!(filenames.contains(&"_moc_n3.md"));
+        assert!(filenames.contains(&"CON_n4.md"));
+
+        let keys: HashSet<String> = filenames
+            .iter()
+            .map(|filename| super::portable_filename_key(filename))
+            .collect();
+        assert_eq!(keys.len(), filenames.len());
+    }
+
+    #[test]
+    fn windows_reserved_stems_with_extensions_are_qualified_before_the_dot() {
+        let g = graph_with_nodes(vec![
+            make_node(1, "CON.txt", "a.rs"),
+            make_node(2, "NUL.foo", "b.rs"),
+            make_node(3, "COM1.rs", "c.rs"),
+            make_node(4, "LPT¹.log", "d.rs"),
+        ]);
+        let pairs = render_vault(&g);
+        let filenames: Vec<&str> = pairs
+            .iter()
+            .map(|(filename, _)| filename.as_str())
+            .collect();
+        assert!(filenames.contains(&"CON_n1.txt.md"));
+        assert!(filenames.contains(&"NUL_n2.foo.md"));
+        assert!(filenames.contains(&"COM1_n3.rs.md"));
+        assert!(filenames.contains(&"LPT¹_n4.log.md"));
+        assert!(filenames
+            .iter()
+            .filter(|filename| **filename != "_MOC.md")
+            .all(|filename| !super::windows_reserved_stem(filename)));
+    }
+
+    #[test]
+    fn filenames_are_unique_across_unicode_normalization_forms() {
+        let g = graph_with_nodes(vec![
+            make_node(1, "Caf\u{e9}", "a.rs"),
+            make_node(2, "Cafe\u{301}", "b.rs"),
+        ]);
+        let pairs = render_vault(&g);
+        let filenames: Vec<&str> = pairs
+            .iter()
+            .map(|(filename, _)| filename.as_str())
+            .collect();
+        let keys: HashSet<String> = filenames
+            .iter()
+            .map(|filename| super::portable_filename_key(filename))
+            .collect();
+        assert_eq!(keys.len(), filenames.len());
+        assert!(filenames.iter().all(|filename| {
+            *filename == "_MOC.md" || filename.contains("_n1") || filename.contains("_n2")
+        }));
+    }
+
+    #[test]
+    fn filenames_are_unique_across_unicode_compatibility_forms() {
+        let g = graph_with_nodes(vec![
+            make_node(1, "\u{fb00}oo", "a.rs"),
+            make_node(2, "ffoo", "b.rs"),
+        ]);
+        let pairs = render_vault(&g);
+        let filenames: Vec<&str> = pairs
+            .iter()
+            .map(|(filename, _)| filename.as_str())
+            .collect();
+        let keys: HashSet<String> = filenames
+            .iter()
+            .map(|filename| super::portable_filename_key(filename))
+            .collect();
+        assert_eq!(keys.len(), filenames.len());
+    }
+
+    #[test]
+    fn non_ascii_filenames_are_qualified_for_casefold_safety() {
+        let g = graph_with_nodes(vec![make_node(1, "σ", "a.rs"), make_node(2, "ς", "b.rs")]);
+        let filenames: Vec<String> = render_vault(&g)
+            .into_iter()
+            .map(|(filename, _)| filename)
+            .collect();
+
+        assert!(filenames.contains(&"σ_n1.md".to_owned()));
+        assert!(filenames.contains(&"ς_n2.md".to_owned()));
     }
 
     /// T16: output is sorted lexicographically by filename.
@@ -854,6 +1148,70 @@ mod tests {
     }
 
     #[test]
+    fn redacted_parallel_relations_keep_distinct_field_keys() {
+        let mut g = graph_with_nodes(vec![
+            make_node(1, "alpha", "a.rs"),
+            make_node(2, "beta", "b.rs"),
+        ]);
+        g.edges.push(make_edge(1, 2, "api_key=alpha"));
+        g.edges.push(make_edge(1, 2, "api_key=beta"));
+
+        let rendered = render_vault(&g.sorted());
+        let (_, content) = rendered
+            .iter()
+            .find(|(filename, _)| filename == "alpha.md")
+            .unwrap();
+        assert!(content.contains("REDACTEDapi_key#e00000000000000000000"));
+        assert!(content.contains("REDACTEDapi_key#e00000000000000000001"));
+    }
+
+    #[test]
+    fn field_key_normalization_cannot_reconstruct_secrets() {
+        let mut g = graph_with_nodes(vec![
+            make_node(1, "alpha", "a.rs"),
+            make_node(2, "beta", "b.rs"),
+        ]);
+        g.edges.push(make_edge(1, 2, "xox[b]-123-secret"));
+        g.edges
+            .push(make_edge(1, 2, "-----BEG[IN] OPENSSH PRIVATE KEY-----"));
+
+        let rendered = render_vault(&g.sorted());
+        let joined = rendered
+            .iter()
+            .map(|(_, content)| content.as_str())
+            .collect::<String>();
+        assert!(!joined.contains("xoxb-123-secret"));
+        assert!(!joined.contains("-----BEGIN OPENSSH PRIVATE KEY-----"));
+        assert!(joined.contains("REDACTEDslack_token#e"));
+        assert!(joined.contains("REDACTEDprivate_key#e"));
+    }
+
+    #[test]
+    fn export_normalization_cannot_reconstruct_slack_tokens() {
+        let g = graph_with_nodes(vec![make_node(
+            1,
+            "xox\nb-123-secret",
+            "crates/xox(b)-123-secret/lib.rs",
+        )]);
+
+        let rendered = render_vault(&g);
+        let joined = rendered
+            .iter()
+            .flat_map(|(filename, content)| [filename.as_str(), content.as_str()])
+            .collect::<String>();
+        assert!(!joined.contains("xoxb-123-secret"));
+        assert!(joined.contains("slack_token"));
+    }
+
+    #[test]
+    fn wikilink_alias_escapes_delimiters_and_backslashes() {
+        assert_eq!(
+            super::wikilink_alias(r"a\b|c]] [[injected"),
+            r"a\\b\|c\]\] \[\[injected"
+        );
+    }
+
+    #[test]
     fn yaml_dq_escapes_quote_and_backslash() {
         assert_eq!(super::yaml_dq("a\"b\\c"), "a\\\"b\\\\c");
     }
@@ -863,6 +1221,105 @@ mod tests {
         // ':' ',' ']' would break an unquoted scalar or the `tags: [...]` array.
         assert_eq!(super::yaml_token("ev:il],x"), "evilx");
         assert_eq!(super::yaml_token("my-crate_2.0"), "my-crate_2.0");
+    }
+
+    #[test]
+    fn render_vault_redacts_secret_patterns_in_names_content_and_relations() {
+        let mut g = Graph::new();
+        g.nodes
+            .push(make_node(1, "api_key_assignment_refused", "src/api_key.rs"));
+        g.nodes.push(make_node(2, "safe", "safe.rs"));
+        g.edges.push(habitat_graph_core::Edge {
+            source: habitat_graph_core::NodeId::new(1),
+            target: habitat_graph_core::NodeId::new(2),
+            relation: "Authorization: Bearer token".to_owned(),
+            confidence: habitat_graph_core::Confidence::Extracted,
+        });
+        let rendered = render_vault(&g.sorted());
+        let filenames = rendered
+            .iter()
+            .map(|(filename, _)| filename.as_str())
+            .collect::<Vec<_>>();
+        let joined = rendered
+            .iter()
+            .map(|(_, content)| content.as_str())
+            .collect::<String>();
+        assert!(filenames
+            .iter()
+            .any(|name| name.contains("REDACTED_api_key")));
+        assert!(!joined.contains("api_key_assignment_refused"));
+        assert!(!joined.contains("src/api_key.rs"));
+        assert!(!joined.contains("Authorization: Bearer token"));
+        assert!(joined.contains("[REDACTED:api_key]"));
+        // Dataview field keys cannot contain `[`/`]`/`:`, so the shared marker is reduced to a
+        // safe key while retaining its redaction tag.
+        assert!(joined.contains("REDACTEDbearer_token"));
+    }
+
+    #[test]
+    fn markdown_entities_cannot_reconstruct_secret_vault_text() {
+        let g = graph_with_nodes(vec![make_node(
+            1,
+            "api&#95;key=SECRET",
+            "safe<em>path</em>.rs",
+        )]);
+        let joined = render_vault(&g)
+            .into_iter()
+            .map(|(_, content)| content)
+            .collect::<String>();
+
+        assert!(!joined.contains("api&#95;key=SECRET"));
+        assert!(joined.contains(r"\[REDACTED:api_key\]"));
+        assert!(joined.contains("safe<em>path</em>.rs"));
+    }
+
+    #[test]
+    fn redacted_collision_links_target_distinct_node_id_filenames() {
+        let mut g = Graph::new();
+        g.nodes.push(make_node(1, "api_key_alpha", "a.rs"));
+        g.nodes.push(make_node(2, "api_key_beta", "b.rs"));
+        g.edges.push(make_edge(1, 2, "calls"));
+
+        let rendered = render_vault(&g.sorted());
+        let first_name = "REDACTED_api_key_n1.md";
+        let second_name = "REDACTED_api_key_n2.md";
+        let first = rendered
+            .iter()
+            .find(|(filename, _)| filename == first_name)
+            .map(|(_, content)| content)
+            .expect("first redacted note");
+        let moc = rendered
+            .iter()
+            .find(|(filename, _)| filename == "_MOC.md")
+            .map(|(_, content)| content)
+            .expect("MOC");
+
+        assert!(rendered.iter().any(|(filename, _)| filename == second_name));
+        assert!(first.contains(r"[[REDACTED_api_key_n2|\[REDACTED:api_key\]]]"));
+        assert!(moc.contains(r"[[REDACTED_api_key_n1|\[REDACTED:api_key\]]]"));
+        assert!(moc.contains(r"[[REDACTED_api_key_n2|\[REDACTED:api_key\]]]"));
+    }
+
+    #[test]
+    fn redacted_filename_is_stable_when_another_marker_is_added() {
+        let one = graph_with_nodes(vec![make_node(1, "api_key_alpha", "a.rs")]);
+        let one_name = render_vault(&one)
+            .into_iter()
+            .find(|(filename, _)| filename != "_MOC.md")
+            .map(|(filename, _)| filename)
+            .unwrap();
+
+        let two = graph_with_nodes(vec![
+            make_node(1, "api_key_alpha", "a.rs"),
+            make_node(2, "api_key_beta", "b.rs"),
+        ]);
+        let two_names: Vec<String> = render_vault(&two)
+            .into_iter()
+            .map(|(filename, _)| filename)
+            .collect();
+
+        assert_eq!(one_name, "REDACTED_api_key_n1.md");
+        assert!(two_names.contains(&one_name));
     }
 
     #[test]
@@ -887,10 +1344,25 @@ mod tests {
     }
 
     #[test]
+    fn render_vault_neutralises_hostile_wikilink_alias() {
+        let mut g = Graph::new();
+        g.nodes.push(make_node(1, "alpha", "src/a.rs"));
+        g.nodes
+            .push(make_node(2, r"target\]] [[INJECTED]]", "src/b.rs"));
+        g.edges.push(make_edge(1, 2, "calls"));
+
+        let joined: String = render_vault(&g.sorted())
+            .iter()
+            .map(|(_, content)| content.as_str())
+            .collect();
+        assert!(!joined.contains("[[INJECTED]]"));
+        assert!(joined.contains(r"target\\\]\] \[\[INJECTED\]\]"));
+    }
+
+    #[test]
     fn render_vault_escapes_quote_in_source_file_frontmatter() {
         let mut g = Graph::new();
-        g.nodes
-            .push(make_node(1, "n", "src/a\"evil: true.rs"));
+        g.nodes.push(make_node(1, "n", "src/a\"evil: true.rs"));
         let joined: String = render_vault(&g.sorted())
             .iter()
             .map(|(_, c)| c.as_str())
@@ -900,5 +1372,94 @@ mod tests {
             joined.contains("file: \"src/a\\\"evil: true.rs\""),
             "source_file quote must be YAML-escaped: {joined}"
         );
+    }
+
+    #[test]
+    fn noncanonical_marker_cannot_create_path_components() {
+        let g = graph_with_nodes(vec![make_node(
+            1,
+            "[REDACTED:x/../../../escape]",
+            "src/lib.rs",
+        )]);
+        let rendered = render_vault(&g);
+        let filename = rendered
+            .iter()
+            .find(|(filename, _)| filename != "_MOC.md")
+            .map(|(filename, _)| filename)
+            .unwrap();
+
+        assert!(!filename.contains('/'));
+        assert!(!filename.contains('\\'));
+        assert_eq!(std::path::Path::new(filename).components().count(), 1);
+    }
+
+    #[test]
+    fn final_filename_allocation_handles_cross_stem_collisions() {
+        let g = graph_with_nodes(vec![
+            make_node(1, "[REDACTED:aws_access_key_id]", "a.rs"),
+            make_node(2, "REDACTED_aws_access_key_id_n1", "b.rs"),
+        ]);
+        let filenames: Vec<String> = render_vault(&g)
+            .into_iter()
+            .map(|(filename, _)| filename)
+            .collect();
+
+        assert!(filenames.contains(&"REDACTED_aws_access_key_id_n1.md".to_owned()));
+        assert!(filenames.contains(&"REDACTED_aws_access_key_id_n1_n2.md".to_owned()));
+        let unique: std::collections::HashSet<&str> =
+            filenames.iter().map(String::as_str).collect();
+        assert_eq!(unique.len(), filenames.len());
+    }
+
+    #[test]
+    fn node_filename_cannot_replace_the_moc() {
+        let g = graph_with_nodes(vec![make_node(4, "_MOC", "a.rs")]);
+        let filenames: Vec<String> = render_vault(&g)
+            .into_iter()
+            .map(|(filename, _)| filename)
+            .collect();
+
+        assert_eq!(
+            filenames
+                .iter()
+                .filter(|filename| filename.as_str() == "_MOC.md")
+                .count(),
+            1
+        );
+        assert!(filenames.contains(&"_MOC_n4.md".to_owned()));
+    }
+
+    #[test]
+    fn qualified_unicode_filename_reserves_its_suffix_budget() {
+        let label = "é".repeat(121);
+        let g = graph_with_nodes(vec![make_node(u32::MAX, &label, "a.rs")]);
+        let filename = render_vault(&g)
+            .into_iter()
+            .find(|(filename, _)| filename != "_MOC.md")
+            .map(|(filename, _)| filename)
+            .unwrap();
+
+        assert!(filename.len() <= super::MAX_FILENAME_BYTES);
+        assert!(filename.ends_with("_n4294967295.md"));
+    }
+
+    #[test]
+    fn truncated_plain_filename_collisions_remain_bounded_and_unique() {
+        let first = "a".repeat(256);
+        let second = format!("{}b", "a".repeat(255));
+        let g = graph_with_nodes(vec![
+            make_node(1, &first, "a.rs"),
+            make_node(2, &second, "b.rs"),
+        ]);
+        let filenames: Vec<String> = render_vault(&g)
+            .into_iter()
+            .filter(|(filename, _)| filename != "_MOC.md")
+            .map(|(filename, _)| filename)
+            .collect();
+
+        assert!(filenames
+            .iter()
+            .all(|filename| filename.len() <= super::MAX_FILENAME_BYTES));
+        assert_ne!(filenames[0], filenames[1]);
     }
 }

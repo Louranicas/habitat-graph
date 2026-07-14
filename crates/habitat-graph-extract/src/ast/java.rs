@@ -150,12 +150,7 @@ fn collect_inherits_from_type_list(
 /// # Errors
 ///
 /// Never returns an error; import parsing failures are silently skipped.
-fn extract_import(
-    node: &tree_sitter::Node<'_>,
-    source: &[u8],
-    b: &str,
-    result: &mut Extraction,
-) {
+fn extract_import(node: &tree_sitter::Node<'_>, source: &[u8], b: &str, result: &mut Extraction) {
     // The first `identifier` or `scoped_identifier` named child is the import path.
     // The `static` keyword and `.*` are anonymous nodes and are not named children.
     for i in 0..node.named_child_count() {
@@ -255,7 +250,10 @@ fn extract_body_methods(
         let Some(child) = body.named_child(idx) else {
             continue;
         };
-        if !matches!(child.kind(), "method_declaration" | "constructor_declaration") {
+        if !matches!(
+            child.kind(),
+            "method_declaration" | "constructor_declaration"
+        ) {
             continue;
         }
         let Some(mname_node) = child.child_by_field_name("name") else {
@@ -355,14 +353,7 @@ fn extract_enum(
 
     // Implements clause (`implements <type_list>`)
     if let Some(ifaces_node) = node.child_by_field_name("interfaces") {
-        collect_inherits_from_type_list(
-            &ifaces_node,
-            source,
-            b,
-            &enum_label,
-            local_types,
-            result,
-        );
+        collect_inherits_from_type_list(&ifaces_node, source, b, &enum_label, local_types, result);
     }
 
     // Methods inside enum_body_declarations (the section after the `;` in the enum body)
@@ -456,34 +447,13 @@ impl Extractor for JavaExtractor {
                     extract_import(&child, source, &b, &mut result);
                 }
                 "class_declaration" => {
-                    extract_class(
-                        &child,
-                        source,
-                        &b,
-                        &source_file,
-                        &local_types,
-                        &mut result,
-                    );
+                    extract_class(&child, source, &b, &source_file, &local_types, &mut result);
                 }
                 "interface_declaration" => {
-                    extract_interface(
-                        &child,
-                        source,
-                        &b,
-                        &source_file,
-                        &local_types,
-                        &mut result,
-                    );
+                    extract_interface(&child, source, &b, &source_file, &local_types, &mut result);
                 }
                 "enum_declaration" => {
-                    extract_enum(
-                        &child,
-                        source,
-                        &b,
-                        &source_file,
-                        &local_types,
-                        &mut result,
-                    );
+                    extract_enum(&child, source, &b, &source_file, &local_types, &mut result);
                 }
                 // package_declaration, annotation_type_declaration, module_declaration — skipped.
                 _ => {}
@@ -560,7 +530,10 @@ mod tests {
     #[test]
     fn malformed_source_returns_ok_tree_sitter_is_error_tolerant() {
         let ex = extract("!!! NOT VALID JAVA @@@", "broken.java");
-        assert!(has_node(&ex, "broken"), "file node must be present for garbled source");
+        assert!(
+            has_node(&ex, "broken"),
+            "file node must be present for garbled source"
+        );
     }
 
     // ── B. File stem handling ──────────────────────────────────────────────────────────────────
@@ -639,7 +612,10 @@ mod tests {
         let src = "public class Pub {} class Pkg {}";
         let ex = extract(src, "classes.java");
         assert!(has_node(&ex, "classes_pub"), "public class missing");
-        assert!(has_node(&ex, "classes_pkg"), "package-private class missing");
+        assert!(
+            has_node(&ex, "classes_pkg"),
+            "package-private class missing"
+        );
     }
 
     // ── E. Method extraction ───────────────────────────────────────────────────────────────────
@@ -729,7 +705,10 @@ mod tests {
     fn constructor_with_params_is_extracted() {
         let src = "class Point { Point(int x, int y) {} }";
         let ex = extract(src, "p.java");
-        assert!(has_node(&ex, "p_point_point"), "constructor with params node missing");
+        assert!(
+            has_node(&ex, "p_point_point"),
+            "constructor with params node missing"
+        );
     }
 
     // ── G. Heritage — extends ─────────────────────────────────────────────────────────────────
@@ -811,16 +790,29 @@ mod tests {
         assert!(has_edge(&ex, "baz", "m_foo", "inherits"));
         assert!(has_edge(&ex, "qux", "m_foo", "inherits"));
         let inherits = ex.edges.iter().filter(|e| e.relation == "inherits").count();
-        assert_eq!(inherits, 3, "expected 3 inherits edges from multiple implements");
+        assert_eq!(
+            inherits, 3,
+            "expected 3 inherits edges from multiple implements"
+        );
     }
 
     #[test]
     fn both_extends_and_implements_emit_all_inherits_edges() {
         let src = "class Dog extends Animal implements Runnable {}";
         let ex = extract(src, "m.java");
-        assert!(has_edge(&ex, "animal", "m_dog", "inherits"), "extends edge missing");
-        assert!(has_edge(&ex, "runnable", "m_dog", "inherits"), "implements edge missing");
-        let inherits: Vec<_> = ex.edges.iter().filter(|e| e.relation == "inherits").collect();
+        assert!(
+            has_edge(&ex, "animal", "m_dog", "inherits"),
+            "extends edge missing"
+        );
+        assert!(
+            has_edge(&ex, "runnable", "m_dog", "inherits"),
+            "implements edge missing"
+        );
+        let inherits: Vec<_> = ex
+            .edges
+            .iter()
+            .filter(|e| e.relation == "inherits")
+            .collect();
         assert_eq!(inherits.len(), 2, "expected exactly 2 inherits edges");
     }
 
@@ -944,12 +936,20 @@ mod tests {
 
     #[test]
     fn multiple_imports_all_emit_imports_from_edges() {
-        let src =
-            "import java.util.List;\nimport java.io.File;\nimport java.util.Map;";
+        let src = "import java.util.List;\nimport java.io.File;\nimport java.util.Map;";
         let ex = extract(src, "multi.java");
-        assert!(has_edge(&ex, "multi", "java.util.list", "imports_from"), "List import missing");
-        assert!(has_edge(&ex, "multi", "java.io.file", "imports_from"), "File import missing");
-        assert!(has_edge(&ex, "multi", "java.util.map", "imports_from"), "Map import missing");
+        assert!(
+            has_edge(&ex, "multi", "java.util.list", "imports_from"),
+            "List import missing"
+        );
+        assert!(
+            has_edge(&ex, "multi", "java.io.file", "imports_from"),
+            "File import missing"
+        );
+        assert!(
+            has_edge(&ex, "multi", "java.util.map", "imports_from"),
+            "Map import missing"
+        );
         let imports = ex
             .edges
             .iter()
@@ -1001,8 +1001,7 @@ mod tests {
 
     #[test]
     fn no_calls_edges_ever_emitted() {
-        let src =
-            "class A { void foo() { new B().bar(); } } class B { void bar() {} }";
+        let src = "class A { void foo() { new B().bar(); } } class B { void bar() {} }";
         let ex = extract(src, "neg.java");
         for edge in &ex.edges {
             assert_ne!(
@@ -1081,7 +1080,10 @@ mod tests {
     fn class_on_first_line_has_start_line_one() {
         let ex = extract("class Foo {}", "x.java");
         let n = get_node(&ex, "x_foo");
-        assert_eq!(n.span.start_line, 1, "class on line 1 must have start_line=1");
+        assert_eq!(
+            n.span.start_line, 1,
+            "class on line 1 must have start_line=1"
+        );
     }
 
     #[test]
@@ -1089,7 +1091,10 @@ mod tests {
         let src = "\n\nclass Late {}";
         let ex = extract(src, "y.java");
         let n = get_node(&ex, "y_late");
-        assert_eq!(n.span.start_line, 3, "class on line 3 must have start_line=3");
+        assert_eq!(
+            n.span.start_line, 3,
+            "class on line 3 must have start_line=3"
+        );
     }
 
     #[test]
@@ -1111,10 +1116,7 @@ mod tests {
     fn abstract_class_emits_class_node_same_as_concrete() {
         let src = "abstract class Shape {}";
         let ex = extract(src, "shapes.java");
-        assert!(
-            has_node(&ex, "shapes_shape"),
-            "abstract class node missing"
-        );
+        assert!(has_node(&ex, "shapes_shape"), "abstract class node missing");
         assert!(
             has_edge(&ex, "shapes", "shapes_shape", "contains"),
             "contains edge missing for abstract class"
@@ -1164,7 +1166,10 @@ mod tests {
         let method_edges = ex.edges.iter().filter(|e| e.relation == "method").count();
         let contains_edges = ex.edges.iter().filter(|e| e.relation == "contains").count();
         assert_eq!(method_edges, 4, "expected 4 method edges");
-        assert_eq!(contains_edges, 2, "expected 2 contains edges (file→class only)");
+        assert_eq!(
+            contains_edges, 2,
+            "expected 2 contains edges (file→class only)"
+        );
     }
 
     #[test]
@@ -1196,7 +1201,10 @@ mod tests {
         assert!(has_node(&ex, "chain_base"), "base class missing");
         assert!(has_node(&ex, "chain_derived"), "derived class missing");
         assert!(has_node(&ex, "chain_base_init"), "base method missing");
-        assert!(has_node(&ex, "chain_derived_work"), "derived method missing");
+        assert!(
+            has_node(&ex, "chain_derived_work"),
+            "derived method missing"
+        );
         assert!(
             has_edge(&ex, "chain_base", "chain_derived", "inherits"),
             "inherits edge missing"
@@ -1296,7 +1304,12 @@ mod tests {
             ),
             "implements inherits missing"
         );
-        assert!(has_edge(&ex, "userservice", "java.util.list", "imports_from"));
+        assert!(has_edge(
+            &ex,
+            "userservice",
+            "java.util.list",
+            "imports_from"
+        ));
         assert!(has_edge(
             &ex,
             "userservice",

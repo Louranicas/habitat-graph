@@ -597,8 +597,14 @@ mod tests {
             "func (s *S) PtrMethod() {}\n",
         );
         let ex = extract(src, "s.go");
-        assert!(has_node(&ex, "s_s_valmethod"), "value receiver method missing");
-        assert!(has_node(&ex, "s_s_ptrmethod"), "pointer receiver method missing");
+        assert!(
+            has_node(&ex, "s_s_valmethod"),
+            "value receiver method missing"
+        );
+        assert!(
+            has_node(&ex, "s_s_ptrmethod"),
+            "pointer receiver method missing"
+        );
     }
 
     // ── 7. Types — struct ──────────────────────────────────────────────────────────────────────
@@ -665,8 +671,16 @@ mod tests {
         assert!(has_node(&ex, "types_foo"), "Foo missing");
         assert!(has_node(&ex, "types_bar"), "Bar missing");
         assert!(has_node(&ex, "types_baz"), "Baz missing");
-        let contains: Vec<_> = ex.edges.iter().filter(|e| e.relation == "contains").collect();
-        assert_eq!(contains.len(), 3, "expected 3 contains edges from grouped type decl");
+        let contains: Vec<_> = ex
+            .edges
+            .iter()
+            .filter(|e| e.relation == "contains")
+            .collect();
+        assert_eq!(
+            contains.len(),
+            3,
+            "expected 3 contains edges from grouped type decl"
+        );
     }
 
     #[test]
@@ -773,7 +787,10 @@ mod tests {
         );
         let ex = extract(src, "g.go");
         assert!(has_edge(&ex, "g", "fmt", "imports_from"), "fmt missing");
-        assert!(has_edge(&ex, "g", "net/http", "imports_from"), "net/http missing");
+        assert!(
+            has_edge(&ex, "g", "net/http", "imports_from"),
+            "net/http missing"
+        );
         assert!(has_edge(&ex, "g", "os", "imports_from"), "os missing");
         let import_edges: Vec<_> = ex
             .edges
@@ -785,11 +802,7 @@ mod tests {
 
     #[test]
     fn multiple_import_declarations_all_emitted() {
-        let src = concat!(
-            "package p\n",
-            "import \"fmt\"\n",
-            "import \"os\"\n",
-        );
+        let src = concat!("package p\n", "import \"fmt\"\n", "import \"os\"\n",);
         let ex = extract(src, "m.go");
         assert!(has_edge(&ex, "m", "fmt", "imports_from"));
         assert!(has_edge(&ex, "m", "os", "imports_from"));
@@ -955,7 +968,11 @@ mod tests {
             "func F3() {}\n",
         );
         let ex = extract(src, "totals.go");
-        let contains: Vec<_> = ex.edges.iter().filter(|e| e.relation == "contains").collect();
+        let contains: Vec<_> = ex
+            .edges
+            .iter()
+            .filter(|e| e.relation == "contains")
+            .collect();
         // 2 types + 3 functions = 5 contains edges
         assert_eq!(
             contains.len(),
@@ -1040,8 +1057,18 @@ mod tests {
         assert!(has_edge(&ex, "server", "server_server", "contains"));
         assert!(has_edge(&ex, "server", "server_handler", "contains"));
         assert!(has_edge(&ex, "server", "server_newserver", "contains"));
-        assert!(has_edge(&ex, "server_server", "server_server_start", "method"));
-        assert!(has_edge(&ex, "server_server", "server_server_stop", "method"));
+        assert!(has_edge(
+            &ex,
+            "server_server",
+            "server_server_start",
+            "method"
+        ));
+        assert!(has_edge(
+            &ex,
+            "server_server",
+            "server_server_stop",
+            "method"
+        ));
         assert!(has_edge(&ex, "server", "fmt", "imports_from"));
         assert!(has_edge(&ex, "server", "net/http", "imports_from"));
     }
@@ -1089,7 +1116,10 @@ mod tests {
             "}\n",
         );
         let ex = extract(src, "nested.go");
-        assert!(has_node(&ex, "nested_outer"), "outer function must be emitted");
+        assert!(
+            has_node(&ex, "nested_outer"),
+            "outer function must be emitted"
+        );
         // No node labeled "nested_inner" should appear.
         assert!(
             !has_node(&ex, "nested_inner"),

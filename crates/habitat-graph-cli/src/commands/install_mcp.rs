@@ -189,7 +189,10 @@ mod tests {
     #[test]
     fn merge_into_empty_sets_command() {
         let merged = merge_into_config(json!({}), "habitat-graph", entry());
-        assert_eq!(merged["mcpServers"]["habitat-graph"]["command"], "habitat-graph");
+        assert_eq!(
+            merged["mcpServers"]["habitat-graph"]["command"],
+            "habitat-graph"
+        );
     }
 
     #[test]
@@ -426,7 +429,10 @@ mod tests {
         let path = dir.join("mcp.json");
         fs::write(&path, "{\"mcpServers\":{\"hg\":{\"command\":\"stale\"}}}").expect("seed");
         assert_eq!(run(&graph_path(), "hg", Some(&path)), 0);
-        assert_eq!(read_config(&path).expect("read")["mcpServers"]["hg"]["command"], binary_path());
+        assert_eq!(
+            read_config(&path).expect("read")["mcpServers"]["hg"]["command"],
+            binary_path()
+        );
     }
 
     #[test]

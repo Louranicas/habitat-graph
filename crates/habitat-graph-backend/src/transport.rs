@@ -8,7 +8,7 @@ use std::sync::Mutex;
 /// A minimal blocking HTTP transport: send a JSON `body` to `url` via `POST`, return the response.
 ///
 /// Backends are generic over this trait so tests inject a deterministic [`StaticTransport`] and
-/// production wires a real client (the `net`-feature [`UreqTransport`], or the habitat crate's
+/// production wires a real client (the `net`-feature `UreqTransport`, or the habitat crate's
 /// TIERWRIGHT-routed transport).
 pub trait HttpTransport: Send + Sync {
     /// Sends an HTTP `POST` of `body` to `url` with `Content-Type: application/json` plus any extra
@@ -128,7 +128,9 @@ impl HttpTransport for UreqTransport {
             Ok(resp) => resp
                 .into_string()
                 .map_err(|e| GraphError::Backend(format!("could not read response body: {e}"))),
-            Err(e) => Err(GraphError::Backend(format!("http request to {url} failed: {e}"))),
+            Err(e) => Err(GraphError::Backend(format!(
+                "http request to {url} failed: {e}"
+            ))),
         }
     }
 }
@@ -165,7 +167,10 @@ mod tests {
         let t = StaticTransport::ok("r");
         let _ = t.post_json("http://h", "{}", &[("Authorization", "Bearer k")]);
         let rec = t.last_request().expect("recorded");
-        assert_eq!(rec.headers, vec![("Authorization".into(), "Bearer k".into())]);
+        assert_eq!(
+            rec.headers,
+            vec![("Authorization".into(), "Bearer k".into())]
+        );
     }
 
     #[test]

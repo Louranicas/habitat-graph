@@ -43,8 +43,7 @@ fn httpx_community_structure_reasonable() {
     let dir = httpx_dir();
 
     // Full pipeline: detect → extract → build → analyze.
-    let files =
-        habitat_graph_source::detect(&dir.join("raw"), &["py"]).expect("detect py files");
+    let files = habitat_graph_source::detect(&dir.join("raw"), &["py"]).expect("detect py files");
     let extractions = habitat_graph_extract::extract_files(&files).expect("extract");
     let graph = habitat_graph_build::assemble(extractions);
     let communities = habitat_graph_analyze::detect_communities(&graph);
@@ -70,8 +69,7 @@ fn httpx_community_structure_reasonable() {
     // D3.2: Isolation invariant holds end-to-end — every node appears in exactly one community.
     let total_members: usize = communities.iter().map(|c| c.members.len()).sum();
     assert_eq!(
-        total_members,
-        node_count,
+        total_members, node_count,
         "Σmembers ({total_members}) must equal node_count ({node_count}) — isolation invariant"
     );
 
@@ -83,8 +81,7 @@ fn httpx_community_structure_reasonable() {
     );
 
     // D3.4: Load golden community structure and check co-clustering precision.
-    let golden_json =
-        std::fs::read_to_string(dir.join("graph.json")).expect("read httpx golden");
+    let golden_json = std::fs::read_to_string(dir.join("graph.json")).expect("read httpx golden");
     let golden_communities =
         communities_from_golden(&golden_json).expect("parse golden communities");
 
@@ -97,7 +94,10 @@ fn httpx_community_structure_reasonable() {
         .max_by_key(|s| s.len());
 
     if let Some(co_cluster_nodes) = large_golden_community {
-        eprintln!("largest probe community: {} golden nodes", co_cluster_nodes.len());
+        eprintln!(
+            "largest probe community: {} golden nodes",
+            co_cluster_nodes.len()
+        );
 
         let our_map = our_community_map(&communities, &graph);
 

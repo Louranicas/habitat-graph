@@ -232,7 +232,10 @@ fn base_name_from_user_type(node: &tree_sitter::Node<'_>, source: &[u8]) -> Opti
             };
             // tree-sitter-kotlin-ng v1.x uses plain "identifier"; older variants use
             // "type_identifier" or "simple_identifier".
-            if matches!(child.kind(), "type_identifier" | "simple_identifier" | "identifier") {
+            if matches!(
+                child.kind(),
+                "type_identifier" | "simple_identifier" | "identifier"
+            ) {
                 let t = text_of(source, &child);
                 if !t.is_empty() {
                     return Some(t.to_lowercase());
@@ -247,7 +250,10 @@ fn base_name_from_user_type(node: &tree_sitter::Node<'_>, source: &[u8]) -> Opti
         };
         // tree-sitter-kotlin-ng v1.x uses plain "identifier"; older variants use
         // "type_identifier" or "simple_identifier".
-        if matches!(child.kind(), "type_identifier" | "simple_identifier" | "identifier") {
+        if matches!(
+            child.kind(),
+            "type_identifier" | "simple_identifier" | "identifier"
+        ) {
             let t = text_of(source, &child);
             if !t.is_empty() {
                 return Some(t.to_lowercase());
@@ -334,7 +340,14 @@ fn extract_class_inheritance(
                 }
             }
             "delegation_specifier" => {
-                extract_one_delegation_specifier(&child, source, b, class_label, local_types, result);
+                extract_one_delegation_specifier(
+                    &child,
+                    source,
+                    b,
+                    class_label,
+                    local_types,
+                    result,
+                );
             }
             _ => {}
         }
@@ -635,7 +648,11 @@ mod tests {
     #[test]
     fn whitespace_only_source_yields_file_node() {
         let ex = extract("   \n\n\t  \n", "utils.kt");
-        assert_eq!(ex.nodes.len(), 1, "whitespace-only source must yield 1 node");
+        assert_eq!(
+            ex.nodes.len(),
+            1,
+            "whitespace-only source must yield 1 node"
+        );
         assert_eq!(ex.nodes[0].label, "utils");
     }
 
@@ -731,7 +748,10 @@ mod tests {
     fn function_span_is_well_formed_and_non_empty() {
         let ex = extract("fun compute(): Int { return 42 }", "math.kt");
         let n = node(&ex, "math_compute");
-        assert!(n.span.is_well_formed(), "fn span must be well-formed: {n:?}");
+        assert!(
+            n.span.is_well_formed(),
+            "fn span must be well-formed: {n:?}"
+        );
         assert!(!n.span.is_empty(), "fn span must not be empty: {n:?}");
     }
 
@@ -740,7 +760,10 @@ mod tests {
         let src = "\n\nfun late() {}";
         let ex = extract(src, "sl.kt");
         let n = node(&ex, "sl_late");
-        assert_eq!(n.span.start_line, 3, "fn on line 3 must have start_line=3; got {n:?}");
+        assert_eq!(
+            n.span.start_line, 3,
+            "fn on line 3 must have start_line=3; got {n:?}"
+        );
     }
 
     // ── D. Class declarations ──────────────────────────────────────────────────────────────────
@@ -758,7 +781,10 @@ mod tests {
     #[test]
     fn class_name_is_lowercased() {
         let ex = extract("class HTTPClient {}", "client.kt");
-        assert!(has_node(&ex, "client_httpclient"), "class label must be lowercased");
+        assert!(
+            has_node(&ex, "client_httpclient"),
+            "class label must be lowercased"
+        );
     }
 
     #[test]
@@ -767,7 +793,11 @@ mod tests {
         assert!(has_node(&ex, "classes_a"));
         assert!(has_node(&ex, "classes_b"));
         assert!(has_node(&ex, "classes_c"));
-        let contains: Vec<_> = ex.edges.iter().filter(|e| e.relation == "contains").collect();
+        let contains: Vec<_> = ex
+            .edges
+            .iter()
+            .filter(|e| e.relation == "contains")
+            .collect();
         assert_eq!(contains.len(), 3, "expected 3 contains edges for 3 classes");
     }
 
@@ -775,9 +805,17 @@ mod tests {
     fn class_with_empty_body_emits_only_class_node_and_contains_edge() {
         let ex = extract("class Empty {}", "e.kt");
         // file node + class node = 2 nodes
-        assert_eq!(ex.nodes.len(), 2, "empty class must produce exactly 2 nodes");
+        assert_eq!(
+            ex.nodes.len(),
+            2,
+            "empty class must produce exactly 2 nodes"
+        );
         let method_edges: Vec<_> = ex.edges.iter().filter(|e| e.relation == "method").collect();
-        assert_eq!(method_edges.len(), 0, "empty class must produce 0 method edges");
+        assert_eq!(
+            method_edges.len(),
+            0,
+            "empty class must produce 0 method edges"
+        );
     }
 
     #[test]
@@ -860,7 +898,10 @@ mod tests {
     #[test]
     fn object_with_method_emits_method_node_and_method_edge() {
         let ex = extract("object Cache { fun get(key: String) = key }", "cache.kt");
-        assert!(has_node(&ex, "cache_cache_get"), "object method node missing");
+        assert!(
+            has_node(&ex, "cache_cache_get"),
+            "object method node missing"
+        );
         assert!(has_edge(&ex, "cache_cache", "cache_cache_get", "method"));
     }
 
@@ -1083,10 +1124,23 @@ mod tests {
     fn multiple_imports_all_emit_imports_from_edges() {
         let src = "import com.alpha.A\nimport com.beta.B\nimport com.gamma.C\n";
         let ex = extract(src, "multi.kt");
-        assert!(has_edge(&ex, "multi", "com.alpha.a", "imports_from"), "A missing");
-        assert!(has_edge(&ex, "multi", "com.beta.b", "imports_from"), "B missing");
-        assert!(has_edge(&ex, "multi", "com.gamma.c", "imports_from"), "C missing");
-        let import_edges = ex.edges.iter().filter(|e| e.relation == "imports_from").count();
+        assert!(
+            has_edge(&ex, "multi", "com.alpha.a", "imports_from"),
+            "A missing"
+        );
+        assert!(
+            has_edge(&ex, "multi", "com.beta.b", "imports_from"),
+            "B missing"
+        );
+        assert!(
+            has_edge(&ex, "multi", "com.gamma.c", "imports_from"),
+            "C missing"
+        );
+        let import_edges = ex
+            .edges
+            .iter()
+            .filter(|e| e.relation == "imports_from")
+            .count();
         assert_eq!(import_edges, 3, "expected 3 imports_from edges");
     }
 
@@ -1179,7 +1233,10 @@ mod tests {
     fn class_on_first_line_has_start_line_one() {
         let ex = extract("class Foo {}", "x.kt");
         let n = node(&ex, "x_foo");
-        assert_eq!(n.span.start_line, 1, "class on line 1 must have start_line=1; got {n:?}");
+        assert_eq!(
+            n.span.start_line, 1,
+            "class on line 1 must have start_line=1; got {n:?}"
+        );
     }
 
     #[test]
@@ -1187,7 +1244,10 @@ mod tests {
         let src = "\n\nclass Late {}";
         let ex = extract(src, "y.kt");
         let n = node(&ex, "y_late");
-        assert_eq!(n.span.start_line, 3, "class on line 3 must have start_line=3; got {n:?}");
+        assert_eq!(
+            n.span.start_line, 3,
+            "class on line 3 must have start_line=3; got {n:?}"
+        );
     }
 
     #[test]
@@ -1281,14 +1341,22 @@ mod tests {
         assert!(has_node(&ex, "chain_base"), "base class missing");
         assert!(has_node(&ex, "chain_derived"), "derived class missing");
         assert!(has_node(&ex, "chain_base_init"), "base method missing");
-        assert!(has_node(&ex, "chain_derived_work"), "derived method missing");
+        assert!(
+            has_node(&ex, "chain_derived_work"),
+            "derived method missing"
+        );
         assert!(
             has_edge(&ex, "chain_base", "chain_derived", "inherits"),
             "inherits edge missing; edges: {:?}",
             ex.edges
         );
         assert!(has_edge(&ex, "chain_base", "chain_base_init", "method"));
-        assert!(has_edge(&ex, "chain_derived", "chain_derived_work", "method"));
+        assert!(has_edge(
+            &ex,
+            "chain_derived",
+            "chain_derived_work",
+            "method"
+        ));
     }
 
     #[test]
@@ -1313,11 +1381,22 @@ mod tests {
         );
         let ex = extract(src, "app.kt");
         assert!(has_node(&ex, "app"), "file node missing");
-        assert!(has_node(&ex, "app_repository"), "Repository interface missing");
+        assert!(
+            has_node(&ex, "app_repository"),
+            "Repository interface missing"
+        );
         assert!(has_node(&ex, "app_user"), "User data class missing");
-        assert!(has_node(&ex, "app_userrepository"), "UserRepository missing");
+        assert!(
+            has_node(&ex, "app_userrepository"),
+            "UserRepository missing"
+        );
         assert!(has_node(&ex, "app_createrepo"), "createRepo fn missing");
-        assert!(has_edge(&ex, "app", "kotlin.collections.list", "imports_from"));
+        assert!(has_edge(
+            &ex,
+            "app",
+            "kotlin.collections.list",
+            "imports_from"
+        ));
         assert!(has_edge(&ex, "app", "app_repository", "contains"));
         assert!(has_edge(&ex, "app", "app_user", "contains"));
         assert!(has_edge(&ex, "app", "app_userrepository", "contains"));

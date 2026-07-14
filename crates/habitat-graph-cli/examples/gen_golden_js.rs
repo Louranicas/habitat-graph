@@ -1,12 +1,12 @@
 //! Generate a graphify-compatible `graph.json` golden for the JavaScript parity gate.
 //!
 //! Usage (from workspace root):
-//!   CARGO_TARGET_DIR=./target cargo run --example gen_golden_js -p habitat-graph-cli
+//!   `CARGO_TARGET_DIR=./target` cargo run --example `gen_golden_js` -p habitat-graph-cli
 //!
 //! Reads `.js` files from `tests/fixtures/goldens/js/raw/` (relative to workspace root),
 //! extracts them using [`JsExtractor`], assembles the graph, then writes a graphify-compatible
 //! golden to `tests/fixtures/goldens/js/graph.json` where node `"id"` fields are string labels
-//! (not integer NodeIds) so `from_golden` can parse them.
+//! (not integer `NodeIds`) so `from_golden` can parse them.
 
 use std::collections::BTreeMap;
 use std::path::PathBuf;
@@ -27,7 +27,11 @@ fn main() {
         eprintln!("detect error: {e}");
         std::process::exit(1);
     });
-    eprintln!("detected {} JS file(s) in {}", files.len(), raw_dir.display());
+    eprintln!(
+        "detected {} JS file(s) in {}",
+        files.len(),
+        raw_dir.display()
+    );
 
     // Extract.
     let extractions = habitat_graph_extract::extract_files(&files).unwrap_or_else(|e| {
@@ -37,9 +41,8 @@ fn main() {
 
     // Assemble.
     let mut graph = habitat_graph_build::assemble(extractions);
-    graph.communities = habitat_graph_analyze::detect_communities(
-        &habitat_graph_analyze::trusted_subgraph(&graph),
-    );
+    graph.communities =
+        habitat_graph_analyze::detect_communities(&habitat_graph_analyze::trusted_subgraph(&graph));
     let graph = graph.sorted();
 
     // Build label-to-community mapping.

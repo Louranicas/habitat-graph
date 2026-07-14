@@ -6,9 +6,10 @@
 //! any browser. (For very large graphs a `sigma`/`cytoscape` exporter is a future refinement; this viewer
 //! targets the typical per-service extract.)
 //!
-//! Security: the embedded JSON has every `<` escaped to `<` so a label can never break out of the
-//! `<script type="application/json">` island; node labels are already render-safe (the export path runs
-//! them through [`display_safe`](habitat_graph_core::display_safe)).
+//! Security: the embedded node-link JSON already applies the shared deterministic secret redaction
+//! without changing IDs or topology. The HTML layer also escapes every `<` in that JSON so a label
+//! cannot break out of the `<script type="application/json">` island; node labels are render-safe
+//! through [`display_safe`].
 
 use crate::json::to_node_link;
 use habitat_graph_core::{display_safe, Graph, Result};
@@ -91,6 +92,8 @@ const VIEWER: &str = r#"<!doctype html>
 /// Renders a self-contained interactive `graph.html` for `graph`.
 ///
 /// The page embeds the node-link JSON (graphify-compatible) and a dependency-free canvas viewer.
+/// It therefore inherits [`crate::to_node_link`]'s deterministic redaction while preserving node
+/// IDs, edge endpoints, counts, and community assignments.
 ///
 /// # Errors
 /// Returns [`GraphError::Schema`](habitat_graph_core::GraphError::Schema) if the graph cannot be
@@ -158,7 +161,11 @@ mod tests {
     #[test]
     fn title_reflects_counts() {
         let h = render_html(&sample()).expect("ok");
-        assert!(h.contains("2 nodes / 1 edges / 0 communities"), "{}", &h[..200]);
+        assert!(
+            h.contains("2 nodes / 1 edges / 0 communities"),
+            "{}",
+            &h[..200]
+        );
     }
 
     #[test]
@@ -196,10 +203,25 @@ mod tests {
             let e = h[s..].find("</script>").expect("close") + s;
             &h[s..e]
         };
-        assert!(!data_region.contains("</script>"), "raw </script> leaked into data island");
+        assert!(
+            !data_region.contains("</script>"),
+            "raw </script> leaked into data island"
+        );
         // …but it still round-trips to the original label after un-escaping.
         let v: serde_json::Value = serde_json::from_str(&embedded_json(&h)).expect("json");
         assert_eq!(v["nodes"][0]["label"], "evil</script><img src=x>");
+    }
+
+    #[test]
+    fn embedded_json_uses_the_shared_secret_redaction_policy() {
+        let mut g = Graph::new();
+        g.nodes = vec![node(1, "api_key_assignment_refused")];
+        let h = render_html(&g).expect("ok");
+        let data = embedded_json(&h);
+        assert!(!data.contains("api_key_assignment_refused"));
+        let v: serde_json::Value = serde_json::from_str(&data).expect("json");
+        assert_eq!(v["nodes"][0]["id"], 1);
+        assert_eq!(v["nodes"][0]["label"], "[REDACTED:api_key]");
     }
 
     #[test]
@@ -213,7 +235,10 @@ mod tests {
     #[test]
     fn is_self_contained_no_external_urls() {
         let h = render_html(&sample()).expect("ok");
-        assert!(!h.contains("http://") && !h.contains("https://"), "viewer must be offline-self-contained");
+        assert!(
+            !h.contains("http://") && !h.contains("https://"),
+            "viewer must be offline-self-contained"
+        );
         assert!(!h.contains("src=\"http"));
     }
 

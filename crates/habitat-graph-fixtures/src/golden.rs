@@ -1,4 +1,4 @@
-//! Load a graphify committed node-link golden into a [`NormalizedGraph`](crate::NormalizedGraph).
+//! Load a graphify committed node-link golden into a [`NormalizedGraph`].
 
 use std::collections::BTreeSet;
 

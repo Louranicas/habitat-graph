@@ -188,16 +188,9 @@ impl DeltaPusher {
             "newly_healed": &healed_json,
             "coherence_delta": delta.coherence_delta,
         }))
-        .map_err(|e| {
-            GraphError::Io(format!(
-                "DeltaPusher: PV2 body serialisation failed: {e}"
-            ))
-        })?;
+        .map_err(|e| GraphError::Io(format!("DeltaPusher: PV2 body serialisation failed: {e}")))?;
 
-        let pv2_endpoint = format!(
-            "{}/arc-delta",
-            self.pv2_url.trim_end_matches('/')
-        );
+        let pv2_endpoint = format!("{}/arc-delta", self.pv2_url.trim_end_matches('/'));
         if let Err(e) = self.transport.post_json(&pv2_endpoint, &pv2_body, &[]) {
             eprintln!(
                 "[habitat-graph] DeltaPusher: PV2 push to {pv2_endpoint} failed (non-fatal): {e}"
@@ -212,9 +205,7 @@ impl DeltaPusher {
             "coherence_delta": delta.coherence_delta,
         }))
         .map_err(|e| {
-            GraphError::Io(format!(
-                "DeltaPusher: POVM value serialisation failed: {e}"
-            ))
+            GraphError::Io(format!("DeltaPusher: POVM value serialisation failed: {e}"))
         })?;
 
         let povm_body = serde_json::to_string(&serde_json::json!({
@@ -222,16 +213,9 @@ impl DeltaPusher {
             "key": "arc_delta",
             "value": delta_value_str,
         }))
-        .map_err(|e| {
-            GraphError::Io(format!(
-                "DeltaPusher: POVM body serialisation failed: {e}"
-            ))
-        })?;
+        .map_err(|e| GraphError::Io(format!("DeltaPusher: POVM body serialisation failed: {e}")))?;
 
-        let povm_endpoint = format!(
-            "{}/memory/store",
-            self.povm_url.trim_end_matches('/')
-        );
+        let povm_endpoint = format!("{}/memory/store", self.povm_url.trim_end_matches('/'));
         if let Err(e) = self.transport.post_json(&povm_endpoint, &povm_body, &[]) {
             eprintln!(
                 "[habitat-graph] DeltaPusher: POVM push to {povm_endpoint} failed (non-fatal): {e}"
@@ -289,7 +273,7 @@ mod tests {
         }
 
         fn call_count(&self) -> usize {
-            self.calls.lock().map(|g| g.len()).unwrap_or(0)
+            self.calls.lock().map_or(0, |g| g.len())
         }
 
         fn calls_snapshot(&self) -> Vec<(String, String)> {
@@ -320,9 +304,7 @@ mod tests {
     }
 
     impl SeqTransport {
-        fn with_responses(
-            responses: Vec<std::result::Result<String, String>>,
-        ) -> StdArc<Self> {
+        fn with_responses(responses: Vec<std::result::Result<String, String>>) -> StdArc<Self> {
             StdArc::new(Self {
                 responses: Mutex::new(responses.into()),
                 calls: Mutex::new(vec![]),
@@ -330,7 +312,7 @@ mod tests {
         }
 
         fn call_count(&self) -> usize {
-            self.calls.lock().map(|g| g.len()).unwrap_or(0)
+            self.calls.lock().map_or(0, |g| g.len())
         }
 
         fn calls_snapshot(&self) -> Vec<(String, String)> {
@@ -346,12 +328,7 @@ mod tests {
             if let Ok(mut guard) = self.0.calls.lock() {
                 guard.push((url.to_owned(), body.to_owned()));
             }
-            let resp = self
-                .0
-                .responses
-                .lock()
-                .ok()
-                .and_then(|mut g| g.pop_front());
+            let resp = self.0.responses.lock().ok().and_then(|mut g| g.pop_front());
             match resp {
                 Some(Ok(s)) => Ok(s),
                 Some(Err(msg)) => Err(GraphError::Backend(msg)),
@@ -482,7 +459,11 @@ mod tests {
         let t = ConstTransport::ok();
         let p = pusher_const(StdArc::clone(&t));
         p.push_delta(&empty_delta()).expect("must not fail");
-        assert_eq!(t.call_count(), 0, "empty delta must not trigger any HTTP calls");
+        assert_eq!(
+            t.call_count(),
+            0,
+            "empty delta must not trigger any HTTP calls"
+        );
     }
 
     #[test]
@@ -502,7 +483,11 @@ mod tests {
             coherence_delta: -0.9999,
         };
         p.push_delta(&delta).expect("ok");
-        assert_eq!(t.call_count(), 0, "coherence change alone must not trigger push");
+        assert_eq!(
+            t.call_count(),
+            0,
+            "coherence change alone must not trigger push"
+        );
     }
 
     #[test]
@@ -536,7 +521,11 @@ mod tests {
         let p = pusher_const(StdArc::clone(&t));
         p.push_delta(&severed_delta(vec![calls_arc("A", "B")]))
             .expect("ok");
-        assert_eq!(t.call_count(), 2, "non-empty delta must POST to both PV2 and POVM");
+        assert_eq!(
+            t.call_count(),
+            2,
+            "non-empty delta must POST to both PV2 and POVM"
+        );
     }
 
     #[test]
@@ -560,8 +549,10 @@ mod tests {
     fn two_separate_nonempty_pushes_make_four_calls_total() {
         let t = ConstTransport::ok();
         let p = pusher_const(StdArc::clone(&t));
-        p.push_delta(&severed_delta(vec![calls_arc("A", "B")])).expect("ok");
-        p.push_delta(&healed_delta(vec![calls_arc("X", "Y")])).expect("ok");
+        p.push_delta(&severed_delta(vec![calls_arc("A", "B")]))
+            .expect("ok");
+        p.push_delta(&healed_delta(vec![calls_arc("X", "Y")]))
+            .expect("ok");
         assert_eq!(t.call_count(), 4);
     }
 
@@ -571,7 +562,8 @@ mod tests {
     fn first_call_goes_to_pv2_arc_delta_endpoint() {
         let t = ConstTransport::ok();
         let p = pusher_const(StdArc::clone(&t));
-        p.push_delta(&severed_delta(vec![calls_arc("A", "B")])).expect("ok");
+        p.push_delta(&severed_delta(vec![calls_arc("A", "B")]))
+            .expect("ok");
         let calls = t.calls_snapshot();
         assert_eq!(
             calls[0].0,
@@ -584,7 +576,8 @@ mod tests {
     fn second_call_goes_to_povm_memory_store_endpoint() {
         let t = ConstTransport::ok();
         let p = pusher_const(StdArc::clone(&t));
-        p.push_delta(&severed_delta(vec![calls_arc("A", "B")])).expect("ok");
+        p.push_delta(&severed_delta(vec![calls_arc("A", "B")]))
+            .expect("ok");
         let calls = t.calls_snapshot();
         assert_eq!(
             calls[1].0,
@@ -598,7 +591,8 @@ mod tests {
         let t = ConstTransport::ok();
         let p = DeltaPusher::new(Box::new(ConstHandle(StdArc::clone(&t))))
             .with_pv2_url("http://my-pv2:1234");
-        p.push_delta(&severed_delta(vec![calls_arc("A", "B")])).expect("ok");
+        p.push_delta(&severed_delta(vec![calls_arc("A", "B")]))
+            .expect("ok");
         let calls = t.calls_snapshot();
         assert_eq!(calls[0].0, "http://my-pv2:1234/arc-delta");
     }
@@ -608,7 +602,8 @@ mod tests {
         let t = ConstTransport::ok();
         let p = DeltaPusher::new(Box::new(ConstHandle(StdArc::clone(&t))))
             .with_povm_url("http://my-povm:5678");
-        p.push_delta(&severed_delta(vec![calls_arc("A", "B")])).expect("ok");
+        p.push_delta(&severed_delta(vec![calls_arc("A", "B")]))
+            .expect("ok");
         let calls = t.calls_snapshot();
         assert_eq!(calls[1].0, "http://my-povm:5678/memory/store");
     }
@@ -618,7 +613,8 @@ mod tests {
         let t = ConstTransport::ok();
         let p = DeltaPusher::new(Box::new(ConstHandle(StdArc::clone(&t))))
             .with_pv2_url("http://pv2:8132/");
-        p.push_delta(&severed_delta(vec![calls_arc("A", "B")])).expect("ok");
+        p.push_delta(&severed_delta(vec![calls_arc("A", "B")]))
+            .expect("ok");
         let calls = t.calls_snapshot();
         assert_eq!(calls[0].0, "http://pv2:8132/arc-delta");
     }
@@ -628,7 +624,8 @@ mod tests {
         let t = ConstTransport::ok();
         let p = DeltaPusher::new(Box::new(ConstHandle(StdArc::clone(&t))))
             .with_povm_url("http://povm:8125/");
-        p.push_delta(&severed_delta(vec![calls_arc("A", "B")])).expect("ok");
+        p.push_delta(&severed_delta(vec![calls_arc("A", "B")]))
+            .expect("ok");
         let calls = t.calls_snapshot();
         assert_eq!(calls[1].0, "http://povm:8125/memory/store");
     }
@@ -644,34 +641,47 @@ mod tests {
     fn pv2_body_has_newly_severed_key() {
         let t = ConstTransport::ok();
         let p = pusher_const(StdArc::clone(&t));
-        p.push_delta(&severed_delta(vec![calls_arc("A", "B")])).expect("ok");
+        p.push_delta(&severed_delta(vec![calls_arc("A", "B")]))
+            .expect("ok");
         let v = pv2_body_value(&t);
-        assert!(v.get("newly_severed").is_some(), "PV2 body must have 'newly_severed'");
+        assert!(
+            v.get("newly_severed").is_some(),
+            "PV2 body must have 'newly_severed'"
+        );
     }
 
     #[test]
     fn pv2_body_has_newly_healed_key() {
         let t = ConstTransport::ok();
         let p = pusher_const(StdArc::clone(&t));
-        p.push_delta(&severed_delta(vec![calls_arc("A", "B")])).expect("ok");
+        p.push_delta(&severed_delta(vec![calls_arc("A", "B")]))
+            .expect("ok");
         let v = pv2_body_value(&t);
-        assert!(v.get("newly_healed").is_some(), "PV2 body must have 'newly_healed'");
+        assert!(
+            v.get("newly_healed").is_some(),
+            "PV2 body must have 'newly_healed'"
+        );
     }
 
     #[test]
     fn pv2_body_has_coherence_delta_key() {
         let t = ConstTransport::ok();
         let p = pusher_const(StdArc::clone(&t));
-        p.push_delta(&severed_delta(vec![calls_arc("A", "B")])).expect("ok");
+        p.push_delta(&severed_delta(vec![calls_arc("A", "B")]))
+            .expect("ok");
         let v = pv2_body_value(&t);
-        assert!(v.get("coherence_delta").is_some(), "PV2 body must have 'coherence_delta'");
+        assert!(
+            v.get("coherence_delta").is_some(),
+            "PV2 body must have 'coherence_delta'"
+        );
     }
 
     #[test]
     fn pv2_body_newly_severed_is_array() {
         let t = ConstTransport::ok();
         let p = pusher_const(StdArc::clone(&t));
-        p.push_delta(&severed_delta(vec![calls_arc("A", "B")])).expect("ok");
+        p.push_delta(&severed_delta(vec![calls_arc("A", "B")]))
+            .expect("ok");
         let v = pv2_body_value(&t);
         assert!(
             v["newly_severed"].is_array(),
@@ -683,7 +693,8 @@ mod tests {
     fn pv2_body_newly_healed_is_array() {
         let t = ConstTransport::ok();
         let p = pusher_const(StdArc::clone(&t));
-        p.push_delta(&healed_delta(vec![calls_arc("X", "Y")])).expect("ok");
+        p.push_delta(&healed_delta(vec![calls_arc("X", "Y")]))
+            .expect("ok");
         let v = pv2_body_value(&t);
         assert!(v["newly_healed"].is_array());
     }
@@ -692,7 +703,8 @@ mod tests {
     fn pv2_body_arc_has_producer_field() {
         let t = ConstTransport::ok();
         let p = pusher_const(StdArc::clone(&t));
-        p.push_delta(&severed_delta(vec![calls_arc("MyProducer", "MyConsumer")])).expect("ok");
+        p.push_delta(&severed_delta(vec![calls_arc("MyProducer", "MyConsumer")]))
+            .expect("ok");
         let v = pv2_body_value(&t);
         let arc = &v["newly_severed"][0];
         assert_eq!(arc["producer"], "MyProducer");
@@ -702,7 +714,8 @@ mod tests {
     fn pv2_body_arc_has_consumer_field() {
         let t = ConstTransport::ok();
         let p = pusher_const(StdArc::clone(&t));
-        p.push_delta(&severed_delta(vec![calls_arc("P", "MyConsumer")])).expect("ok");
+        p.push_delta(&severed_delta(vec![calls_arc("P", "MyConsumer")]))
+            .expect("ok");
         let v = pv2_body_value(&t);
         assert_eq!(v["newly_severed"][0]["consumer"], "MyConsumer");
     }
@@ -743,7 +756,8 @@ mod tests {
     fn povm_body_namespace_is_habitat_graph() {
         let t = ConstTransport::ok();
         let p = pusher_const(StdArc::clone(&t));
-        p.push_delta(&severed_delta(vec![calls_arc("A", "B")])).expect("ok");
+        p.push_delta(&severed_delta(vec![calls_arc("A", "B")]))
+            .expect("ok");
         let v = povm_body_value(&t);
         assert_eq!(v["namespace"], "habitat_graph");
     }
@@ -752,7 +766,8 @@ mod tests {
     fn povm_body_key_is_arc_delta() {
         let t = ConstTransport::ok();
         let p = pusher_const(StdArc::clone(&t));
-        p.push_delta(&severed_delta(vec![calls_arc("A", "B")])).expect("ok");
+        p.push_delta(&severed_delta(vec![calls_arc("A", "B")]))
+            .expect("ok");
         let v = povm_body_value(&t);
         assert_eq!(v["key"], "arc_delta");
     }
@@ -761,7 +776,8 @@ mod tests {
     fn povm_body_has_value_key() {
         let t = ConstTransport::ok();
         let p = pusher_const(StdArc::clone(&t));
-        p.push_delta(&severed_delta(vec![calls_arc("A", "B")])).expect("ok");
+        p.push_delta(&severed_delta(vec![calls_arc("A", "B")]))
+            .expect("ok");
         let v = povm_body_value(&t);
         assert!(v.get("value").is_some(), "POVM body must have 'value' key");
     }
@@ -770,12 +786,13 @@ mod tests {
     fn povm_body_value_is_valid_json_string() {
         let t = ConstTransport::ok();
         let p = pusher_const(StdArc::clone(&t));
-        p.push_delta(&severed_delta(vec![calls_arc("A", "B")])).expect("ok");
+        p.push_delta(&severed_delta(vec![calls_arc("A", "B")]))
+            .expect("ok");
         let v = povm_body_value(&t);
         // value should be a JSON string that is itself parseable JSON.
         let inner_str = v["value"].as_str().expect("value must be a string");
-        let inner: serde_json::Value = serde_json::from_str(inner_str)
-            .expect("value string must be valid JSON");
+        let inner: serde_json::Value =
+            serde_json::from_str(inner_str).expect("value string must be valid JSON");
         assert!(inner.get("newly_severed").is_some());
         assert!(inner.get("newly_healed").is_some());
         assert!(inner.get("coherence_delta").is_some());
@@ -798,8 +815,13 @@ mod tests {
             Ok("{}".into()),        // second call (POVM) succeeds
         ]);
         let p = pusher_seq(StdArc::clone(&t));
-        p.push_delta(&severed_delta(vec![calls_arc("A", "B")])).expect("ok");
-        assert_eq!(t.call_count(), 2, "POVM must still be called after PV2 failure");
+        p.push_delta(&severed_delta(vec![calls_arc("A", "B")]))
+            .expect("ok");
+        assert_eq!(
+            t.call_count(),
+            2,
+            "POVM must still be called after PV2 failure"
+        );
         // Second call must go to POVM
         let calls = t.calls_snapshot();
         assert!(calls[1].0.contains("/memory/store"));
@@ -808,7 +830,7 @@ mod tests {
     #[test]
     fn povm_failure_returns_ok() {
         let t = SeqTransport::with_responses(vec![
-            Ok("{}".into()),           // PV2 ok
+            Ok("{}".into()),            // PV2 ok
             Err("povm offline".into()), // POVM fails
         ]);
         let p = pusher_seq(StdArc::clone(&t));
@@ -818,10 +840,7 @@ mod tests {
 
     #[test]
     fn both_services_fail_returns_ok() {
-        let t = SeqTransport::with_responses(vec![
-            Err("pv2 down".into()),
-            Err("povm down".into()),
-        ]);
+        let t = SeqTransport::with_responses(vec![Err("pv2 down".into()), Err("povm down".into())]);
         let p = pusher_seq(StdArc::clone(&t));
         let result = p.push_delta(&severed_delta(vec![calls_arc("A", "B")]));
         assert!(result.is_ok(), "both failures must still return Ok");
@@ -831,18 +850,21 @@ mod tests {
     fn pv2_failure_total_call_count_is_still_two() {
         let t = ConstTransport::failing("refused");
         let p = pusher_const(StdArc::clone(&t));
-        p.push_delta(&severed_delta(vec![calls_arc("A", "B")])).expect("ok");
-        assert_eq!(t.call_count(), 2, "both endpoints attempted even when PV2 fails");
+        p.push_delta(&severed_delta(vec![calls_arc("A", "B")]))
+            .expect("ok");
+        assert_eq!(
+            t.call_count(),
+            2,
+            "both endpoints attempted even when PV2 fails"
+        );
     }
 
     #[test]
     fn povm_failure_after_pv2_success_call_count_is_two() {
-        let t = SeqTransport::with_responses(vec![
-            Ok("{}".into()),
-            Err("povm down".into()),
-        ]);
+        let t = SeqTransport::with_responses(vec![Ok("{}".into()), Err("povm down".into())]);
         let p = pusher_seq(StdArc::clone(&t));
-        p.push_delta(&severed_delta(vec![calls_arc("A", "B")])).expect("ok");
+        p.push_delta(&severed_delta(vec![calls_arc("A", "B")]))
+            .expect("ok");
         assert_eq!(t.call_count(), 2);
     }
 
@@ -852,7 +874,11 @@ mod tests {
     fn all_severed_arcs_appear_in_pv2_body() {
         let t = ConstTransport::ok();
         let p = pusher_const(StdArc::clone(&t));
-        let arcs = vec![calls_arc("A", "B"), calls_arc("C", "D"), calls_arc("E", "F")];
+        let arcs = vec![
+            calls_arc("A", "B"),
+            calls_arc("C", "D"),
+            calls_arc("E", "F"),
+        ];
         p.push_delta(&severed_delta(arcs)).expect("ok");
         let v = pv2_body_value(&t);
         let arr = v["newly_severed"].as_array().expect("array");
@@ -939,9 +965,7 @@ mod tests {
         };
         p.push_delta(&delta).expect("ok");
         let v = pv2_body_value(&t);
-        assert!(
-            (v["coherence_delta"].as_f64().expect("f64")).abs() < f64::EPSILON
-        );
+        assert!((v["coherence_delta"].as_f64().expect("f64")).abs() < f64::EPSILON);
     }
 
     // ── Group 10: POVM inner value integrity ──────────────────────────────────
@@ -1010,7 +1034,8 @@ mod tests {
     fn pv2_before_povm_even_with_only_healed_arcs() {
         let t = ConstTransport::ok();
         let p = pusher_const(StdArc::clone(&t));
-        p.push_delta(&healed_delta(vec![calls_arc("A", "B")])).expect("ok");
+        p.push_delta(&healed_delta(vec![calls_arc("A", "B")]))
+            .expect("ok");
         let calls = t.calls_snapshot();
         assert!(calls[0].0.contains("/arc-delta"));
         assert!(calls[1].0.contains("/memory/store"));
@@ -1023,25 +1048,22 @@ mod tests {
         let t = ConstTransport::failing("network down");
         let p = pusher_const(StdArc::clone(&t));
         let result = p.push_delta(&mixed_delta());
-        assert!(result.is_ok(), "transport failure must not surface as Err: {result:?}");
+        assert!(
+            result.is_ok(),
+            "transport failure must not surface as Err: {result:?}"
+        );
     }
 
     #[test]
     fn first_fail_second_ok_both_called_returns_ok() {
-        let t = SeqTransport::with_responses(vec![
-            Err("pv2 fail".into()),
-            Ok("{}".into()),
-        ]);
+        let t = SeqTransport::with_responses(vec![Err("pv2 fail".into()), Ok("{}".into())]);
         let p = pusher_seq(StdArc::clone(&t));
         assert!(p.push_delta(&mixed_delta()).is_ok());
     }
 
     #[test]
     fn first_ok_second_fail_returns_ok() {
-        let t = SeqTransport::with_responses(vec![
-            Ok("{}".into()),
-            Err("povm fail".into()),
-        ]);
+        let t = SeqTransport::with_responses(vec![Ok("{}".into()), Err("povm fail".into())]);
         let p = pusher_seq(StdArc::clone(&t));
         assert!(p.push_delta(&mixed_delta()).is_ok());
     }
@@ -1066,7 +1088,11 @@ mod tests {
     fn only_healed_arcs_makes_two_calls() {
         let t = ConstTransport::ok();
         let p = pusher_const(StdArc::clone(&t));
-        p.push_delta(&healed_delta(vec![calls_arc("A", "B"), calls_arc("C", "D")])).expect("ok");
+        p.push_delta(&healed_delta(vec![
+            calls_arc("A", "B"),
+            calls_arc("C", "D"),
+        ]))
+        .expect("ok");
         assert_eq!(t.call_count(), 2);
     }
 
@@ -1074,7 +1100,8 @@ mod tests {
     fn pv2_body_newly_severed_empty_when_only_healed() {
         let t = ConstTransport::ok();
         let p = pusher_const(StdArc::clone(&t));
-        p.push_delta(&healed_delta(vec![calls_arc("A", "B")])).expect("ok");
+        p.push_delta(&healed_delta(vec![calls_arc("A", "B")]))
+            .expect("ok");
         let v = pv2_body_value(&t);
         assert!(
             v["newly_severed"].as_array().expect("arr").is_empty(),
@@ -1086,7 +1113,11 @@ mod tests {
     fn pv2_body_newly_healed_populated_when_only_healed() {
         let t = ConstTransport::ok();
         let p = pusher_const(StdArc::clone(&t));
-        p.push_delta(&healed_delta(vec![calls_arc("A", "B"), calls_arc("C", "D")])).expect("ok");
+        p.push_delta(&healed_delta(vec![
+            calls_arc("A", "B"),
+            calls_arc("C", "D"),
+        ]))
+        .expect("ok");
         let v = pv2_body_value(&t);
         assert_eq!(v["newly_healed"].as_array().expect("arr").len(), 2);
     }

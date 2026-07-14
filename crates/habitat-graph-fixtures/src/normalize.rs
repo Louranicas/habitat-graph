@@ -1,4 +1,4 @@
-//! Reduce our [`Graph`](habitat_graph_core::Graph) to a [`NormalizedGraph`](crate::NormalizedGraph).
+//! Reduce our [`Graph`] to a [`NormalizedGraph`].
 //!
 //! The conversion is label-keyed and endpoint-safe:
 //!
@@ -93,6 +93,7 @@ mod tests {
         Graph {
             schema: SCHEMA_VERSION.to_owned(),
             nodes,
+            node_content_ids: std::collections::BTreeMap::default(),
             edges,
             communities: Vec::new(),
             manifest: Manifest::default(),

@@ -1,9 +1,10 @@
 //! `habitat-graph-core` — the stable vocabulary of the habitat-graph knowledge-graph engine.
 //!
 //! This crate is **vocabulary, not behaviour** (Module Structure Plan, Design Rule 1): it owns the
-//! interned [`ids`], the source [`span`], the [`confidence`] trust-signal, the graph [`schema`]
-//! (the `graph.json` wire truth, byte-compatible with the graphify exemplar), and the [`error`]
-//! taxonomy. It performs **no** filesystem, network, terminal, parser, or git operation.
+//! interned [`ids`], the source [`span`], the [`confidence`] trust-signal, the canonical internal
+//! graph [`schema`], and the [`error`] taxonomy. Public graphify-compatible `graph.json` is a
+//! deterministic redacted projection owned by `habitat-graph-export`. Core performs **no**
+//! filesystem, network, terminal, parser, or git operation.
 //!
 //! See `ai_docs/05_INTERFACE_CONTRACTS.md` §1 (schema) and §9 (errors) for the contracts this
 //! crate implements, and `docs/MODULE_STRUCTURE_PLAN.md` for its place in the workspace.
@@ -21,7 +22,11 @@ pub mod span;
 pub use confidence::Confidence;
 pub use error::{GraphError, Result};
 pub use extraction::{Extraction, RawEdge, RawNode};
-pub use guard::{confine_to, display_safe, sanitize_label, screen_for_secrets, validate_url};
+pub use guard::{
+    confine_to, display_safe, is_canonical_redaction_marker, project_public_relation,
+    redact_public_text, sanitize_label, screen_for_secrets, validate_url, PublicRelationProjector,
+    SECRET_TAG_ORDER,
+};
 pub use ids::{content_id, CommunityId, EdgeId, NodeId};
 pub use schema::{Community, Edge, Graph, InputRecord, Manifest, Node, SCHEMA_VERSION};
 pub use span::Span;

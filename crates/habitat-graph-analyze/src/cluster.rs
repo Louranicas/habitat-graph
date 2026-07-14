@@ -9,7 +9,7 @@
 //!
 //! # Determinism
 //!
-//! The algorithm uses a fixed internal seed ([`LEIDEN_SEED`]) so that every call on the same
+//! The algorithm uses a fixed internal seed (`LEIDEN_SEED`) so that every call on the same
 //! graph structure yields byte-identical results. The output is additionally canonicalised:
 //! members within each community are sorted ascending, and communities are ordered by their
 //! smallest member [`NodeId`] before [`CommunityId`]s are assigned.
@@ -33,7 +33,7 @@ const LEIDEN_SEED: u64 = 0xDEAD_BEEF_CAFE_1234;
 ///   member [`NodeId`].
 /// - `members` within each [`Community`] sorted in ascending [`NodeId`] order.
 ///
-/// The algorithm uses a fixed RNG seed ([`LEIDEN_SEED`]) so that repeated calls on the same
+/// The algorithm uses a fixed RNG seed (`LEIDEN_SEED`) so that repeated calls on the same
 /// graph produce identical results.
 ///
 /// # Isolation policy
@@ -171,6 +171,7 @@ mod tests {
         Graph {
             schema: SCHEMA_VERSION.to_owned(),
             nodes: node_ids.iter().copied().map(make_node).collect(),
+            node_content_ids: std::collections::BTreeMap::default(),
             edges: edges
                 .iter()
                 .copied()

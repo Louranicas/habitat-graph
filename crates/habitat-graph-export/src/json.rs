@@ -3,9 +3,12 @@
 use std::collections::HashMap;
 
 use habitat_graph_core::{
-    display_safe, sanitize_label, Graph, GraphError, NodeId, Result, SCHEMA_VERSION,
+    display_safe, is_canonical_redaction_marker, sanitize_label, Graph, GraphError, NodeId, Result,
+    SCHEMA_VERSION,
 };
 use serde_json::Value;
+
+use crate::escape::{project_public_edges, redact_public_text};
 
 /// Renders `graph` as `NetworkX` node-link JSON.
 ///
@@ -16,8 +19,9 @@ use serde_json::Value;
 ///
 /// Each node entry:
 /// ```json
-/// { "id": <u32>, "label": <str>, "source_file": <str>,
-///   "source_location": "L<n>", "community": <u32 | null> }
+/// { "id": <u32>, "content_id": <optional u32 for displaced redacted nodes>,
+///   "label": <str>, "source_file": <str>, "source_location": "L<n>",
+///   "community": <u32 | null> }
 /// ```
 ///
 /// Each link entry:
@@ -30,14 +34,17 @@ use serde_json::Value;
 /// `community` is the [`CommunityId`](habitat_graph_core::CommunityId) integer when the node
 /// appears in `graph.communities`, or JSON `null` otherwise.
 ///
-/// Output is fully deterministic: node and link arrays follow the order of `graph.nodes` /
-/// `graph.edges` as given — call [`Graph::sorted`](habitat_graph_core::Graph::sorted) first to
-/// obtain the canonical R4 ordering.  String fields are sanitised with
-/// [`sanitize_label`] and render-escaped with [`display_safe`] before embedding.
+/// Output is fully deterministic: nodes follow `graph.nodes`, while links are ordered by source,
+/// target, projected relation, and confidence before redacted relation ordinals are assigned.
+/// Call [`Graph::sorted`](habitat_graph_core::Graph::sorted) first to obtain canonical node and
+/// community ordering. String fields are sanitised with
+/// [`sanitize_label`], redacted with the shared public-output policy, and render-escaped with
+/// [`display_safe`] before embedding. Redaction changes display fields only; node ids and topology
+/// remain untouched.
 ///
 /// # Errors
 ///
-/// Returns [`GraphError::Schema`](habitat_graph_core::GraphError::Schema) if
+/// Returns [`GraphError::Schema`] if
 /// [`serde_json`] serialization fails (in practice, only if a [`serde_json::Number`] is
 /// non-finite, which cannot occur here).
 pub fn to_node_link(graph: &Graph) -> Result<String> {
@@ -62,21 +69,30 @@ pub fn to_node_link(graph: &Graph) -> Result<String> {
                 .get(&node.id)
                 .copied()
                 .map_or(Value::Null, Value::from);
-            serde_json::json!({
+            let redacted_label = redact_public_text(&node.label);
+            let redacted_source_file = redact_public_text(&node.source_file);
+            let mut value = serde_json::json!({
                 "id": node.id.get(),
-                "label": display_safe(&sanitize_label(&node.label)),
-                "source_file": display_safe(&node.source_file),
+                "label": display_safe(&sanitize_label(&redacted_label)),
+                "source_file": display_safe(&redacted_source_file),
                 "source_location": format!("L{}", node.source_location.start_line),
                 "community": community,
-            })
+            });
+            let content_id = graph.node_content_id(node.id);
+            if content_id != node.id && is_canonical_redaction_marker(&redacted_label) {
+                if let Value::Object(fields) = &mut value {
+                    fields.insert("content_id".to_owned(), Value::from(content_id.get()));
+                }
+            }
+            value
         })
         .collect();
 
     // Build links array.
-    let links: Vec<Value> = graph
-        .edges
-        .iter()
-        .map(|edge| {
+    let links: Vec<Value> = project_public_edges(graph)
+        .into_iter()
+        .map(|projected| {
+            let edge = projected.edge;
             // weight: 1.0 for EXTRACTED (trusted), 0.8 for INFERRED / AMBIGUOUS.
             let weight: f64 = if edge.confidence.is_trusted() {
                 1.0
@@ -86,7 +102,7 @@ pub fn to_node_link(graph: &Graph) -> Result<String> {
             serde_json::json!({
                 "source": edge.source.get(),
                 "target": edge.target.get(),
-                "relation": display_safe(&sanitize_label(&edge.relation)),
+                "relation": display_safe(&sanitize_label(&projected.relation)),
                 "confidence": edge.confidence.as_str(),
                 "weight": weight,
             })
@@ -228,6 +244,19 @@ mod tests {
         let v = parse(&to_node_link(&g).unwrap());
         assert_eq!(v["nodes"].as_array().unwrap().len(), 2);
         assert_eq!(v["links"].as_array().unwrap().len(), 1);
+    }
+
+    #[test]
+    fn collision_displaced_node_emits_original_content_id() {
+        let mut g = Graph::new();
+        g.nodes
+            .push(node(2, "[REDACTED:api_key]", "src/alpha.rs", 10));
+        g.node_content_ids.insert(NodeId::new(2), NodeId::new(1));
+
+        let v = parse(&to_node_link(&g).unwrap());
+
+        assert_eq!(v["nodes"][0]["id"], 2);
+        assert_eq!(v["nodes"][0]["content_id"], 1);
     }
 
     // ── 9: source_location renders "L<n>" ────────────────────────────────────
@@ -523,6 +552,97 @@ mod tests {
     }
 
     // ── security: edge relation passes through display_safe (judge gap) ──────────
+
+    #[test]
+    fn node_label_secret_pattern_is_redacted_without_changing_id() {
+        let mut g = Graph::new();
+        g.nodes
+            .push(node(41, "api_key_assignment_refused", "src/privacy.rs", 1));
+        let v = parse(&to_node_link(&g).unwrap());
+        assert_eq!(v["nodes"][0]["id"], 41);
+        assert_eq!(v["nodes"][0]["label"], "[REDACTED:api_key]");
+        assert!(!to_node_link(&g)
+            .unwrap()
+            .contains("api_key_assignment_refused"));
+    }
+
+    #[test]
+    fn source_file_and_relation_secret_patterns_are_redacted() {
+        let mut g = Graph::new();
+        g.nodes.push(node(1, "A", "src/api_key/private.rs", 1));
+        g.edges.push(edge(
+            1,
+            1,
+            "Authorization: Bearer token",
+            Confidence::Extracted,
+        ));
+        let v = parse(&to_node_link(&g).unwrap());
+        assert_eq!(v["nodes"][0]["source_file"], "[REDACTED:api_key]");
+        let relation = v["links"][0]["relation"].as_str().expect("relation");
+        assert_eq!(relation, "[REDACTED:bearer_token]#e00000000000000000000");
+    }
+
+    #[test]
+    fn distinct_redacted_relations_keep_stable_non_secret_identity() {
+        let mut g = Graph::new();
+        g.edges
+            .push(edge(1, 2, "api_key=alpha", Confidence::Extracted));
+        g.edges
+            .push(edge(1, 2, "api_key=beta", Confidence::Extracted));
+        let first = parse(&to_node_link(&g).unwrap());
+        let relations: Vec<&str> = first["links"]
+            .as_array()
+            .expect("links")
+            .iter()
+            .filter_map(|link| link["relation"].as_str())
+            .collect();
+        assert_eq!(relations.len(), 2);
+        assert_ne!(relations[0], relations[1]);
+        assert!(relations
+            .iter()
+            .all(|relation| relation.starts_with("[REDACTED:api_key]#e")));
+        assert!(!to_node_link(&g).unwrap().contains("api_key=alpha"));
+    }
+
+    #[test]
+    fn redacted_relation_order_uses_only_public_edge_fields() {
+        let mut first = Graph::new();
+        first
+            .edges
+            .push(edge(1, 2, "api_key=alpha", Confidence::Ambiguous));
+        first
+            .edges
+            .push(edge(1, 2, "api_key=zulu", Confidence::Extracted));
+
+        let mut swapped = Graph::new();
+        swapped
+            .edges
+            .push(edge(1, 2, "api_key=alpha", Confidence::Extracted));
+        swapped
+            .edges
+            .push(edge(1, 2, "api_key=zulu", Confidence::Ambiguous));
+
+        let first_public = to_node_link(&first).unwrap();
+        let swapped_public = to_node_link(&swapped).unwrap();
+        assert_eq!(first_public, swapped_public);
+        let value = parse(&first_public);
+        assert_eq!(value["links"][0]["confidence"], "EXTRACTED");
+        assert_eq!(value["links"][1]["confidence"], "AMBIGUOUS");
+    }
+
+    #[test]
+    fn projected_relation_identity_is_idempotent() {
+        let mut g = Graph::new();
+        g.edges
+            .push(edge(1, 2, "api_key=alpha", Confidence::Extracted));
+        let first = to_node_link(&g).unwrap();
+        let projected = parse(&first)["links"][0]["relation"]
+            .as_str()
+            .expect("relation")
+            .to_owned();
+        g.edges[0].relation = projected;
+        assert_eq!(to_node_link(&g).unwrap(), first);
+    }
 
     #[test]
     fn edge_relation_bidi_override_is_render_safe() {

@@ -2,7 +2,8 @@
 //!
 //! # Dangling-edge policy
 //!
-//! An edge whose `source` or `target` label does not appear in any [`RawNode`] across the full
+//! An edge whose `source` or `target` label does not appear in any
+//! [`RawNode`](habitat_graph_core::RawNode) across the full
 //! set of extractions is silently **dropped**. This happens when an extractor emits a relationship
 //! referencing a symbol that was never extracted as a node — for example because that symbol lives
 //! in an un-scanned file or was filtered out. Callers that need to preserve such edges should
@@ -29,7 +30,7 @@ use habitat_graph_core::{content_id, Edge, Extraction, Graph, Node, NodeId};
 ///    endpoint label is absent the edge is silently dropped (see the *dangling-edge policy* in the
 ///    module-level documentation).
 ///
-/// 3. **Deduplication** — [`crate::dedup`] removes duplicate nodes (same id) and duplicate edges
+/// 3. **Deduplication** — [`crate::dedup()`] removes duplicate nodes (same id) and duplicate edges
 ///    (same `source`/`target`/`relation`); first occurrence wins.
 ///
 /// 4. **Sorting** — [`Graph::sorted`] canonicalises collection order so serialized output is
@@ -56,7 +57,11 @@ pub fn assemble(extractions: Vec<Extraction>) -> Graph {
             // The Entry API avoids a double-lookup: `entry` checks and potentially inserts in
             // one operation.  Occupied → duplicate label, skip silently.
             if let Entry::Vacant(slot) = interner.entry(raw_node.label.clone()) {
+                let content_id = NodeId::new(content_id(&raw_node.label));
                 let id = NodeId::new(assign_unique_content_id(&raw_node.label, &mut used_ids));
+                if id != content_id {
+                    graph.node_content_ids.insert(id, content_id);
+                }
                 slot.insert(id);
                 graph.nodes.push(Node {
                     id,
@@ -226,14 +231,15 @@ mod tests {
         // FO-4: each node's id is content_id(label), independent of first-seen order, so adding a
         // symbol never renumbers the others. All three labels are present with their content ids.
         for n in &g.nodes {
-            assert_eq!(n.id.get(), content_id(&n.label), "id must be content_id(label)");
+            assert_eq!(
+                n.id.get(),
+                content_id(&n.label),
+                "id must be content_id(label)"
+            );
         }
         let labels: std::collections::BTreeSet<&str> =
             g.nodes.iter().map(|n| n.label.as_str()).collect();
-        assert_eq!(
-            labels,
-            ["First", "Second", "Third"].into_iter().collect()
-        );
+        assert_eq!(labels, ["First", "Second", "Third"].into_iter().collect());
     }
 
     // ── 8. edge with unknown target is dropped ────────────────────────────────

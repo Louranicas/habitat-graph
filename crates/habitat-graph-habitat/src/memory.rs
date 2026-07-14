@@ -13,7 +13,7 @@
 //! # Boundary
 //!
 //! All storage is behind the [`MemorySink`] trait. Tests inject [`InMemorySink`] (no disk,
-//! no network, no processes). The concrete [`SqliteSink`] — backed by `rusqlite` with bound
+//! no network, no processes). The concrete `SqliteSink` — backed by `rusqlite` with bound
 //! `?` parameters exclusively — is compiled only with `feature = "live"`.
 
 use habitat_graph_core::{sanitize_label, GraphError, Result};
@@ -62,7 +62,7 @@ pub struct PovmPathway {
 ///
 /// Implementations must be `Send + Sync` so they can be shared across threads.
 /// The in-crate test double is [`InMemorySink`]; production wires the `live`-feature
-/// [`SqliteSink`].
+/// `SqliteSink`.
 ///
 /// # Errors
 ///
@@ -206,13 +206,11 @@ pub fn persist_graph_summary<S: MemorySink>(
         resolved_session: None,
     };
     sink.write_causal_chain(&row)?;
-    let read_back = sink
-        .read_back_chain(&label)?
-        .ok_or_else(|| {
-            GraphError::Daemon(
-                "persist_graph_summary: read-back returned None — write did not persist".into(),
-            )
-        })?;
+    let read_back = sink.read_back_chain(&label)?.ok_or_else(|| {
+        GraphError::Daemon(
+            "persist_graph_summary: read-back returned None — write did not persist".into(),
+        )
+    })?;
     if read_back != row {
         return Err(GraphError::Daemon(format!(
             "persist_graph_summary: read-back mismatch — written {row:?}, got {read_back:?}"
@@ -260,9 +258,8 @@ impl SqliteSink {
     ///
     /// Returns [`GraphError::Io`] if the database cannot be opened or the DDL fails.
     pub fn new(db_path: &str) -> Result<Self> {
-        let conn = rusqlite::Connection::open(db_path).map_err(|e| {
-            GraphError::Io(format!("SqliteSink: cannot open {db_path}: {e}"))
-        })?;
+        let conn = rusqlite::Connection::open(db_path)
+            .map_err(|e| GraphError::Io(format!("SqliteSink: cannot open {db_path}: {e}")))?;
         conn.execute_batch(
             "CREATE TABLE IF NOT EXISTS causal_chain (
                  label               TEXT    PRIMARY KEY,
@@ -322,20 +319,15 @@ impl MemorySink for SqliteSink {
                  VALUES (?1, ?2, ?3, ?4)",
                 rusqlite::params![p.namespace, p.from_key, p.to_key, p.weight],
             )
-            .map_err(|e| {
-                GraphError::Daemon(format!("SqliteSink: write_pathway failed: {e}"))
-            })?;
+            .map_err(|e| GraphError::Daemon(format!("SqliteSink: write_pathway failed: {e}")))?;
         Ok(())
     }
 
     fn read_back_chain(&self, label: &str) -> Result<Option<CausalChainRow>> {
         use rusqlite::OptionalExtension as _;
-        let guard = self
-            .conn
-            .lock()
-            .map_err(|_| {
-                GraphError::Daemon("SqliteSink: connection mutex poisoned on read".into())
-            })?;
+        let guard = self.conn.lock().map_err(|_| {
+            GraphError::Daemon("SqliteSink: connection mutex poisoned on read".into())
+        })?;
         let mut stmt = guard
             .prepare(
                 "SELECT label, session, reinforcement_count, resolved_session \
@@ -352,9 +344,7 @@ impl MemorySink for SqliteSink {
                 })
             })
             .optional()
-            .map_err(|e| {
-                GraphError::Daemon(format!("SqliteSink: read_back_chain failed: {e}"))
-            })?;
+            .map_err(|e| GraphError::Daemon(format!("SqliteSink: read_back_chain failed: {e}")))?;
         Ok(result)
     }
 }
@@ -513,7 +503,8 @@ mod tests {
     #[test]
     fn read_back_none_for_different_label() {
         let sink = InMemorySink::new();
-        sink.write_causal_chain(&sample_row("chain-alpha")).expect("write");
+        sink.write_causal_chain(&sample_row("chain-alpha"))
+            .expect("write");
         let result = sink.read_back_chain("chain-beta").expect("read");
         assert!(result.is_none(), "wrong label must return None");
     }
@@ -535,24 +526,21 @@ mod tests {
         };
         sink.write_causal_chain(&first).expect("write first");
         sink.write_causal_chain(&second).expect("write second");
-        let back = sink
-            .read_back_chain("key")
-            .expect("read")
-            .expect("present");
+        let back = sink.read_back_chain("key").expect("read").expect("present");
         assert_eq!(back, second);
     }
 
     #[test]
     fn multiple_chains_are_independently_stored() {
         let sink = InMemorySink::new();
-        sink.write_causal_chain(&sample_row("chain-1")).expect("write 1");
-        sink.write_causal_chain(&sample_row("chain-2")).expect("write 2");
-        sink.write_causal_chain(&sample_row("chain-3")).expect("write 3");
+        sink.write_causal_chain(&sample_row("chain-1"))
+            .expect("write 1");
+        sink.write_causal_chain(&sample_row("chain-2"))
+            .expect("write 2");
+        sink.write_causal_chain(&sample_row("chain-3"))
+            .expect("write 3");
         for label in ["chain-1", "chain-2", "chain-3"] {
-            let back = sink
-                .read_back_chain(label)
-                .expect("read")
-                .expect("present");
+            let back = sink.read_back_chain(label).expect("read").expect("present");
             assert_eq!(back.label, label);
         }
     }
@@ -762,8 +750,8 @@ mod tests {
     #[test]
     fn persist_summary_happy_path_returns_correct_row() {
         let sink = InMemorySink::new();
-        let row = persist_graph_summary(&sink, "sess-X", (10, 20, 3))
-            .expect("persist should succeed");
+        let row =
+            persist_graph_summary(&sink, "sess-X", (10, 20, 3)).expect("persist should succeed");
         assert_eq!(row.label, sanitize_label("habitat-graph-extract"));
         assert_eq!(row.reinforcement_count, 0);
         assert!(row.resolved_session.is_none());
@@ -791,7 +779,11 @@ mod tests {
         let row = persist_graph_summary(&sink, "session-id", (7, 14, 3)).expect("ok");
         assert!(row.session.contains("nodes=7"), "session={}", row.session);
         assert!(row.session.contains("edges=14"), "session={}", row.session);
-        assert!(row.session.contains("communities=3"), "session={}", row.session);
+        assert!(
+            row.session.contains("communities=3"),
+            "session={}",
+            row.session
+        );
     }
 
     #[test]
@@ -903,7 +895,10 @@ mod tests {
         let err = persist_graph_summary(&sink, "sess", (0, 0, 0)).expect_err("must fail");
         let msg = err.to_string();
         // The Daemon error message must contain useful context for debugging.
-        assert!(msg.contains("mismatch") || msg.contains("tampered"), "{msg}");
+        assert!(
+            msg.contains("mismatch") || msg.contains("tampered"),
+            "{msg}"
+        );
     }
 
     #[test]
@@ -990,7 +985,8 @@ mod tests {
     fn concurrent_mixed_reads_and_writes_are_sound() {
         let sink = Arc::new(InMemorySink::new());
         // Pre-populate one chain.
-        sink.write_causal_chain(&sample_row("stable")).expect("pre-write");
+        sink.write_causal_chain(&sample_row("stable"))
+            .expect("pre-write");
         let mut handles = Vec::new();
         for i in 0_u32..10 {
             let s = Arc::clone(&sink);
@@ -1086,7 +1082,8 @@ mod tests {
     #[test]
     fn read_back_chain_is_case_sensitive() {
         let sink = InMemorySink::new();
-        sink.write_causal_chain(&sample_row("lowercase")).expect("write");
+        sink.write_causal_chain(&sample_row("lowercase"))
+            .expect("write");
         let upper = sink.read_back_chain("LOWERCASE").expect("read");
         assert!(upper.is_none(), "label lookup must be case-sensitive");
     }
@@ -1135,7 +1132,9 @@ mod tests {
     #[test]
     fn sqlite_sink_read_back_none_for_missing_label() {
         let sink = in_memory_sqlite_sink();
-        let result = sink.read_back_chain("never-written").expect("read succeeds");
+        let result = sink
+            .read_back_chain("never-written")
+            .expect("read succeeds");
         assert!(result.is_none(), "missing label must return None");
     }
 
@@ -1184,8 +1183,8 @@ mod tests {
     #[test]
     fn sqlite_sink_persist_graph_summary_roundtrip() {
         let sink = in_memory_sqlite_sink();
-        let row = persist_graph_summary(&sink, "live-session", (5, 10, 2))
-            .expect("persist must succeed");
+        let row =
+            persist_graph_summary(&sink, "live-session", (5, 10, 2)).expect("persist must succeed");
         assert_eq!(row.label, sanitize_label("habitat-graph-extract"));
         assert!(
             row.session.contains("live-session"),

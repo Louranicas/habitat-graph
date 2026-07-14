@@ -63,9 +63,12 @@ id_type!(
 ///
 /// Content-addressing makes a node's id a pure function of its label, so adding or removing one
 /// symbol does **not** renumber the others — `graph.json` diffs stay minimal (R4) and the 3-way
-/// merge driver stays stable across rebuilds. Two distinct labels can (astronomically rarely, for
-/// in-scope graph sizes) collide in `u32`; the assembler resolves a collision by probing forward
-/// deterministically, so the function itself need not be injective.
+/// merge driver stays stable across rebuilds. Renaming the label changes this id. Public exporters
+/// preserve the original id when redacting a label, which retains topology but lets a reader test
+/// low-entropy label guesses against the published id; redaction is not anonymization. Two distinct
+/// labels can (astronomically rarely, for in-scope graph sizes) collide in `u32`; the assembler
+/// resolves a collision by probing forward deterministically, so the function itself need not be
+/// injective.
 #[must_use]
 pub fn content_id(label: &str) -> u32 {
     let hash = blake3::hash(label.as_bytes());

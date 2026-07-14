@@ -12,7 +12,7 @@
 //!    (see [`protocol::parse_semantic`]).
 //! 3. **Testable without a network.** Network adapters ([`OllamaBackend`], [`OpenAiCompatBackend`])
 //!    are generic over an [`HttpTransport`]; tests inject [`StaticTransport`]. The concrete
-//!    [`UreqTransport`] lives behind the `net` feature so the default build and gate stay dep-light.
+//!    `UreqTransport` lives behind the `net` feature so the default build and gate stay dep-light.
 //!
 //! The production path that routes through the factory's TIERWRIGHT router (`:8201`) is the
 //! `habitat-graph-habitat` crate's `tierwright` module (L8), which implements [`Backend`].

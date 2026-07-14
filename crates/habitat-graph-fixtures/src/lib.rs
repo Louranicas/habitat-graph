@@ -2,7 +2,8 @@
 //!
 //! Compares habitat-graph output to graphify's committed node-link goldens by reducing both to
 //! **label-keyed sets** (the cross-implementation common denominator, since the two assign different
-//! node ids). [`from_golden`] loads a graphify golden; [`from_core`] reduces our [`Graph`]; [`classify`]
+//! node ids). [`from_golden`] loads a graphify golden; [`from_core`] reduces our
+//! [`Graph`](habitat_graph_core::Graph); [`classify`]
 //! produces a [`ParityReport`]. Parity is CONTENT-equivalence on the node set + structural relations
 //! (`contains`/`method`/`inherits`/`imports_from`); `calls`/`uses` are heuristic and reported separately.
 #![forbid(unsafe_code)]

@@ -1,4 +1,4 @@
-//! `GRAPH_REPORT.md` generation — the human-facing summary.
+//! `GRAPH_REPORT.md` generation — the human-facing, deterministically redacted summary.
 
 use std::collections::HashMap;
 use std::fmt::Write as _;
@@ -6,8 +6,10 @@ use std::fmt::Write as _;
 use habitat_graph_analyze::degree_centrality;
 use habitat_graph_core::{display_safe, Graph, NodeId};
 
+use crate::escape::{markdown_code_span, markdown_text, redact_public_text};
+
 /// Renders a deterministic Markdown report: node/edge/community counts, the top hubs (by
-/// [`degree_centrality`](habitat_graph_analyze::degree_centrality)), a per-community summary, and a
+/// [`degree_centrality`]), a per-community summary, and a
 /// few suggested queries. Infallible (returns the Markdown string).
 ///
 /// ## Sections
@@ -19,10 +21,11 @@ use habitat_graph_core::{display_safe, Graph, NodeId};
 /// | Communities | One bullet per community showing its member count, sorted by community id. |
 /// | Suggested Queries | 2–3 natural-language starters referencing the top hub label(s). |
 ///
-/// Hubs are ranked by degree (descending), then by [`NodeId`](habitat_graph_core::NodeId)
-/// (ascending) on a tie, matching [`degree_centrality`](habitat_graph_analyze::degree_centrality)'s
-/// guarantee. All labels pass through [`display_safe`](habitat_graph_core::display_safe) before
-/// appearing in the output, providing Trojan-Source and bidi protection.
+/// Hubs are ranked by degree (descending), then by [`NodeId`]
+/// (ascending) on a tie, matching [`degree_centrality`]'s
+/// guarantee. All labels first use the shared deterministic secret redaction, then pass through
+/// [`display_safe`] and Markdown escaping before appearing in the
+/// output. Redaction does not change the reported graph counts, hub degrees, or community sizes.
 #[allow(clippy::module_name_repetitions)]
 #[must_use]
 pub fn render_report(graph: &Graph) -> String {
@@ -59,7 +62,8 @@ pub fn render_report(graph: &Graph) -> String {
         out.push_str("_none_\n");
     } else {
         for &(label, degree) in &top_hubs {
-            let safe_label = display_safe(label);
+            let redacted_label = redact_public_text(label);
+            let safe_label = markdown_text(&display_safe(&redacted_label));
             let _ = writeln!(out, "- {safe_label} ({degree})");
         }
     }
@@ -103,20 +107,23 @@ fn push_suggested_queries(out: &mut String, top_hubs: &[(&str, usize)]) {
         }
         (Some(first), None) => {
             // Single hub — two specific queries + a generic path query.
-            let safe = display_safe(first);
-            let _ = writeln!(out, "- Show all edges connected to `{safe}`");
-            let _ = writeln!(out, "- Which nodes does `{safe}` depend on?");
+            let redacted = redact_public_text(first);
+            let safe = markdown_code_span(&display_safe(&redacted));
+            let _ = writeln!(out, "- Show all edges connected to {safe}");
+            let _ = writeln!(out, "- Which nodes does {safe} depend on?");
             out.push_str("- Find the shortest path between any two nodes\n");
         }
         (Some(first), Some(second)) => {
             // Two or more hubs — three queries referencing the top two.
-            let safe_first = display_safe(first);
-            let safe_second = display_safe(second);
-            let _ = writeln!(out, "- Show all edges connected to `{safe_first}`");
-            let _ = writeln!(out, "- Which community contains `{safe_second}`?");
+            let redacted_first = redact_public_text(first);
+            let redacted_second = redact_public_text(second);
+            let safe_first = markdown_code_span(&display_safe(&redacted_first));
+            let safe_second = markdown_code_span(&display_safe(&redacted_second));
+            let _ = writeln!(out, "- Show all edges connected to {safe_first}");
+            let _ = writeln!(out, "- Which community contains {safe_second}?");
             let _ = writeln!(
                 out,
-                "- Find the path between `{safe_first}` and `{safe_second}`"
+                "- Find the path between {safe_first} and {safe_second}"
             );
         }
     }
@@ -550,6 +557,27 @@ mod tests {
     }
 
     // ── 22. Single-node graph: one hub listed, not truncated ─────────────────
+
+    #[test]
+    fn secret_pattern_hub_is_redacted_in_hub_and_suggestions() {
+        let mut g = Graph::new();
+        g.nodes.push(make_node(1, "api_key_assignment_refused"));
+        g.edges.push(make_edge(1, 1));
+        let report = render_report(&g);
+        assert!(!report.contains("api_key_assignment_refused"));
+        assert!(report.contains("[REDACTED:api_key]"));
+    }
+
+    #[test]
+    fn markdown_entities_cannot_reconstruct_secret_hub_labels() {
+        let mut g = Graph::new();
+        g.nodes.push(make_node(1, "api&#95;key=SECRET"));
+        g.edges.push(make_edge(1, 1));
+
+        let report = render_report(&g);
+        assert!(!report.contains("api&#95;key=SECRET"));
+        assert!(report.contains("[REDACTED:api_key]"));
+    }
 
     #[test]
     fn single_node_produces_one_hub_entry() {

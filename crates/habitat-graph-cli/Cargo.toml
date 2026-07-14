@@ -25,6 +25,8 @@ habitat-graph-export = { workspace = true }
 habitat-graph-serve = { workspace = true }
 habitat-graph-daemon = { workspace = true }
 serde_json = { workspace = true }
+blake3 = { workspace = true }
+libc = { workspace = true }
 tokio = { workspace = true }
 # PC-tail lifecycle features — feature-gated to keep the default binary dep-light
 notify = { version = "6", optional = true }

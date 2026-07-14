@@ -400,12 +400,7 @@ fn extract_namespace(
 ///
 /// Resolution: if the grammar exposes a `name` field, it is tried first; otherwise the single
 /// name-like named child is used.
-fn extract_using(
-    node: &tree_sitter::Node<'_>,
-    source: &[u8],
-    b: &str,
-    result: &mut Extraction,
-) {
+fn extract_using(node: &tree_sitter::Node<'_>, source: &[u8], b: &str, result: &mut Extraction) {
     // Collect all name-like named children in order.
     let mut name_nodes: Vec<tree_sitter::Node<'_>> = Vec::new();
     for i in 0..node.named_child_count() {
@@ -493,10 +488,12 @@ impl Extractor for CsharpExtractor {
                 message: e.to_string(),
             })?;
 
-        let tree = parser.parse(source, None).ok_or_else(|| GraphError::Parse {
-            file: source_file.clone(),
-            message: "parse returned None".into(),
-        })?;
+        let tree = parser
+            .parse(source, None)
+            .ok_or_else(|| GraphError::Parse {
+                file: source_file.clone(),
+                message: "parse returned None".into(),
+            })?;
 
         let root = tree.root_node();
 
@@ -582,7 +579,11 @@ mod tests {
     #[test]
     fn whitespace_only_source_yields_only_file_node() {
         let ex = extract("   \n\t\n   ", "empty.cs");
-        assert_eq!(ex.nodes.len(), 1, "whitespace-only must yield exactly 1 node");
+        assert_eq!(
+            ex.nodes.len(),
+            1,
+            "whitespace-only must yield exactly 1 node"
+        );
         assert_eq!(ex.nodes[0].label, "empty");
     }
 
@@ -590,7 +591,10 @@ mod tests {
     fn malformed_source_returns_ok_file_node_present() {
         // tree-sitter is error-tolerant: always produces a partial tree even for garbage.
         let ex = extract("@@@!!! NOT VALID C# ~~~", "broken.cs");
-        assert!(has_node(&ex, "broken"), "file node must be present for garbled source");
+        assert!(
+            has_node(&ex, "broken"),
+            "file node must be present for garbled source"
+        );
     }
 
     // ── B. File stem handling ──────────────────────────────────────────────────────────────────
@@ -660,7 +664,10 @@ mod tests {
     fn class_with_no_heritage_produces_no_inherits_edges() {
         let ex = extract("class Standalone { }", "s.cs");
         let inherits = ex.edges.iter().filter(|e| e.relation == "inherits").count();
-        assert_eq!(inherits, 0, "class with no base list must have 0 inherits edges");
+        assert_eq!(
+            inherits, 0,
+            "class with no base list must have 0 inherits edges"
+        );
     }
 
     // ── D. Struct declarations ─────────────────────────────────────────────────────────────────
@@ -678,7 +685,10 @@ mod tests {
     #[test]
     fn struct_name_is_fully_lowercased() {
         let ex = extract("struct Vec3D { }", "math.cs");
-        assert!(has_node(&ex, "math_vec3d"), "struct label must be lowercased");
+        assert!(
+            has_node(&ex, "math_vec3d"),
+            "struct label must be lowercased"
+        );
     }
 
     // ── E. Interface declarations ──────────────────────────────────────────────────────────────
@@ -686,7 +696,10 @@ mod tests {
     #[test]
     fn interface_declaration_emits_iface_node_and_contains_edge() {
         let ex = extract("interface IRunnable { }", "contracts.cs");
-        assert!(has_node(&ex, "contracts_irunnable"), "interface node missing");
+        assert!(
+            has_node(&ex, "contracts_irunnable"),
+            "interface node missing"
+        );
         assert!(
             has_edge(&ex, "contracts", "contracts_irunnable", "contains"),
             "contains edge missing for interface"
@@ -696,12 +709,18 @@ mod tests {
     #[test]
     fn interface_name_is_fully_lowercased() {
         let ex = extract("interface IHTTPHandler { }", "iface.cs");
-        assert!(has_node(&ex, "iface_ihttphandler"), "interface label must be lowercased");
+        assert!(
+            has_node(&ex, "iface_ihttphandler"),
+            "interface label must be lowercased"
+        );
     }
 
     #[test]
     fn multiple_interfaces_all_emitted() {
-        let ex = extract("interface IA { } interface IB { } interface IC { }", "ifaces.cs");
+        let ex = extract(
+            "interface IA { } interface IB { } interface IC { }",
+            "ifaces.cs",
+        );
         assert!(has_node(&ex, "ifaces_ia"));
         assert!(has_node(&ex, "ifaces_ib"));
         assert!(has_node(&ex, "ifaces_ic"));
@@ -724,7 +743,10 @@ mod tests {
     #[test]
     fn enum_name_is_fully_lowercased() {
         let ex = extract("enum HTTPMethod { GET, POST, PUT }", "http.cs");
-        assert!(has_node(&ex, "http_httpmethod"), "enum label must be lowercased");
+        assert!(
+            has_node(&ex, "http_httpmethod"),
+            "enum label must be lowercased"
+        );
     }
 
     #[test]
@@ -732,7 +754,10 @@ mod tests {
         // `enum Status : byte` — the `: byte` is the underlying type, NOT inheritance.
         let ex = extract("enum Status : byte { Active, Inactive }", "status.cs");
         let inherits = ex.edges.iter().filter(|e| e.relation == "inherits").count();
-        assert_eq!(inherits, 0, "enum underlying-type base_list must not produce inherits edges");
+        assert_eq!(
+            inherits, 0,
+            "enum underlying-type base_list must not produce inherits edges"
+        );
     }
 
     // ── G. Method extraction ───────────────────────────────────────────────────────────────────
@@ -813,7 +838,10 @@ mod tests {
     #[test]
     fn struct_methods_emitted_same_as_class_methods() {
         let ex = extract("struct Point { void Scale(float f) { } }", "geo.cs");
-        assert!(has_node(&ex, "geo_point_scale"), "struct method node missing");
+        assert!(
+            has_node(&ex, "geo_point_scale"),
+            "struct method node missing"
+        );
         assert!(has_edge(&ex, "geo_point", "geo_point_scale", "method"));
     }
 
@@ -861,9 +889,18 @@ mod tests {
     #[test]
     fn class_with_multiple_bases_all_emit_inherits_edges() {
         let ex = extract("class Dog : Animal, IRunnable, ICloneable { }", "m.cs");
-        assert!(has_edge(&ex, "animal", "m_dog", "inherits"), "Animal edge missing");
-        assert!(has_edge(&ex, "irunnable", "m_dog", "inherits"), "IRunnable edge missing");
-        assert!(has_edge(&ex, "icloneable", "m_dog", "inherits"), "ICloneable edge missing");
+        assert!(
+            has_edge(&ex, "animal", "m_dog", "inherits"),
+            "Animal edge missing"
+        );
+        assert!(
+            has_edge(&ex, "irunnable", "m_dog", "inherits"),
+            "IRunnable edge missing"
+        );
+        assert!(
+            has_edge(&ex, "icloneable", "m_dog", "inherits"),
+            "ICloneable edge missing"
+        );
         let inherits = ex.edges.iter().filter(|e| e.relation == "inherits").count();
         assert_eq!(inherits, 3, "expected 3 inherits edges");
     }
@@ -922,7 +959,8 @@ mod tests {
         // The edge target must be lowercase.
         for edge in ex.edges.iter().filter(|e| e.relation == "imports_from") {
             assert_eq!(
-                edge.target, edge.target.to_lowercase(),
+                edge.target,
+                edge.target.to_lowercase(),
                 "imports_from target must be lowercased; got {:?}",
                 edge.target
             );
@@ -933,15 +971,26 @@ mod tests {
     fn multiple_usings_all_emit_imports_from_edges() {
         let src = "using System;\nusing System.IO;\nusing System.Text;";
         let ex = extract(src, "prog.cs");
-        let imports = ex.edges.iter().filter(|e| e.relation == "imports_from").count();
-        assert_eq!(imports, 3, "three using directives must emit 3 imports_from edges");
+        let imports = ex
+            .edges
+            .iter()
+            .filter(|e| e.relation == "imports_from")
+            .count();
+        assert_eq!(
+            imports, 3,
+            "three using directives must emit 3 imports_from edges"
+        );
     }
 
     #[test]
     fn aliased_using_does_not_emit_imports_from_edge() {
         // `using Alias = Something;` should be skipped.
         let ex = extract("using IO = System.IO;", "prog.cs");
-        let imports = ex.edges.iter().filter(|e| e.relation == "imports_from").count();
+        let imports = ex
+            .edges
+            .iter()
+            .filter(|e| e.relation == "imports_from")
+            .count();
         assert_eq!(
             imports, 0,
             "aliased using directive must not emit imports_from edge; edges: {:?}",
@@ -970,8 +1019,14 @@ mod tests {
         let ex_ns = extract("namespace Ns { class Bar { } }", "f.cs");
         let ex_top = extract("class Bar { }", "f.cs");
         // Both should produce a node labeled "f_bar".
-        assert!(has_node(&ex_ns, "f_bar"), "namespace-nested type label must match top-level format");
-        assert!(has_node(&ex_top, "f_bar"), "top-level type label must match expected format");
+        assert!(
+            has_node(&ex_ns, "f_bar"),
+            "namespace-nested type label must match top-level format"
+        );
+        assert!(
+            has_node(&ex_top, "f_bar"),
+            "top-level type label must match expected format"
+        );
     }
 
     #[test]
@@ -1059,7 +1114,10 @@ mod tests {
     fn class_on_first_line_has_start_line_one() {
         let ex = extract("class Foo { }", "x.cs");
         let n = node(&ex, "x_foo");
-        assert_eq!(n.span.start_line, 1, "class on line 1 must have start_line=1");
+        assert_eq!(
+            n.span.start_line, 1,
+            "class on line 1 must have start_line=1"
+        );
     }
 
     #[test]
@@ -1067,7 +1125,10 @@ mod tests {
         let src = "\n\nclass Late { }";
         let ex = extract(src, "y.cs");
         let n = node(&ex, "y_late");
-        assert_eq!(n.span.start_line, 3, "class on line 3 must have start_line=3");
+        assert_eq!(
+            n.span.start_line, 3,
+            "class on line 3 must have start_line=3"
+        );
     }
 
     #[test]
@@ -1138,7 +1199,10 @@ mod tests {
         );
         assert!(has_node(&ex, "chain_animal"), "animal class missing");
         assert!(has_node(&ex, "chain_dog"), "dog class missing");
-        assert!(has_node(&ex, "chain_animal_breathe"), "breathe method missing");
+        assert!(
+            has_node(&ex, "chain_animal_breathe"),
+            "breathe method missing"
+        );
         assert!(has_node(&ex, "chain_dog_bark"), "bark method missing");
         assert!(
             has_edge(&ex, "chain_animal", "chain_dog", "inherits"),
@@ -1191,10 +1255,19 @@ mod tests {
         assert!(has_node(&ex, "app_service_service"), "constructor");
         assert!(has_node(&ex, "app_service_log"), "log method");
         // inherits edges
-        assert!(has_edge(&ex, "app_base", "app_service", "inherits"), "Base inherits edge");
-        assert!(has_edge(&ex, "app_ilogger", "app_service", "inherits"), "ILogger inherits edge");
+        assert!(
+            has_edge(&ex, "app_base", "app_service", "inherits"),
+            "Base inherits edge"
+        );
+        assert!(
+            has_edge(&ex, "app_ilogger", "app_service", "inherits"),
+            "ILogger inherits edge"
+        );
         // imports
-        assert!(ex.edges.iter().any(|e| e.relation == "imports_from" && e.source == "app"));
+        assert!(ex
+            .edges
+            .iter()
+            .any(|e| e.relation == "imports_from" && e.source == "app"));
     }
 
     #[test]
@@ -1233,14 +1306,21 @@ mod tests {
         let src = "class C1 { void M1() { } void M2() { } } struct S1 { void M3() { } }";
         let ex = extract(src, "mixed.cs");
         let method_edges = ex.edges.iter().filter(|e| e.relation == "method").count();
-        assert_eq!(method_edges, 3, "expected 3 method edges (2 class + 1 struct)");
+        assert_eq!(
+            method_edges, 3,
+            "expected 3 method edges (2 class + 1 struct)"
+        );
     }
 
     #[test]
     fn file_node_always_present_for_using_only_file() {
         let ex = extract("using System;\nusing System.Linq;", "imports.cs");
         assert!(has_node(&ex, "imports"), "file node must be present");
-        let imports = ex.edges.iter().filter(|e| e.relation == "imports_from").count();
+        let imports = ex
+            .edges
+            .iter()
+            .filter(|e| e.relation == "imports_from")
+            .count();
         assert_eq!(imports, 2, "expected 2 imports_from edges");
     }
 
