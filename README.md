@@ -286,3 +286,19 @@ Dual-licensed under either of [Apache License, Version 2.0](LICENSE-APACHE) or [
 ---
 
 <sub>Rust refactor of <a href="https://github.com/safishamsi/graphify">safishamsi/graphify</a>. Built deterministic, <code>forbid(unsafe)</code>, parity-gated. See <a href="EVIDENCE.md">EVIDENCE.md</a> for the receipts.</sub>
+
+
+<!-- HABITAT_VAULT_HIGHWAY_START -->
+
+## Habitat Vault Highway
+
+> Registry: `habitat.vault-highways.v1` · vault id: `habitat-graph` · kind: `project-root` · status: `active`
+
+This entry point is reciprocally registered in the workspace-wide vault highway. Cross-vault navigation uses absolute `file://` links because bare Obsidian wikilinks do not resolve reliably across separate vault roots.
+
+- Workspace highway hub: [Habitat Vault Highways](file:///home/louranicas/claude-code-workspace/the-habitat-docs/Habitat%20Vault%20Highways.md)
+- Main Obsidian registry (upstream, read-only here): [Habitat Cross-Vault Index](file:///home/louranicas/projects/claude_code/Habitat%20Cross-Vault%20Index.md)
+- Hermes registry (upstream, read-only here): [Known Habitat Vaults — Cross Links](file:///home/louranicas/.hermes/hermes-agent-vault/Known%20Habitat%20Vaults%20%E2%80%94%20Cross%20Links.md)
+- Reciprocal target recorded by the hub: `habitat-graph/README.md`
+
+<!-- HABITAT_VAULT_HIGHWAY_END -->
