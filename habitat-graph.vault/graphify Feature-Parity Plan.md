@@ -1,5 +1,6 @@
 # graphify Feature-Parity Plan
 
+> **⚠ SUPERSEDED (S1008901)** — mirrors `../ai_docs/08…` which is superseded by [[14_PLAN_V3_UNIFIED_PARITY_AGENTIC_S1008901]]; V3 is built and the counts below are historical (current state: `../EVIDENCE.md`).
 > Back to: [[MOC]] · [[Commands & graphify Comparison (S1008796)]]. **Canonical (full detail):**
 > `../ai_docs/08_GRAPHIFY_PARITY_PLAN_S1008796.md`. Graphify feature set fetched live 2026-06-28.
 

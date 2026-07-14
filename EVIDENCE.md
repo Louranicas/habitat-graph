@@ -4,7 +4,7 @@
 > **Live plan (next work):** [[14_PLAN_V3_UNIFIED_PARITY_AGENTIC_S1008901]] · matrix [[15_FEATURE_ASSIMILATION_MATRIX_S1008901]] · ops [[V3_LIVE_ORGAN_RUNBOOK_S1008901]] — full parity + agentic; each phase updates the ledger below.
 > Gold standard: deep-diff-forge `EVIDENCE.md`.
 
-**STATUS: BUILT + PUSHED (private) — gate-green, 3914 all-targets tests / 0 failed; V3 COMPLETE: all FO-1..FO-12 MET. C-G1 goldens · PA-2 8 OSS grammars · PC-tail lifecycle · T4 live delta-push · T5 XM unit matrix. REMAINING (Luke-gated one-way doors only): T7 OSS public flip · crates.io publish · D8 Hebbian learning spike. Seals below.**
+**STATUS: BUILT + PUSHED (private) — gate-green, 4173 all-targets tests / 0 failed; V3 COMPLETE: all FO-1..FO-12 MET. C-G1 goldens · PA-2 8 OSS grammars · PC-tail lifecycle · T4 live delta-push · T5 XM unit matrix. REMAINING (Luke-gated one-way doors only): T7 OSS public flip · crates.io publish · D8 Hebbian learning spike. Seals below.**
 D0→D6 + a semantic-backend crate + an MCP frontier organ are sealed below; D7 has pushed the repo
 private to GitHub and initialized the no-mistakes gate. Remaining (D7 tail, all gated on Luke @ 0.A,
 all one-way doors): OSS/public flip · GitLab mirror · `port-claim` + devenv deploy · crates.io. Plus
@@ -179,7 +179,7 @@ Each sealed phase records `claim | warrant | evidence`:
 
 ### Public export redaction + private lineage — DONE
 - projection | [VBE] | node-link JSON, report, HTML, SVG, GraphML, Cypher, Obsidian, and wiki exporters share the same canonical secret-marker policy; original node IDs, endpoints, counts, and communities remain unchanged.
-- private state | [VBE] | raw incremental/add graphs, snapshots, output locks, and recovery journals are owner-only on Unix, keyed by canonical output and Git context; unsupported permission models fail closed.
+- private state | [VBE] | raw incremental/add graphs, snapshots, output locks, and recovery journals are owner-only on Unix, keyed by canonical output and Git context; unsupported permission models fail closed and remove the private state they cannot protect.
 - artifact lifecycle | [VBE] | optional exports and generated Markdown use conservative ownership manifests, atomically refresh owned files after policy upgrades, and preserve or refuse to overwrite unowned files.
 - merge lineage | [VBE] | 2-way and 3-way graph merges distinguish clean label identity from lossy public projections, retaining redacted IDs and conservative branch provenance without conflating independent nodes or relations.
 

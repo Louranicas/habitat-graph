@@ -3,13 +3,13 @@
 # DEPLOY_RUNBOOK — habitat-graph
 
 **STATUS: BUILD COMPLETE, PUBLICATION GATED (S1008796).** The crate exists and is gate-green
-(13 crates, 1225 all-targets tests / 0 failed, pedantic-clean). What remains is the **Publication
+(13 crates, all-targets tests green / 0 failed — current count in `EVIDENCE.md` — pedantic-clean). What remains is the **Publication
 (G9)** sequence below + the live devenv deploy — every step of which is **Luke @ 0.A authority**
 (outward / irreversible). Mirrors `factory-map/DEPLOY_RUNBOOK.md` + SHIPWRIGHT P0–P7. **No step here
 auto-arms `factory.authorize.*` and Claude never runs the push or the seal** — it only prepares them.
 
 ## Preconditions
-- [x] Standalone repo, branch `main`, working tree clean; gate-green (1225 tests).
+- [x] Standalone repo, branch `main`, working tree clean; gate-green (count in `EVIDENCE.md`).
 - [x] `factory.authorize.habitat-graph` = `armed` (read-only check confirmed; Luke set it).
 - [ ] Port assigned via `port-claim` (recommend **8202** — next free after TIERWRIGHT `:8201`; 8145–8150 also free); `[[services]]` entry in `~/.config/devenv/devenv.toml`.
 - [ ] Remotes created + added (Publication §G9). Currently **no remote configured**.

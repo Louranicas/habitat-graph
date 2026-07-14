@@ -22,7 +22,7 @@
 - [[Commands & graphify Comparison (S1008796)]]
 
 ## Status
-**BUILT + DEPLOYED** — 13-crate Rust workspace + MCP organ. Gate-green **1225 tests / 0 failed**,
+**BUILT + DEPLOYED** — 13-crate Rust workspace + MCP organ. Gate-green **4173 all-targets tests / 0 failed**,
 pedantic-clean, `forbid(unsafe)`. Parity **97% node / 96% structural** vs `safishamsi/graphify` on
 httpx. Pushed private to GitHub (`Louranicas/habitat-graph`) + GitLab (`lukeomahoney/habitat-graph`).
 Port `8202` claimed. D7 tail (OSS-public flip · crates.io · running-service deploy) gated on Luke @ 0.A.

@@ -1,5 +1,6 @@
 # Commands & graphify Comparison (S1008796)
 
+> **⚠ SUPERSEDED (S1008901+)** — a historical S1008796 snapshot. The "deferred" items below (svg/graphml/cypher/wiki exporters · watch · hooks · `add`) are now BUILT, all public exports are secret-redacted, and the test count is historical. Current surface: `../README.md` + `../runbooks/COMMANDS.md`; current state: `../EVIDENCE.md`.
 > Back to: [[MOC]] · [[The 7 Most Powerful Use Cases of habitat-graph]]. Full command reference:
 > `../runbooks/COMMANDS.md`. Exemplar map: `../ai_docs/01_GRAPHIFY_EXEMPLAR_MAP.md`.
 

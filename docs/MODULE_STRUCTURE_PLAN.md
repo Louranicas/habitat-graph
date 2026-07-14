@@ -197,9 +197,11 @@ Rule: code extraction defaults to `noop` (R3 local-first). The `tierwright` impl
 
 ### `habitat-graph-build`  (L4)
 ```text
-src/  lib.rs  assemble.rs  dedup.rs  merge.rs
+src/  lib.rs  assemble.rs  dedup.rs  merge.rs  merge_driver.rs  merge_identity.rs
 ```
 Flow: `Vec<Extraction> -> petgraph::Graph (stable NodeId interning) -> dedup -> merge (confidence reconcile)`.
+`merge_identity` separates clean label identity from lossy redacted public projections; `merge` and the
+3-way `merge_driver` keep published node IDs + branch provenance for lossy nodes/relations.
 Tests: dedup correctness, merge associativity, deterministic node/edge ordering (R4, merge-driver requirement).
 
 ### `habitat-graph-analyze`  (L5)
@@ -244,7 +246,8 @@ Clients of the daemon's warm DB (or an ephemeral DB in one-shot). Tests: rmcp to
 
 ### `habitat-graph-cli`  (L7, the product binary)
 ```text
-src/  main.rs  cli.rs (clap)  commands/{extract,query,path,export,report,serve,hook,prs,install,self_test,doctor}.rs
+src/  main.rs  cli.rs (clap)  commands/{extract,update,add,query,serve,mcp,install,install_mcp,hook,watch,merge_driver,meta}.rs
+      commands/private_state.rs (owner-only raw update/add state)  commands/atomic_file.rs (durable atomic writes)
 ```
 Contract: machine commands need no TTY; stdout=output, stderr=diagnostics; documented exit codes. Tests: per-subcommand contract (stdout/stderr/exit), `--self-test`, `doctor`.
 

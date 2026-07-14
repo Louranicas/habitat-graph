@@ -5,12 +5,12 @@
 [![CI](https://github.com/Louranicas/habitat-graph/actions/workflows/ci.yml/badge.svg)](https://github.com/Louranicas/habitat-graph/actions/workflows/ci.yml)
 [![License: MIT OR Apache-2.0](https://img.shields.io/badge/license-MIT%20OR%20Apache--2.0-blue.svg)](#license)
 [![Rust 1.95+](https://img.shields.io/badge/rust-1.95%2B-orange.svg)](https://www.rust-lang.org)
-[![tests](https://img.shields.io/badge/tests-3914%20passing-brightgreen.svg)](EVIDENCE.md)
+[![tests](https://img.shields.io/badge/tests-4173%20passing-brightgreen.svg)](EVIDENCE.md)
 [![unsafe: forbidden](https://img.shields.io/badge/unsafe-forbidden-success.svg)](#guarantees)
 
-Your codebase is too big for any model's context window, so agents burn tokens re-reading the same files over and over — and each one builds a slightly different mental model of the same code. **habitat-graph** extracts a whole tree of source (and docs) into a single deterministic knowledge graph — symbols, references, call edges, communities — and serves it *once* over [MCP](https://modelcontextprotocol.io) and a warm Unix-socket daemon, so every agent, model, and tool reads the **same** answer, cached by content hash and trimmed to fit each model's token budget. It is a from-scratch Rust port of the Python tool [`safishamsi/graphify`](https://github.com/safishamsi/graphify) that reaches feature parity and goes further: content-addressed node IDs, a 3-way **git merge driver for the graph itself**, 14 language extractors, and a cross-model bridge so Claude and GPT drive the same organ — all `forbid(unsafe)`, deterministic, and gate-green at **3914 tests**.
+Your codebase is too big for any model's context window, so agents burn tokens re-reading the same files over and over — and each one builds a slightly different mental model of the same code. **habitat-graph** extracts a whole tree of source (and docs) into a single deterministic knowledge graph — symbols, references, call edges, communities — and serves it *once* over [MCP](https://modelcontextprotocol.io) and a warm Unix-socket daemon, so every agent, model, and tool reads the **same** answer, cached by content hash and trimmed to fit each model's token budget. It is a from-scratch Rust port of the Python tool [`safishamsi/graphify`](https://github.com/safishamsi/graphify) that reaches feature parity and goes further: content-addressed node IDs, a 3-way **git merge driver for the graph itself**, 14 language extractors, and a cross-model bridge so Claude and GPT drive the same organ — all `forbid(unsafe)`, deterministic, and gate-green at **4173 tests**.
 
-> **Status: V3 complete · pre-release `v0.0.0`.** 13 crates · **3914 all-targets tests / 0 failed** · `forbid(unsafe)`, zero `unwrap`/`expect` in library code · deterministic (byte-identical reruns) · parity-gated against graphify (97% node / 96% structural on the `httpx` oracle). CI-gated: `fmt → check → clippy -D warnings → pedantic → test → cargo-deny → cargo-audit`. The full per-phase evidence ledger is [`EVIDENCE.md`](EVIDENCE.md). The live `:8202` service, crates.io publish, and the cross-model live-proof are roadmap items — see [Status & roadmap](#status--roadmap).
+> **Status: V3 complete · pre-release `v0.0.0`.** 13 crates · **4173 all-targets tests / 0 failed** · `forbid(unsafe)`, zero `unwrap`/`expect` in library code · deterministic (byte-identical reruns) · parity-gated against graphify (97% node / 96% structural on the `httpx` oracle). CI-gated: `fmt → check → clippy -D warnings → pedantic → test → cargo-deny → cargo-audit`. The full per-phase evidence ledger is [`EVIDENCE.md`](EVIDENCE.md). The live `:8202` service, crates.io publish, and the cross-model live-proof are roadmap items — see [Status & roadmap](#status--roadmap).
 
 ---
 
@@ -78,7 +78,7 @@ detect → extract (tree-sitter AST) → build (assemble · dedup · merge)
 
 **Posture.** `forbid(unsafe)` workspace-wide; zero `unwrap`/`expect`/`unsafe` in library code; determinism tested per exporter and per merge; ≥50 meaningful tests per module.
 
-**Public/private boundary.** Redaction happens only when a graph is projected to a public artifact. Original content-addressed node IDs, edge endpoints, counts, and community membership remain unchanged, so every format exposes the same topology; parallel secret-bearing relations receive deterministic endpoint-local ordinals rather than hashes of the raw relation. Preserving IDs also means a party can test guesses for a low-entropy raw label against its published content ID: this is display redaction, not anonymization. `update` and `add` retain the raw graph only in owner-only private state (`0o700` directories and `0o600` files on Unix), scoped by output and Git context with bounded snapshots and recovery journals. In a Git worktree this state lives below the resolved Git metadata directory at `habitat-graph/state/`; outside Git it uses the legacy hidden sidecar beside the output. Platforms that cannot enforce Unix owner-only state fail closed for these incremental operations.
+**Public/private boundary.** Redaction happens only when a graph is projected to a public artifact. Original content-addressed node IDs, edge endpoints, counts, and community membership remain unchanged, so every format exposes the same topology; parallel secret-bearing relations receive deterministic endpoint-local ordinals rather than hashes of the raw relation. Preserving IDs also means a party can test guesses for a low-entropy raw label against its published content ID: this is display redaction, not anonymization. `update` and `add` retain the raw graph only in owner-only private state (`0o700` directories and `0o600` files on Unix), scoped by output and Git context with bounded snapshots and recovery journals. In a Git worktree this state lives below the resolved Git metadata directory at `habitat-graph/state/`; outside Git it uses the legacy hidden sidecar beside the output. Platforms that cannot enforce Unix owner-only state fail closed for these incremental operations and remove any existing private state they cannot protect.
 
 ## Comparison with graphify
 
@@ -238,7 +238,7 @@ The core (L0–L6) carries no factory coupling and is the OSS-publishable surfac
 | Metric | Value |
 | --- | --- |
 | Crates | **13** |
-| Tests (all-targets) | **3914 / 0 failed** |
+| Tests (all-targets) | **4173 / 0 failed** |
 | Language extractors | 13 grammars + `text` = **14** |
 | graphify parity (httpx) | **97% node · 96% structural** |
 | Per-module test floor | **≥50** meaningful tests (no test-fitting) |
@@ -273,7 +273,7 @@ Bidirectional with this README — each design doc opens with a `Back to:` bread
 
 ## Status & roadmap
 
-**Done (V3 complete).** All of the extract → analyze → export pipeline, 14 grammars, all exporters and analytics, the HTTP + stdio-MCP servers, `install`, the git merge driver, and the warm-daemon + cross-model libraries — gate-green at 3914 tests, both remotes synced.
+**Done (V3 complete).** All of the extract → analyze → export pipeline, 14 grammars, all exporters and analytics, the HTTP + stdio-MCP servers, `install`, the git merge driver, and the warm-daemon + cross-model libraries — gate-green at 4173 tests, both remotes synced.
 
 **Roadmap (the remaining one-way doors).**
 - The live `:8202` `devenv` service (the always-on organ) and the warm UDS daemon's CLI wiring.

@@ -60,9 +60,10 @@ $BIN mcp   --graph graphify-out/graph.json      # MCP (JSON-RPC 2.0) over stdio
 
 All public artifacts use the same deterministic secret redaction before format-specific escaping;
 node IDs, endpoints, counts, and communities are preserved. Raw `update`/`add` state is kept only in
-owner-only private files. Generated wiki/vault pages and optional exports are refreshed only when a
-hidden ownership manifest proves habitat-graph owns them; explicit exporter flags adopt existing
-optional files, while malformed manifests or unowned collisions fail closed.
+owner-only private files; a platform that cannot enforce owner-only permissions fails these commands
+closed and removes any unsupported private state. Generated wiki/vault pages and optional exports
+are refreshed only when a hidden ownership manifest proves habitat-graph owns them; explicit
+exporter flags adopt existing optional files, while malformed manifests or unowned collisions fail closed.
 
 Source walks honor repository ignore rules. A scan outside Git honors only ignore files below its
 scan root, so ambient parent/global configuration cannot change a staged corpus.
