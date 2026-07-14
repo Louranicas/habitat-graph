@@ -220,7 +220,7 @@ mod tests {
         Graph {
             schema: habitat_graph_core::SCHEMA_VERSION.to_owned(),
             nodes,
-            node_content_ids: Default::default(),
+            node_content_ids: std::collections::BTreeMap::default(),
             edges,
             communities: Vec::new(),
             manifest: Manifest::default(),

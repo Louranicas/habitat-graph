@@ -57,11 +57,8 @@ pub(crate) enum RelationIdentity {
     Projected(String, usize),
 }
 
-pub(crate) fn node_identity_maps(
-    graphs: &[&Graph],
-    lineage_root: Option<usize>,
-) -> Vec<NodeIdentityMap> {
-    let mut maps: Vec<NodeIdentityMap> = graphs
+fn label_identity_maps(graphs: &[&Graph]) -> Vec<NodeIdentityMap> {
+    graphs
         .iter()
         .map(|graph| {
             graph
@@ -70,9 +67,11 @@ pub(crate) fn node_identity_maps(
                 .map(|node| (node.id, NodeIdentity::Label(node.label.clone())))
                 .collect()
         })
-        .collect();
-    let mut candidates: HashMap<NodeId, Vec<ProjectionCandidate>> = HashMap::new();
+        .collect()
+}
 
+fn projection_candidates(graphs: &[&Graph]) -> HashMap<NodeId, Vec<ProjectionCandidate>> {
+    let mut candidates: HashMap<NodeId, Vec<ProjectionCandidate>> = HashMap::new();
     for (graph_index, graph) in graphs.iter().enumerate() {
         for node in &graph.nodes {
             let (marker, raw_label) = if is_canonical_redaction_marker(&node.label) {
@@ -97,6 +96,15 @@ pub(crate) fn node_identity_maps(
                 });
         }
     }
+    candidates
+}
+
+pub(crate) fn node_identity_maps(
+    graphs: &[&Graph],
+    lineage_root: Option<usize>,
+) -> Vec<NodeIdentityMap> {
+    let mut maps = label_identity_maps(graphs);
+    let candidates = projection_candidates(graphs);
 
     for group in candidates.values() {
         if !group.iter().any(|candidate| candidate.marker) {

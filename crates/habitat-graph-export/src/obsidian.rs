@@ -563,7 +563,7 @@ mod tests {
         Graph {
             schema: "test".to_owned(),
             nodes,
-            node_content_ids: Default::default(),
+            node_content_ids: std::collections::BTreeMap::default(),
             edges: Vec::new(),
             communities: Vec::new(),
             manifest: empty_manifest(),

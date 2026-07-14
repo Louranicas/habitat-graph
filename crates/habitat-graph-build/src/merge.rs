@@ -134,13 +134,7 @@ pub fn merge(a: Graph, b: Graph) -> Graph {
 
     // ── Phase 4: manifest merge ───────────────────────────────────────────────
 
-    let mut merged_inputs = a_manifest.inputs;
-    merged_inputs.extend(b_manifest.inputs);
-    let manifest = Manifest {
-        inputs: merged_inputs,
-        tool_version: a_manifest.tool_version,
-        generated_at: a_manifest.generated_at.or(b_manifest.generated_at),
-    };
+    let manifest = merge_manifests(a_manifest, b_manifest);
 
     let node_content_ids: BTreeMap<NodeId, NodeId> = identity_to_new_id
         .iter()
@@ -161,6 +155,15 @@ pub fn merge(a: Graph, b: Graph) -> Graph {
         manifest,
     }
     .sorted()
+}
+
+fn merge_manifests(mut first: Manifest, second: Manifest) -> Manifest {
+    first.inputs.extend(second.inputs);
+    Manifest {
+        inputs: first.inputs,
+        tool_version: first.tool_version,
+        generated_at: first.generated_at.or(second.generated_at),
+    }
 }
 
 fn intern_node(

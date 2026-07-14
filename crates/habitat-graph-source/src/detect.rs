@@ -86,7 +86,13 @@ fn detect_with_global_exclude(
             if let Some(ext) = path.extension() {
                 let ext_lower = ext.to_string_lossy().to_lowercase();
                 if lowered.iter().any(|key| key == &ext_lower) {
-                    paths.push(path.to_path_buf());
+                    let relative = path.strip_prefix(&canonical_root).map_err(|error| {
+                        GraphError::Io(format!(
+                            "detected path escaped canonical root {}: {error}",
+                            canonical_root.display()
+                        ))
+                    })?;
+                    paths.push(root.join(relative));
                 }
             }
         }

@@ -216,7 +216,7 @@ mod tests {
         Graph {
             schema: SCHEMA_VERSION.to_owned(),
             nodes,
-            node_content_ids: Default::default(),
+            node_content_ids: std::collections::BTreeMap::default(),
             edges,
             communities: Vec::new(),
             manifest: Manifest::default(),
@@ -231,7 +231,7 @@ mod tests {
         Graph {
             schema: SCHEMA_VERSION.to_owned(),
             nodes,
-            node_content_ids: Default::default(),
+            node_content_ids: std::collections::BTreeMap::default(),
             edges,
             communities,
             manifest: Manifest::default(),
@@ -985,7 +985,7 @@ mod tests {
         let g = Graph {
             schema: SCHEMA_VERSION.to_owned(),
             nodes: vec![node(1, "hub")],
-            node_content_ids: Default::default(),
+            node_content_ids: std::collections::BTreeMap::default(),
             edges: vec![edge(1, 99, "calls")], // node 99 absent
             communities: Vec::new(),
             manifest: Manifest::default(),
@@ -1002,7 +1002,7 @@ mod tests {
         let g = Graph {
             schema: SCHEMA_VERSION.to_owned(),
             nodes: vec![node(1, "sink")],
-            node_content_ids: Default::default(),
+            node_content_ids: std::collections::BTreeMap::default(),
             edges: vec![edge(88, 1, "calls")], // node 88 absent
             communities: Vec::new(),
             manifest: Manifest::default(),
