@@ -12,7 +12,7 @@ auto-arms `factory.authorize.*` and Claude never runs the push or the seal** —
 - [x] Standalone repo, branch `main`, working tree clean; gate-green (count in `EVIDENCE.md`).
 - [x] `factory.authorize.habitat-graph` = `armed` (read-only check confirmed; Luke set it).
 - [ ] Port assigned via `port-claim` (recommend **8202** — next free after TIERWRIGHT `:8201`; 8145–8150 also free); `[[services]]` entry in `~/.config/devenv/devenv.toml`.
-- [ ] Remotes created + added (Publication §G9). Currently **no remote configured**.
+- [x] Remotes created + added (Publication §G9): `origin` → `https://github.com/Louranicas/habitat-graph.git`, `gitlab` → `git@gitlab.com:lukeomahoney/habitat-graph.git`.
 
 ## Publication (G9) — standalone push + no-mistakes seal — GATED on Luke @ 0.A
 Repo is one command from publishable. Standalone-only: **never** push to the superproject.
@@ -22,10 +22,11 @@ Claude has prepared these; Luke runs them (each is outward / irreversible):
 # (a) Port-claim — recommended 8202 (free; sequential after TIERWRIGHT :8201)
 atuin kv set --key port.claim.habitat-graph 8202
 
-# (b) Create EMPTY github.com/Louranicas/habitat-graph + gitlab repos, then wire + push:
+# (b) Remotes wired — DONE:
+#       origin = https://github.com/Louranicas/habitat-graph.git
+#       gitlab = git@gitlab.com:lukeomahoney/habitat-graph.git
+#     Push (outward / one-way — a head counts as published only once its push succeeds):
 cd /home/louranicas/claude-code-workspace/habitat-graph
-git remote add origin git@github.com:Louranicas/habitat-graph.git
-git remote add gitlab git@gitlab.com:Louranicas/habitat-graph.git
 git push -u origin main
 git push -u gitlab main
 
@@ -33,7 +34,8 @@ git push -u gitlab main
 just nm-converge        # or /no-mistakes
 #   crates.io publish (token-gated, IRREVERSIBLE) only AFTER the seal passes.
 ```
-Verify after push: `git remote -v` shows both; GitHub/GitLab show 13 commits on `main`; the
+Verify after push (sha-agnostic, per `EVIDENCE.md`): `git remote -v` shows both;
+`git ls-remote <remote> refs/heads/main` == `git rev-parse main` on both; the
 no-mistakes receipt is green. Then proceed to the live-deploy Steps below.
 
 ## Steps
