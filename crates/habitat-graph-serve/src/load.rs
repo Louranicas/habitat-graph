@@ -1,6 +1,6 @@
 //! Load a node-link `graph.json` back into a queryable [`Graph`].
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashSet};
 
 use habitat_graph_core::{
     is_canonical_redaction_marker, Community, CommunityId, Confidence, Edge, Graph, GraphError,
@@ -43,9 +43,16 @@ pub fn from_node_link(json: &str) -> Result<Graph> {
     // community_id → member NodeIds (encounter order; sorted before building Community).
     let mut community_map: BTreeMap<u32, Vec<NodeId>> = BTreeMap::new();
     let mut node_content_ids = BTreeMap::new();
+    let mut seen_ids: HashSet<NodeId> = HashSet::with_capacity(nodes_arr.len());
     let mut nodes: Vec<Node> = Vec::with_capacity(nodes_arr.len());
     for (i, node_val) in nodes_arr.iter().enumerate() {
         let (node, opt_cid, content_id) = parse_node(i, node_val)?;
+        if !seen_ids.insert(node.id) {
+            return Err(GraphError::Schema(format!(
+                "node[{i}]: duplicate node id {}",
+                node.id.get()
+            )));
+        }
         if let Some(cid) = opt_cid {
             community_map.entry(cid).or_default().push(node.id);
         }
@@ -581,6 +588,37 @@ mod tests {
             "links": []
         }"#;
         let err = from_node_link(json).expect_err("must fail on missing id");
+        assert!(matches!(err, habitat_graph_core::GraphError::Schema(_)));
+    }
+
+    #[test]
+    fn duplicate_node_id_returns_schema_error() {
+        let json = r#"{
+            "directed": false, "multigraph": false, "graph": {},
+            "nodes": [
+                {"id": 1, "label": "A", "source_file": "a.rs", "source_location": "L1", "community": null},
+                {"id": 1, "label": "B", "source_file": "b.rs", "source_location": "L2", "community": null}
+            ],
+            "links": []
+        }"#;
+        let err = from_node_link(json).expect_err("duplicate node ids must fail");
+        assert!(matches!(err, habitat_graph_core::GraphError::Schema(_)));
+        assert!(err.to_string().contains("duplicate node id 1"), "{err}");
+    }
+
+    #[test]
+    fn duplicate_node_id_cannot_alias_content_id_displacement() {
+        // A clean node must never inherit a displaced content_id through an id collision with a
+        // marker-labeled sibling — the document is rejected before the mapping is built.
+        let json = r#"{
+            "directed": false, "multigraph": false, "graph": {},
+            "nodes": [
+                {"id": 2, "content_id": 1, "label": "[REDACTED:api_key]", "source_file": "a.rs", "source_location": "L1", "community": null},
+                {"id": 2, "label": "clean", "source_file": "b.rs", "source_location": "L2", "community": null}
+            ],
+            "links": []
+        }"#;
+        let err = from_node_link(json).expect_err("duplicate node ids must fail");
         assert!(matches!(err, habitat_graph_core::GraphError::Schema(_)));
     }
 

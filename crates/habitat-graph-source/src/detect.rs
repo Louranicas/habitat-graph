@@ -24,7 +24,9 @@ const MAX_GIT_MARKER_LINE_BYTES: u64 = 4096;
 /// # Errors
 ///
 /// Returns [`GraphError::Io`] wrapping the underlying walk diagnostic if `root` cannot be
-/// traversed (e.g. the path does not exist or permission is denied).
+/// traversed (e.g. the path does not exist or permission is denied), and [`GraphError::Guard`]
+/// when an ancestor `.git` worktree marker file is invalid or stale — the scan fails closed, like
+/// Git, rather than adopting an outer repository's ignore context or non-git semantics.
 pub fn detect(root: &Path, extensions: &[&str]) -> Result<Vec<PathBuf>> {
     let global_exclude = ignore::gitignore::gitconfig_excludes_path();
     detect_with_global_exclude(root, extensions, global_exclude.as_deref())
@@ -48,7 +50,7 @@ fn detect_with_global_exclude(
     // Keep traversal and explicit Git matchers in the same canonical namespace. Otherwise an
     // anchored `info/exclude` rule can miss a root spelled with `..` or through a symlink.
     let mut walker = ignore::WalkBuilder::new(&canonical_root);
-    match git_ancestor(&canonical_root) {
+    match git_ancestor(&canonical_root)? {
         None => {
             walker
                 .require_git(false)
@@ -107,35 +109,58 @@ struct GitMetadata {
     manual_exclude: Option<PathBuf>,
 }
 
-fn git_ancestor(root: &Path) -> Option<GitMetadata> {
-    root.ancestors()
-        .find_map(|ancestor| git_metadata(&ancestor.join(".git")))
+fn git_ancestor(root: &Path) -> Result<Option<GitMetadata>> {
+    for ancestor in root.ancestors() {
+        let path = ancestor.join(".git");
+        if path.is_dir() {
+            if path.join("HEAD").is_file() {
+                return Ok(Some(GitMetadata {
+                    root: path.parent().unwrap_or_else(|| Path::new("")).to_path_buf(),
+                    manual_exclude: None,
+                }));
+            }
+        } else if path.is_file() {
+            // A `.git` marker file names this tree a linked worktree. If it cannot be resolved
+            // to live Git metadata the scan fails closed, like Git itself: silently continuing
+            // would demote the tree to non-git ignore semantics or rebind it to an enclosing
+            // repository's excludes, sweeping in files the worktree's own context ignored.
+            return git_worktree_metadata(&path).map(Some);
+        }
+    }
+    Ok(None)
 }
 
-fn git_metadata(path: &Path) -> Option<GitMetadata> {
-    if path.is_dir() {
-        path.join("HEAD").is_file().then_some(GitMetadata {
-            root: path.parent().unwrap_or_else(|| Path::new("")).to_path_buf(),
-            manual_exclude: None,
-        })
-    } else if path.is_file() {
-        let marker = gitdir_marker(path)?;
-        let gitdir = if marker.is_absolute() {
-            marker
-        } else {
-            path.parent().unwrap_or_else(|| Path::new("")).join(marker)
-        };
-        if !gitdir.is_dir() || !gitdir.join("HEAD").is_file() {
-            return None;
-        }
-        let common_dir = git_common_dir(&gitdir)?;
-        Some(GitMetadata {
-            root: path.parent().unwrap_or_else(|| Path::new("")).to_path_buf(),
-            manual_exclude: Some(common_dir.join("info/exclude")),
-        })
+fn git_worktree_metadata(path: &Path) -> Result<GitMetadata> {
+    let marker = gitdir_marker(path).ok_or_else(|| {
+        GraphError::Guard(format!(
+            "invalid Git worktree marker {}: refusing to scan without its ignore context",
+            path.display()
+        ))
+    })?;
+    let gitdir = if marker.is_absolute() {
+        marker
     } else {
-        None
+        path.parent().unwrap_or_else(|| Path::new("")).join(marker)
+    };
+    if !gitdir.is_dir() || !gitdir.join("HEAD").is_file() {
+        return Err(GraphError::Guard(format!(
+            "stale Git worktree marker {}: gitdir {} is not a repository; \
+             refusing to scan without its ignore context",
+            path.display(),
+            gitdir.display()
+        )));
     }
+    let common_dir = git_common_dir(&gitdir).ok_or_else(|| {
+        GraphError::Guard(format!(
+            "invalid Git worktree marker {}: unreadable commondir; \
+             refusing to scan without its ignore context",
+            path.display()
+        ))
+    })?;
+    Ok(GitMetadata {
+        root: path.parent().unwrap_or_else(|| Path::new("")).to_path_buf(),
+        manual_exclude: Some(common_dir.join("info/exclude")),
+    })
 }
 
 fn git_common_dir(gitdir: &Path) -> Option<PathBuf> {
@@ -547,19 +572,23 @@ mod tests {
     }
 
     #[test]
-    fn stale_worktree_pointer_does_not_enable_parent_ignores() {
+    fn stale_worktree_pointer_fails_closed() {
         let repository = TempDir::new().unwrap();
         fs::write(repository.path().join(".git"), "gitdir: .missing-gitdir\n").unwrap();
         fs::create_dir_all(repository.path().join("src")).unwrap();
         fs::write(repository.path().join("src/ignored.rs"), b"").unwrap();
         fs::write(repository.path().join(".gitignore"), "ignored.rs\n").unwrap();
 
-        let got = detect(&repository.path().join("src"), &["rs"]).unwrap();
-        assert_eq!(filenames(&got), vec!["ignored.rs"]);
+        let error = detect(&repository.path().join("src"), &["rs"]).unwrap_err();
+        assert!(
+            matches!(error, GraphError::Guard(_)),
+            "a dangling worktree marker must refuse the scan, got: {error:?}"
+        );
+        assert!(error.to_string().contains("stale Git worktree marker"));
     }
 
     #[test]
-    fn oversized_worktree_pointer_is_not_git_metadata() {
+    fn oversized_worktree_pointer_fails_closed() {
         let repository = TempDir::new().unwrap();
         fs::write(
             repository.path().join(".git"),
@@ -570,8 +599,33 @@ mod tests {
         fs::write(repository.path().join("src/ignored.rs"), b"").unwrap();
         fs::write(repository.path().join(".gitignore"), "ignored.rs\n").unwrap();
 
-        let got = detect(&repository.path().join("src"), &["rs"]).unwrap();
-        assert_eq!(filenames(&got), vec!["ignored.rs"]);
+        let error = detect(&repository.path().join("src"), &["rs"]).unwrap_err();
+        assert!(
+            matches!(error, GraphError::Guard(_)),
+            "an unparseable worktree marker must refuse the scan, got: {error:?}"
+        );
+        assert!(error.to_string().contains("invalid Git worktree marker"));
+    }
+
+    #[test]
+    fn stale_worktree_pointer_does_not_adopt_an_outer_repository() {
+        // The stale inner worktree sits inside a real outer repository whose .gitignore would
+        // hide everything. The scan must fail closed instead of walking up and scanning with
+        // the outer repository's ignore context.
+        let outer = TempDir::new().unwrap();
+        fs::create_dir_all(outer.path().join(".git")).unwrap();
+        fs::write(outer.path().join(".git/HEAD"), "ref: refs/heads/main\n").unwrap();
+        fs::write(outer.path().join(".gitignore"), "*.rs\n").unwrap();
+        let inner = outer.path().join("stale-worktree");
+        fs::create_dir_all(inner.join("src")).unwrap();
+        fs::write(inner.join(".git"), "gitdir: .missing-gitdir\n").unwrap();
+        fs::write(inner.join("src/visible.rs"), b"").unwrap();
+
+        let error = detect(&inner.join("src"), &["rs"]).unwrap_err();
+        assert!(
+            matches!(error, GraphError::Guard(_)),
+            "a stale marker under an outer repository must refuse the scan, got: {error:?}"
+        );
     }
 
     #[test]

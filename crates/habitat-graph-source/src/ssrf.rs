@@ -1,12 +1,17 @@
 //! `SSRF` guard (PC-tail) — block `add <URL>` requests that would reach internal services.
 //!
-//! Before fetching a remote `URL`, the ingest path calls [`is_safe_url`] which:
+//! Before fetching a remote `URL`, the ingest path calls [`resolve_safe_url`] which:
 //!
 //! 1. Rejects non-`http`/`https` schemes (case-insensitive).
 //! 2. Extracts the host (literal `IP` or hostname).
 //! 3. For literal `IP` addresses, calls [`ip_is_blocked`] directly.
-//! 4. For hostnames, resolves via [`std::net::ToSocketAddrs`] and rejects if **any**
-//!    returned address is blocked (`DNS`-rebinding defence).
+//! 4. For hostnames, resolves via [`std::net::ToSocketAddrs`] once, rejects if **any**
+//!    returned address is blocked, and returns the validated addresses.
+//!
+//! Classification alone does not defeat `DNS` rebinding: a `TTL`-0 resolver can answer the
+//! guard's lookup with a public address and the transport's lookup with `127.0.0.1`. The fetch
+//! path must therefore **pin the connection** to the addresses returned here rather than
+//! resolving the hostname a second time.
 //!
 //! [`ip_is_blocked`] is the pure classifier (no `I/O`) — fully testable in isolation.
 //!
@@ -201,21 +206,38 @@ pub fn validate_url_syntax(url: &str) -> Result<(), String> {
 /// - The hostname fails to resolve.
 #[must_use = "ignoring the SSRF check result defeats the security purpose"]
 pub fn is_safe_url(url: &str) -> Result<(), String> {
+    resolve_safe_url(url).map(|_| ())
+}
+
+/// Validates `url` like [`is_safe_url`] and returns the validated host with the exact addresses
+/// the guard classified.
+///
+/// Callers performing the fetch must pin the connection to the returned addresses instead of
+/// resolving the hostname again: a second lookup can be answered differently (`DNS` rebinding)
+/// and reach an internal service the guard never saw.
+///
+/// # Errors
+///
+/// Returns `Err(reason)` in every case [`is_safe_url`] does, plus when the hostname resolves to
+/// an empty address set.
+#[must_use = "ignoring the SSRF check result defeats the security purpose"]
+pub fn resolve_safe_url(url: &str) -> Result<(String, Vec<IpAddr>), String> {
     let (_, host) = validate_url_parts(url)?;
 
     // Literal-IP gate (no I/O).
     if let Ok(ip) = host.parse::<IpAddr>() {
         return match ip_is_blocked(ip) {
             Some(reason) => Err(format!("IP {host} is blocked ({reason})")),
-            None => Ok(()),
+            None => Ok((host, vec![ip])),
         };
     }
 
-    // Hostname — resolve via the system resolver; check every returned address.
+    // Hostname — resolve via the system resolver exactly once; check every returned address.
     let socket_addrs = (host.as_str(), 80_u16)
         .to_socket_addrs()
         .map_err(|e| format!("host {host:?} did not resolve: {e}"))?;
 
+    let mut addresses = Vec::new();
     for addr in socket_addrs {
         let ip = addr.ip();
         if let Some(reason) = ip_is_blocked(ip) {
@@ -223,9 +245,15 @@ pub fn is_safe_url(url: &str) -> Result<(), String> {
                 "host {host:?} resolves to blocked IP {ip} ({reason})"
             ));
         }
+        if !addresses.contains(&ip) {
+            addresses.push(ip);
+        }
+    }
+    if addresses.is_empty() {
+        return Err(format!("host {host:?} did not resolve to any address"));
     }
 
-    Ok(())
+    Ok((host, addresses))
 }
 
 // ── Tests ─────────────────────────────────────────────────────────────────────
@@ -782,5 +810,28 @@ mod tests {
         // 100.0.0.0/10 boundaries: 100.63.x and 100.128.x are NOT in 100.64.0.0/10.
         assert_eq!(ip_is_blocked(v4(100, 63, 255, 255)), None);
         assert_eq!(ip_is_blocked(v4(100, 128, 0, 1)), None);
+    }
+
+    // ── resolve_safe_url: address pinning contract ────────────────────────────
+
+    #[test]
+    fn resolve_safe_url_pins_a_public_literal_ip() {
+        let (host, addrs) = super::resolve_safe_url("https://8.8.8.8/x").expect("public literal");
+        assert_eq!(host, "8.8.8.8");
+        assert_eq!(addrs, vec![v4(8, 8, 8, 8)]);
+    }
+
+    #[test]
+    fn resolve_safe_url_unwraps_ipv6_brackets() {
+        let (host, addrs) =
+            super::resolve_safe_url("http://[2001:4860:4860::8888]/").expect("public v6 literal");
+        assert_eq!(host, "2001:4860:4860::8888");
+        assert_eq!(addrs.len(), 1);
+    }
+
+    #[test]
+    fn resolve_safe_url_rejects_blocked_literal() {
+        assert!(super::resolve_safe_url("http://127.0.0.1/").is_err());
+        assert!(super::resolve_safe_url("http://169.254.169.254/latest/").is_err());
     }
 }

@@ -309,16 +309,17 @@ fn prepare_update_transaction(
     super::private_state::ensure_no_pending_full_build_journal(&state)?;
     super::private_state::ensure_no_pending_add_journals(&state)?;
     recover_update_journal(out, &state, &legacy)?;
+    super::private_state::remove_orphaned_temporaries(&out.join("graph.json"), &state, &legacy)?;
     Ok((state, legacy, identity_lock, lock))
 }
 
 const LEGACY_UPDATE_JOURNAL_SCHEMA: &str = "habitat-graph.update-journal.v1";
-const UPDATE_JOURNAL_SCHEMA: &str = "habitat-graph.update-journal.v2";
+const RENDERED_UPDATE_JOURNAL_SCHEMA: &str = "habitat-graph.update-journal.v2";
+const UPDATE_JOURNAL_SCHEMA: &str = "habitat-graph.update-journal.v3";
 
 struct UpdateJournal {
     before_public_generation: Option<String>,
     after_public_generation: String,
-    after_public_json: String,
     origin_context: Option<String>,
     origin_lineage: Option<String>,
     before_private_checksum: Option<String>,
@@ -350,7 +351,6 @@ impl UpdateJournal {
         let journal = Self {
             before_public_generation: current_public_generation(&out.join("graph.json"))?,
             after_public_generation: super::private_state::generation(public_json.as_bytes()),
-            after_public_json: public_json,
             origin_context: origin.as_ref().map(|identity| identity.key.clone()),
             origin_lineage: origin.as_ref().map(|identity| identity.lineage.clone()),
             before_private_checksum: before_private_checksum.map(str::to_owned),
@@ -401,7 +401,6 @@ fn write_update_journal(state_path: &Path, journal: &UpdateJournal) -> Result<()
         "schema": UPDATE_JOURNAL_SCHEMA,
         "before_public_generation": journal.before_public_generation,
         "after_public_generation": journal.after_public_generation,
-        "after_public_json": journal.after_public_json,
         "origin_context": journal.origin_context,
         "origin_lineage": journal.origin_lineage,
         "before_private_checksum": journal.before_private_checksum,
@@ -453,7 +452,7 @@ fn load_update_journal(path: &Path) -> Result<UpdateJournal> {
     let schema = value["schema"].as_str();
     if !matches!(
         schema,
-        Some(LEGACY_UPDATE_JOURNAL_SCHEMA | UPDATE_JOURNAL_SCHEMA)
+        Some(LEGACY_UPDATE_JOURNAL_SCHEMA | RENDERED_UPDATE_JOURNAL_SCHEMA | UPDATE_JOURNAL_SCHEMA)
     ) {
         return Err(GraphError::Schema(format!(
             "unsupported update journal schema: {:?}",
@@ -471,12 +470,6 @@ fn load_update_journal(path: &Path) -> Result<UpdateJournal> {
         before_public_generation: journal_generation(&value, "before_public_generation", true)?,
         after_public_generation: journal_generation(&value, "after_public_generation", false)?
             .ok_or_else(|| GraphError::Schema("update journal generation missing".to_owned()))?,
-        after_public_json: value["after_public_json"]
-            .as_str()
-            .ok_or_else(|| {
-                GraphError::Schema("update journal public projection is invalid".to_owned())
-            })?
-            .to_owned(),
         origin_context,
         origin_lineage,
         before_private_checksum: journal_generation(&value, "before_private_checksum", true)?,
@@ -493,14 +486,21 @@ fn load_update_journal(path: &Path) -> Result<UpdateJournal> {
             ));
         }
     }
-    let intended_public = habitat_graph_serve::from_node_link(&journal.after_public_json)?;
-    let rendered_public = habitat_graph_export::to_node_link(&journal.state_graph)?;
-    if intended_public.schema != SCHEMA_VERSION
-        || private_graph_generation(&journal.state_graph)? != journal.after_private_checksum
-        || super::private_state::generation(journal.after_public_json.as_bytes())
+    // v1/v2 journals recorded the rendered public bytes. Validate the stored record's own
+    // consistency, but never require a byte-match against a re-render by this binary: the
+    // journal may predate an exporter policy or formatting change, and recovery re-renders
+    // from the checksum-verified raw state below.
+    if let Some(after_public_json) = value["after_public_json"].as_str() {
+        habitat_graph_serve::from_node_link(after_public_json)?;
+        if super::private_state::generation(after_public_json.as_bytes())
             != journal.after_public_generation
-        || rendered_public != journal.after_public_json
-    {
+        {
+            return Err(GraphError::Schema(
+                "update journal generation mismatch".to_owned(),
+            ));
+        }
+    }
+    if private_graph_generation(&journal.state_graph)? != journal.after_private_checksum {
         return Err(GraphError::Schema(
             "update journal generation mismatch".to_owned(),
         ));
@@ -1930,7 +1930,7 @@ mod tests {
     }
 
     #[test]
-    fn update_journal_stores_one_graph_bound_to_its_public_projection() {
+    fn update_journal_stores_one_checksummed_graph_without_public_bytes() {
         let src = TempDir::new().unwrap();
         let out = TempDir::new().unwrap();
         mk_file(src.path(), "lib.rs", "fn journal_node() {}");
@@ -1947,13 +1947,11 @@ mod tests {
 
         assert_eq!(value["schema"], super::UPDATE_JOURNAL_SCHEMA);
         assert!(value.get("public_graph").is_none());
+        assert!(value.get("after_public_json").is_none());
         assert!(super::load_update_journal(&journal_path).is_ok());
 
         value["state_graph"]["nodes"][0]["source_file"] =
             serde_json::Value::String("tampered.rs".to_owned());
-        let tampered = super::journal_graph(&value["state_graph"], "state_graph").unwrap();
-        value["after_private_checksum"] =
-            serde_json::Value::String(super::private_graph_generation(&tampered).unwrap());
         fs::write(&journal_path, serde_json::to_vec_pretty(&value).unwrap()).unwrap();
 
         let error = super::load_update_journal(&journal_path)
@@ -1961,6 +1959,49 @@ mod tests {
             .expect("tampered journal must fail");
         assert_eq!(error.kind(), "schema");
         assert!(error.to_string().contains("generation mismatch"));
+    }
+
+    #[test]
+    fn pending_update_journal_survives_renderer_drift() {
+        // A v2 journal stores the public bytes the (old) writer rendered. After an exporter
+        // policy or formatting change those bytes no longer byte-match a re-render by this
+        // binary — recovery must still proceed from the checksum-verified raw state instead of
+        // wedging every subsequent update and add.
+        let src = TempDir::new().unwrap();
+        let out = TempDir::new().unwrap();
+        mk_file(src.path(), "lib.rs", "fn drift_node() {}");
+        let graph = habitat_graph_build::assemble(
+            habitat_graph_extract::extract_files(&[src.path().join("lib.rs")]).unwrap(),
+        )
+        .sorted();
+        let (state_path, _) = super::prepare_private_state(out.path()).unwrap();
+        let journal = super::UpdateJournal::new(out.path(), &state_path, graph, None).unwrap();
+        super::write_update_journal(&state_path, &journal).unwrap();
+        let journal_path = super::super::private_state::update_journal_path(&state_path).unwrap();
+        let mut value: serde_json::Value =
+            serde_json::from_str(&fs::read_to_string(&journal_path).unwrap()).unwrap();
+        let drifted = format!(
+            "{}\n",
+            habitat_graph_export::to_node_link(&journal.state_graph).unwrap()
+        );
+        value["schema"] =
+            serde_json::Value::String(super::RENDERED_UPDATE_JOURNAL_SCHEMA.to_owned());
+        value["after_public_json"] = serde_json::Value::String(drifted.clone());
+        value["after_public_generation"] =
+            serde_json::Value::String(super::super::private_state::generation(drifted.as_bytes()));
+        fs::write(&journal_path, serde_json::to_vec_pretty(&value).unwrap()).unwrap();
+        fs::write(out.path().join("graph.json"), &drifted).unwrap();
+
+        assert!(
+            super::load_update_journal(&journal_path).is_ok(),
+            "renderer drift must not make a pending journal unloadable"
+        );
+        assert_eq!(run(src.path(), out.path()), 0, "recovery must succeed");
+        assert!(
+            !journal_path.exists(),
+            "recovered journal must be finalized"
+        );
+        assert!(read_graph_json(out.path()).contains("drift_node"));
     }
 
     #[test]

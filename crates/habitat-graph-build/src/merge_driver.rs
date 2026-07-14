@@ -473,9 +473,15 @@ fn anchor_edge_keys_to_base(
                             if base_projected == projected
                     )
             });
-            let fallback = base_group
-                .iter()
-                .find(|candidate| !occupied.contains(*candidate) && !anchored.contains(*candidate));
+            // The fallback pairs a policy-widened or pre-upgrade base slot with its projected
+            // successor; it must share at least one canonical marker tag, or an unrelated new
+            // edge between the same endpoints would be miscounted as base-surviving and dropped
+            // whenever the other branch deleted the base slot.
+            let fallback = base_group.iter().find(|candidate| {
+                !occupied.contains(*candidate)
+                    && !anchored.contains(*candidate)
+                    && lossy_identities_share_marker_tag(&candidate.2, &key.2)
+            });
             let Some(base_key) = preferred.or(fallback).cloned() else {
                 return Some(key);
             };
@@ -483,6 +489,26 @@ fn anchor_edge_keys_to_base(
             Some(base_key)
         })
         .collect()
+}
+
+fn relation_identity_marker_tags(identity: &RelationIdentity) -> Option<HashSet<String>> {
+    let relation = match identity {
+        RelationIdentity::Exact(relation) => relation,
+        RelationIdentity::Projected(projected, _) => projected,
+    };
+    let marker = project_public_relation(relation);
+    let tags = marker.strip_prefix("[REDACTED:")?.strip_suffix(']')?;
+    Some(tags.split(',').map(str::to_owned).collect())
+}
+
+fn lossy_identities_share_marker_tag(left: &RelationIdentity, right: &RelationIdentity) -> bool {
+    match (
+        relation_identity_marker_tags(left),
+        relation_identity_marker_tags(right),
+    ) {
+        (Some(left), Some(right)) => left.iter().any(|tag| right.contains(tag)),
+        _ => false,
+    }
 }
 
 fn base_lossy_edge_anchor_groups(
@@ -2525,6 +2551,29 @@ mod tests {
         let merged = merge3(&base, &ours, &theirs);
         assert_eq!(merged.edges.len(), 1);
         assert_eq!(merged.edges[0].relation, bearer);
+    }
+
+    #[test]
+    fn cross_marker_addition_survives_other_side_deleting_base_slot() {
+        // Base holds one bearer_token edge between A→B. Ours deletes it and adds an unrelated
+        // api_key edge between the same endpoints; theirs just deletes the bearer edge. The
+        // api_key edge shares no marker tag with the deleted base slot, so it must be treated
+        // as a one-sided addition and kept — exactly what a textual 3-way merge would do.
+        let bearer = "[REDACTED:bearer_token]#e00000000000000000000";
+        let api = "[REDACTED:api_key]#e00000000000000000000";
+        let mut base = nodes_graph(&[(1, "A"), (2, "B")]);
+        base.edges.push(edge(1, 2, bearer));
+        let mut ours = nodes_graph(&[(1, "A"), (2, "B")]);
+        ours.edges.push(edge(1, 2, api));
+        let theirs = nodes_graph(&[(1, "A"), (2, "B")]);
+
+        let merged = merge3(&base, &ours, &theirs);
+        assert_eq!(merged.edges.len(), 1, "the one-sided addition must survive");
+        assert!(
+            merged.edges[0].relation.starts_with("[REDACTED:api_key]"),
+            "surviving edge must be the added api_key edge, got {:?}",
+            merged.edges[0].relation
+        );
     }
 
     #[test]

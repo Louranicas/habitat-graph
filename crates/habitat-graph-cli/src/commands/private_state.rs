@@ -341,23 +341,7 @@ fn acquire_lock_path(
             .map_err(|error| GraphError::Io(format!("create output lock directory: {error}")))?;
     }
     for _ in 0..4 {
-        let prior_metadata = match std::fs::symlink_metadata(lock_path) {
-            Ok(metadata) => {
-                if !metadata.file_type().is_file() {
-                    return Err(GraphError::Guard(format!(
-                        "output transaction lock is not a regular file: {}",
-                        lock_path.display()
-                    )));
-                }
-                Some(metadata)
-            }
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
-            Err(error) => {
-                return Err(GraphError::Io(format!(
-                    "inspect output transaction lock: {error}"
-                )))
-            }
-        };
+        let prior_metadata = inspect_prior_lock(lock_path)?;
         if prior_metadata.is_none() {
             if let Some(signature) = signature {
                 if let Some(lock) = publish_signed_lock(lock_path, output, signature)? {
@@ -424,13 +408,35 @@ fn acquire_lock_path(
             ensure_lock_signature(&mut file, &opened_metadata, lock_path, signature)?;
         }
         #[cfg(unix)]
-        file.set_permissions(std::fs::Permissions::from_mode(0o600))
-            .map_err(|error| GraphError::Io(format!("harden output transaction lock: {error}")))?;
+        if prior_metadata.is_none() || signature.is_some() {
+            file.set_permissions(std::fs::Permissions::from_mode(0o600))
+                .map_err(|error| {
+                    GraphError::Io(format!("harden output transaction lock: {error}"))
+                })?;
+        }
         return Ok(OutputTransactionLock { file });
     }
     Err(GraphError::Guard(
         "output transaction lock changed while being opened".to_owned(),
     ))
+}
+
+fn inspect_prior_lock(lock_path: &Path) -> Result<Option<std::fs::Metadata>> {
+    match std::fs::symlink_metadata(lock_path) {
+        Ok(metadata) => {
+            if !metadata.file_type().is_file() {
+                return Err(GraphError::Guard(format!(
+                    "output transaction lock is not a regular file: {}",
+                    lock_path.display()
+                )));
+            }
+            Ok(Some(metadata))
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
+        Err(error) => Err(GraphError::Io(format!(
+            "inspect output transaction lock: {error}"
+        ))),
+    }
 }
 
 fn publish_signed_lock(
@@ -515,14 +521,33 @@ fn publish_signed_lock_direct(
         use std::os::unix::fs::OpenOptionsExt as _;
         options.mode(0o600).custom_flags(libc::O_NOFOLLOW);
     }
-    let mut file = match options.open(lock_path) {
+    let file = match options.open(lock_path) {
         Ok(file) => file,
         Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => return Ok(None),
         Err(error) => return Err(GraphError::Io(format!("{context}: {error}"))),
     };
+    initialize_direct_lock(file, lock_path, output, signature).map(Some)
+}
+
+fn initialize_direct_lock(
+    mut file: std::fs::File,
+    lock_path: &Path,
+    output: Option<&Path>,
+    signature: &[u8],
+) -> Result<OutputTransactionLock> {
+    let context = "initialize output transaction lock without hard links";
     let opened_metadata = file
         .metadata()
         .map_err(|error| GraphError::Io(format!("inspect output transaction lock: {error}")))?;
+    // The lock is taken before the signature exists: a competitor that opens the freshly visible
+    // file can win the lock but never validate it, so only this writer may hold the lock with a
+    // complete signature. Losing the lock means another process holds this inode — it must be
+    // left in place, never unlinked or mutated.
+    if !try_lock_briefly(&file)? {
+        return Err(GraphError::Guard(
+            "another habitat-graph writer is updating this output".to_owned(),
+        ));
+    }
     let initialized = (|| -> Result<()> {
         #[cfg(unix)]
         file.set_permissions(std::fs::Permissions::from_mode(0o600))
@@ -531,7 +556,6 @@ fn publish_signed_lock_direct(
             .map_err(|error| GraphError::Io(format!("sign output transaction lock: {error}")))?;
         file.sync_all()
             .map_err(|error| GraphError::Io(format!("sync output transaction lock: {error}")))?;
-        lock_output_file(&file)?;
         validate_published_lock(lock_path, output, &opened_metadata)
     })();
     if let Err(error) = initialized {
@@ -543,7 +567,23 @@ fn publish_signed_lock_direct(
         .filter(|parent| !parent.as_os_str().is_empty())
         .unwrap_or_else(|| Path::new("."));
     super::atomic_file::sync_directory(parent, context)?;
-    Ok(Some(OutputTransactionLock { file }))
+    Ok(OutputTransactionLock { file })
+}
+
+fn try_lock_briefly(file: &std::fs::File) -> Result<bool> {
+    for attempt in 0..5 {
+        if attempt != 0 {
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+        match file.try_lock() {
+            Ok(()) => return Ok(true),
+            Err(std::fs::TryLockError::WouldBlock) => {}
+            Err(std::fs::TryLockError::Error(error)) => {
+                return Err(GraphError::Io(format!("lock output transaction: {error}")))
+            }
+        }
+    }
+    Ok(false)
 }
 
 fn validate_published_lock(
@@ -2575,7 +2615,6 @@ fn remove_family(path: &Path, context: &str) -> Result<()> {
     Ok(())
 }
 
-#[cfg(any(test, not(unix)))]
 fn remove_private_temporaries(path: &Path, context: &str) -> Result<()> {
     let parent = path
         .parent()
@@ -2622,6 +2661,66 @@ fn remove_private_temporaries(path: &Path, context: &str) -> Result<()> {
         remove(&entry.path(), context)?;
     }
     Ok(())
+}
+
+fn remove_public_temporaries(output: &Path, context: &str) -> Result<()> {
+    let parent = output
+        .parent()
+        .filter(|parent| !parent.as_os_str().is_empty())
+        .unwrap_or_else(|| Path::new("."));
+    let entries = match std::fs::read_dir(parent) {
+        Ok(entries) => entries,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(error) => {
+            return Err(GraphError::Io(format!(
+                "list {context} temporary files: {error}"
+            )))
+        }
+    };
+    for entry in entries {
+        let entry = entry
+            .map_err(|error| GraphError::Io(format!("list {context} temporary files: {error}")))?;
+        let filename = entry.file_name();
+        let owned = filename
+            .to_str()
+            .is_some_and(super::atomic_file::is_public_temporary_name);
+        if !owned {
+            continue;
+        }
+        let metadata = std::fs::symlink_metadata(entry.path()).map_err(|error| {
+            GraphError::Io(format!("inspect {context} temporary file: {error}"))
+        })?;
+        if !metadata.file_type().is_file() {
+            return Err(GraphError::Guard(format!(
+                "{context} temporary path is not a regular file: {}",
+                entry.path().display()
+            )));
+        }
+        remove(&entry.path(), context)?;
+    }
+    Ok(())
+}
+
+/// Removes temporary files orphaned by a crashed writer.
+///
+/// Callers must hold both the output identity lock and the state's output transaction lock: the
+/// sweep treats any name matching this module's temporary patterns as abandoned, which is only
+/// true while every other habitat-graph writer for the directory is excluded.
+///
+/// # Errors
+///
+/// Returns [`GraphError::Io`] when the directories cannot be listed or a removal fails, and
+/// [`GraphError::Guard`] when a matching name is not a regular file.
+pub(super) fn remove_orphaned_temporaries(
+    output: &Path,
+    state_path: &Path,
+    legacy_state_path: &Path,
+) -> Result<()> {
+    remove_private_temporaries(state_path, "orphaned private state")?;
+    if state_path != legacy_state_path {
+        remove_private_temporaries(legacy_state_path, "orphaned legacy private state")?;
+    }
+    remove_public_temporaries(output, "orphaned public artifact")
 }
 
 #[cfg(any(test, not(unix)))]
@@ -3653,7 +3752,12 @@ fn harden_directory(path: &Path) -> Result<()> {
 
 #[cfg(unix)]
 fn ensure_private_directory(path: &Path) -> Result<()> {
-    match std::fs::create_dir(path) {
+    let mut builder = std::fs::DirBuilder::new();
+    {
+        use std::os::unix::fs::DirBuilderExt as _;
+        builder.mode(0o700);
+    }
+    match builder.create(path) {
         Ok(()) => {}
         Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {}
         Err(error) => {
@@ -3788,6 +3892,72 @@ mod tests {
         let mut name = OsString::from(path.file_name().unwrap());
         name.push(suffix);
         path.with_file_name(name)
+    }
+
+    #[test]
+    fn orphaned_temporaries_are_reaped_pattern_bounded() {
+        let dir = TempDir::new().unwrap();
+        let output = dir.path().join("graph.json");
+        let state_dir = dir.path().join("state");
+        fs::create_dir_all(&state_dir).unwrap();
+        let state = state_dir.join("state.json");
+        fs::write(&state, b"{}").unwrap();
+
+        let orphan_private = sibling(&state, ".hgtp.1a.2b.3c");
+        let orphan_journal = sibling(&state, &format!("{ADD_JOURNAL_SUFFIX}.hgtp.1a.2b.3c"));
+        let orphan_public = dir.path().join(".habitat-graph.tmp.1a.2b.3c");
+        let unowned_private = sibling(&state, ".hgtp.NOT-A-NONCE");
+        let unowned_public = dir.path().join(".habitat-graph.tmp.NOT-A-NONCE");
+        for path in [
+            &orphan_private,
+            &orphan_journal,
+            &orphan_public,
+            &unowned_private,
+            &unowned_public,
+        ] {
+            fs::write(path, b"orphan").unwrap();
+        }
+
+        super::remove_orphaned_temporaries(&output, &state, &state).unwrap();
+
+        assert!(!orphan_private.exists(), "private temp must be reaped");
+        assert!(!orphan_journal.exists(), "journal temp must be reaped");
+        assert!(!orphan_public.exists(), "public temp must be reaped");
+        assert!(unowned_private.exists(), "non-matching name must be kept");
+        assert!(unowned_public.exists(), "non-matching name must be kept");
+        assert!(state.exists(), "the state file itself must be kept");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn private_directory_is_created_owner_only() {
+        use std::os::unix::fs::PermissionsExt as _;
+
+        let dir = TempDir::new().unwrap();
+        let target = dir.path().join("habitat-graph");
+
+        super::ensure_private_directory(&target).unwrap();
+
+        let mode = fs::symlink_metadata(&target).unwrap().permissions().mode() & 0o7777;
+        assert_eq!(mode, 0o700, "private directories must be owner-only");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn orphaned_temporary_sweep_refuses_planted_symlink() {
+        let dir = TempDir::new().unwrap();
+        let output = dir.path().join("graph.json");
+        let state = dir.path().join("state.json");
+        fs::write(&state, b"{}").unwrap();
+        let victim = dir.path().join("victim");
+        fs::write(&victim, b"user data").unwrap();
+        std::os::unix::fs::symlink(&victim, dir.path().join(".habitat-graph.tmp.1a.2b.3c"))
+            .unwrap();
+
+        let error = super::remove_orphaned_temporaries(&output, &state, &state).unwrap_err();
+
+        assert_eq!(error.kind(), "guard");
+        assert!(victim.exists(), "symlink target must be untouched");
     }
 
     fn create_git(root: &Path, head: &str) -> PathBuf {
@@ -4248,6 +4418,86 @@ mod tests {
         drop(first);
         let reused = super::acquire_lock_path(&lock_path, None, Some(signature)).unwrap();
         drop(reused);
+    }
+
+    #[test]
+    fn direct_lock_loser_leaves_competitors_lock_in_place() {
+        let root = TempDir::new().unwrap();
+        let lock_path = root.path().join("generated-directory.output-lock");
+        let signature = b"habitat-graph.test-lock.v1\n";
+
+        // Recreate the hard-link-free race: the creator has made the lock visible (create_new)
+        // but a competitor opens the path and wins the advisory lock first.
+        let mut creator_options = fs::OpenOptions::new();
+        creator_options.create_new(true).read(true).write(true);
+        let creator = creator_options.open(&lock_path).unwrap();
+        let competitor = fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open(&lock_path)
+            .unwrap();
+        competitor.try_lock().unwrap();
+
+        let error =
+            super::initialize_direct_lock(creator, &lock_path, None, signature).unwrap_err();
+
+        assert_eq!(error.kind(), "guard");
+        assert!(lock_path.exists(), "the loser must not unlink a held lock");
+        let probe = fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open(&lock_path)
+            .unwrap();
+        assert!(
+            matches!(probe.try_lock(), Err(std::fs::TryLockError::WouldBlock)),
+            "the competitor's exclusion must survive the loser's error path"
+        );
+        drop(competitor);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn unsigned_lock_does_not_chmod_preexisting_user_file() {
+        use std::os::unix::fs::PermissionsExt as _;
+
+        let root = TempDir::new().unwrap();
+        let state = root.path().join("state.json");
+        let lock_path = super::output_lock_path(&state).unwrap();
+        fs::write(&lock_path, "user file").unwrap();
+        fs::set_permissions(&lock_path, fs::Permissions::from_mode(0o644)).unwrap();
+
+        drop(super::acquire_output_lock(&state).unwrap());
+
+        let mode = fs::symlink_metadata(&lock_path)
+            .unwrap()
+            .permissions()
+            .mode()
+            & 0o7777;
+        assert_eq!(
+            mode, 0o644,
+            "an unowned pre-existing file must keep its mode"
+        );
+        assert_eq!(fs::read_to_string(&lock_path).unwrap(), "user file");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn created_unsigned_lock_is_hardened_owner_only() {
+        use std::os::unix::fs::PermissionsExt as _;
+
+        let root = TempDir::new().unwrap();
+        let state = root.path().join("state.json");
+        let lock_path = super::output_lock_path(&state).unwrap();
+
+        let lock = super::acquire_output_lock(&state).unwrap();
+
+        let mode = fs::symlink_metadata(&lock_path)
+            .unwrap()
+            .permissions()
+            .mode()
+            & 0o7777;
+        assert_eq!(mode, 0o600, "a lock created by habitat-graph is owner-only");
+        drop(lock);
     }
 
     #[test]

@@ -3,11 +3,13 @@
 //!
 //! # Security
 //!
-//! Every URL is validated by [`habitat_graph_source::ssrf::is_safe_url`] before a network
+//! Every URL is validated by [`habitat_graph_source::ssrf::resolve_safe_url`] before a network
 //! connection is attempted. Blocked categories: loopback, private, link-local, CGNAT, unspecified,
-//! non-`http`/`https` schemes. HTTP redirects are never followed (`redirects(0)`, any `3xx`
-//! response is rejected) so a remote server cannot bypass the guard by 302-ing the fetch to an
-//! address the original URL's host check never saw.
+//! non-`http`/`https` schemes. The connection is pinned to the addresses that validation
+//! classified — the transport never resolves the hostname a second time, so a `TTL`-0 rebinding
+//! answer cannot swap in an internal address between the guard and the socket. HTTP redirects are
+//! never followed (`redirects(0)`, any `3xx` response is rejected) so a remote server cannot
+//! bypass the guard by 302-ing the fetch to an address the original URL's host check never saw.
 //!
 //! # `DoS` caps
 //!
@@ -99,7 +101,12 @@ pub fn infer_extension(url: &str) -> String {
 
 /// Fetches `url` and returns its body bytes, capped at [`MAX_CONTENT_BYTES`].
 ///
-/// Redirects are never followed: the [`is_safe_url`] check only validates the *original* URL, so
+/// The URL is validated with [`habitat_graph_source::ssrf::resolve_safe_url`] and the connection
+/// is **pinned** to the addresses that validation classified — the transport never resolves the
+/// hostname again, so a `TTL`-0 rebinding answer cannot swap in an internal address between the
+/// guard and the socket.
+///
+/// Redirects are never followed: the SSRF check only validates the *original* URL, so
 /// transparently following a `3xx` response could route the request to an attacker-chosen host
 /// (including loopback / link-local / cloud-metadata addresses) that the SSRF guard never saw.
 ///
@@ -111,7 +118,36 @@ pub fn infer_extension(url: &str) -> String {
 /// - Returns a build-time error message when compiled without `--features live`.
 #[cfg(feature = "live")]
 pub fn fetch_bytes(url: &str) -> Result<Vec<u8>> {
+    let (host, addresses) =
+        habitat_graph_source::ssrf::resolve_safe_url(url).map_err(GraphError::Guard)?;
+    fetch_bytes_pinned(url, &host, &addresses)
+}
+
+/// Fetches `url` connecting only to `addresses` for `host`, without consulting `DNS`.
+#[cfg(feature = "live")]
+fn fetch_bytes_pinned(url: &str, host: &str, addresses: &[std::net::IpAddr]) -> Result<Vec<u8>> {
     use std::io::Read as _;
+
+    let pinned_host = host.to_owned();
+    let pinned = addresses.to_vec();
+    let resolver = move |netloc: &str| -> std::io::Result<Vec<std::net::SocketAddr>> {
+        let (netloc_host, port) = split_netloc(netloc).ok_or_else(|| {
+            std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                format!("invalid netloc {netloc:?}"),
+            )
+        })?;
+        if !netloc_host.eq_ignore_ascii_case(&pinned_host) {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::PermissionDenied,
+                format!("refusing to resolve unvalidated host {netloc_host:?}"),
+            ));
+        }
+        Ok(pinned
+            .iter()
+            .map(|ip| std::net::SocketAddr::new(*ip, port))
+            .collect())
+    };
 
     let response = ureq::AgentBuilder::new()
         .timeout(FETCH_TIMEOUT)
@@ -119,6 +155,7 @@ pub fn fetch_bytes(url: &str) -> Result<Vec<u8>> {
         // only validates `url` itself. With `redirects(0)`, ureq returns the 3xx response as-is
         // instead of transparently chasing `Location`, so we can reject it below.
         .redirects(0)
+        .resolver(resolver)
         .build()
         .get(url)
         .call()
@@ -150,6 +187,18 @@ pub fn fetch_bytes(url: &str) -> Result<Vec<u8>> {
     Ok(body)
 }
 
+/// Splits a `host:port` netloc, unwrapping `IPv6` bracket notation.
+#[cfg(feature = "live")]
+fn split_netloc(netloc: &str) -> Option<(&str, u16)> {
+    let (host, port) = netloc.rsplit_once(':')?;
+    let port = port.parse::<u16>().ok()?;
+    let host = host
+        .strip_prefix('[')
+        .and_then(|rest| rest.strip_suffix(']'))
+        .unwrap_or(host);
+    Some((host, port))
+}
+
 /// Stub returned when the `live` feature is not enabled.
 ///
 /// # Errors
@@ -167,9 +216,45 @@ pub fn fetch_bytes(_url: &str) -> Result<Vec<u8>> {
 /// Monotonic counter for unique temp-file names; file-scoped to avoid `items_after_statements`.
 static EXTRACT_CTR: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 
+/// Exclusively creates an owner-only temp file with an unpredictable nonce in its name.
+///
+/// `create_new` refuses to open through a pre-planted file or symlink at a candidate name, so
+/// fetched remote bytes can never clobber another path in the shared temporary directory.
+///
+/// # Errors
+///
+/// Returns [`GraphError::Io`] when the file cannot be created or all candidate names collide.
+fn create_exclusive_temp(tmp_dir: &Path, ext: &str) -> Result<(PathBuf, std::fs::File)> {
+    let pid = std::process::id();
+    for _ in 0..16 {
+        let seq = EXTRACT_CTR.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let nonce = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_or(0, |elapsed| elapsed.as_nanos());
+        let candidate = tmp_dir.join(format!("hg_add_{pid}_{nonce:x}_{seq}.{ext}"));
+        let mut options = std::fs::OpenOptions::new();
+        options.create_new(true).write(true);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::OpenOptionsExt as _;
+            options.mode(0o600);
+        }
+        match options.open(&candidate) {
+            Ok(file) => return Ok((candidate, file)),
+            Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {}
+            Err(e) => return Err(GraphError::Io(format!("create temp file: {e}"))),
+        }
+    }
+    Err(GraphError::Io(
+        "create temp file: exhausted unique temporary names".to_owned(),
+    ))
+}
+
 /// Writes `bytes` to a temp file named `<random>.ext`, runs the extractor, and returns the graph.
 ///
-/// The temp file is removed when this function returns (whether or not extraction succeeded).
+/// The temp file is created exclusively (`create_new`, so a pre-planted symlink or file at the
+/// name is refused rather than followed), owner-only on Unix, with an unpredictable nonce in the
+/// name. It is removed when this function returns (whether or not extraction succeeded).
 ///
 /// # Errors
 ///
@@ -177,19 +262,13 @@ static EXTRACT_CTR: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64:
 /// - Propagates extraction errors from `habitat_graph_extract::extract_files`.
 pub fn extract_from_bytes(bytes: &[u8], ext: &str) -> Result<habitat_graph_core::Graph> {
     // Create a temp file with the appropriate extension so the registry dispatches correctly.
-    let tmp_dir = std::env::temp_dir();
-    let pid = std::process::id();
-    let seq = EXTRACT_CTR.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-    let tmp_path = tmp_dir.join(format!("hg_add_{pid}_{seq}.{ext}"));
+    let (tmp_path, mut file) = create_exclusive_temp(&std::env::temp_dir(), ext)?;
 
     // Write, extract, then unconditionally remove.
-    let write_result = (|| -> Result<()> {
-        let mut f = std::fs::File::create(&tmp_path)
-            .map_err(|e| GraphError::Io(format!("create temp file: {e}")))?;
-        f.write_all(bytes)
-            .map_err(|e| GraphError::Io(format!("write temp file: {e}")))?;
-        Ok(())
-    })();
+    let write_result = file
+        .write_all(bytes)
+        .map_err(|e| GraphError::Io(format!("write temp file: {e}")));
+    drop(file);
 
     if let Err(e) = write_result {
         let _ = std::fs::remove_file(&tmp_path);
@@ -232,6 +311,7 @@ fn prepare_add_transaction(
     let journal_path = add_journal_path(&state_path)?;
     super::private_state::migrate(&legacy_journal_path, &journal_path, "legacy add journal")?;
     super::private_state::ensure(&state_path)?;
+    super::private_state::remove_orphaned_temporaries(&out, &state_path, &legacy_state_path)?;
     Ok((
         out,
         state_path,
@@ -983,14 +1063,15 @@ mod tests {
     use std::sync::atomic::{AtomicU32, Ordering};
 
     use habitat_graph_core::{Community, CommunityId, Graph};
-    // Only the `#[cfg(not(feature = "live"))]` tests below match on `GraphError` variants; under
-    // `--features live` those tests are compiled out, so this import would otherwise be unused.
+    // Only the `#[cfg(not(feature = "live"))]` tests below match on `GraphError` variants and
+    // call the stubbed `fetch_bytes`; under `--features live` those tests are compiled out, so
+    // these imports would otherwise be unused (the live transport tests import their own).
     #[cfg(not(feature = "live"))]
     use habitat_graph_core::GraphError;
 
-    use super::{
-        extract_from_bytes, fetch_bytes, infer_extension, merge_into_output, run, MAX_CONTENT_BYTES,
-    };
+    #[cfg(not(feature = "live"))]
+    use super::fetch_bytes;
+    use super::{extract_from_bytes, infer_extension, merge_into_output, run, MAX_CONTENT_BYTES};
 
     static SEQ: AtomicU32 = AtomicU32::new(0);
     fn tdir() -> PathBuf {
@@ -1209,24 +1290,25 @@ mod tests {
         );
     }
 
-    // ── fetch_bytes: SSRF-via-redirect regression (S1009142) ─────────────────
-    // `is_safe_url` only validates the *original* URL; if the HTTP transport followed a 3xx
-    // redirect, an attacker-controlled public host could 302 the fetch to an internal address
-    // (loopback / RFC-1918 / link-local cloud metadata) that the guard never saw. fetch_bytes
-    // must refuse to follow redirects rather than chasing `Location` transparently.
+    // ── fetch transport: SSRF-via-redirect + DNS-pinning regressions (S1009142) ─
+    // The SSRF guard only validates the *original* URL and its *first* resolution. The transport
+    // must therefore (a) refuse to follow 3xx redirects and (b) connect only to the addresses the
+    // guard validated, never re-resolving the hostname.
     #[cfg(feature = "live")]
-    mod redirect_guard {
+    mod transport_guard {
         use std::io::{BufRead, BufReader, Write as _};
-        use std::net::TcpListener;
+        use std::net::{IpAddr, Ipv4Addr, TcpListener};
 
-        use super::fetch_bytes;
+        use super::super::{fetch_bytes, fetch_bytes_pinned, split_netloc};
+
+        const LOOPBACK: IpAddr = IpAddr::V4(Ipv4Addr::LOCALHOST);
 
         /// Serves exactly one HTTP/1.1 response over an ephemeral loopback port, then exits.
         ///
-        /// Returns the `http://127.0.0.1:<port>/` base URL; the server thread is detached (it
-        /// blocks on `accept()` forever if never contacted, which is harmless for a short-lived
-        /// test process).
-        fn spawn_one_shot_server(response: String) -> String {
+        /// Returns the `127.0.0.1:<port>` address; the server thread is detached (it blocks on
+        /// `accept()` forever if never contacted, which is harmless for a short-lived test
+        /// process).
+        fn spawn_one_shot_server(response: String) -> std::net::SocketAddr {
             let listener = TcpListener::bind("127.0.0.1:0").expect("bind ephemeral port");
             let addr = listener.local_addr().expect("local_addr");
             std::thread::spawn(move || {
@@ -1247,35 +1329,117 @@ mod tests {
                     let _ = stream.flush();
                 }
             });
-            format!("http://{addr}/")
+            addr
         }
 
         #[test]
-        fn fetch_bytes_does_not_follow_redirect_to_internal_host() {
+        fn fetch_does_not_follow_redirect_to_internal_host() {
             // An "internal" service that would leak its body if the redirect were followed.
-            let internal_url = spawn_one_shot_server(
+            let internal = spawn_one_shot_server(
                 "HTTP/1.1 200 OK\r\nContent-Length: 20\r\nConnection: close\r\n\r\nINTERNAL_SECRET_DATA"
                     .to_owned(),
             );
             // A public-looking host that 302s straight to the internal service.
-            let redirector_url = spawn_one_shot_server(format!(
-                "HTTP/1.1 302 Found\r\nLocation: {internal_url}\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
+            let redirector = spawn_one_shot_server(format!(
+                "HTTP/1.1 302 Found\r\nLocation: http://{internal}/\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
             ));
 
-            match fetch_bytes(&redirector_url) {
+            let url = format!("http://{redirector}/");
+            match fetch_bytes_pinned(&url, "127.0.0.1", &[LOOPBACK]) {
                 Err(e) => assert!(
                     e.to_string().contains("redirect"),
                     "expected a redirect-refusal error, got: {e}"
                 ),
                 Ok(bytes) => panic!(
-                    "fetch_bytes must not follow the redirect to an internal host; leaked body: {:?}",
+                    "the transport must not follow the redirect to an internal host; leaked body: {:?}",
                     String::from_utf8_lossy(&bytes)
                 ),
             }
         }
+
+        #[test]
+        fn fetch_bytes_rejects_blocked_host_before_connecting() {
+            let e = fetch_bytes("http://127.0.0.1:9/").expect_err("loopback must be rejected");
+            assert!(
+                e.to_string().contains("blocked"),
+                "expected an SSRF-guard rejection, got: {e}"
+            );
+        }
+
+        #[test]
+        fn fetch_connects_to_the_pinned_address_not_dns() {
+            // The hostname is inside the reserved `.invalid` TLD, so it can never resolve; the
+            // body arrives only if the socket used the pinned address the guard validated.
+            let server = spawn_one_shot_server(
+                "HTTP/1.1 200 OK\r\nContent-Length: 6\r\nConnection: close\r\n\r\npinned"
+                    .to_owned(),
+            );
+            let url = format!(
+                "http://habitat-graph-rebind-test.invalid:{}/",
+                server.port()
+            );
+
+            let body = fetch_bytes_pinned(&url, "habitat-graph-rebind-test.invalid", &[LOOPBACK])
+                .expect("pinned fetch must bypass DNS");
+
+            assert_eq!(body, b"pinned".to_vec());
+        }
+
+        #[test]
+        fn fetch_refuses_a_host_that_was_not_validated() {
+            let server = spawn_one_shot_server(
+                "HTTP/1.1 200 OK\r\nContent-Length: 4\r\nConnection: close\r\n\r\nbody".to_owned(),
+            );
+
+            let url = format!("http://{server}/");
+            let error = fetch_bytes_pinned(&url, "validated.example", &[LOOPBACK])
+                .expect_err("a netloc outside the pin must be refused");
+
+            assert!(
+                error.to_string().contains("fetch"),
+                "expected a transport-level refusal, got: {error}"
+            );
+        }
+
+        #[test]
+        fn split_netloc_handles_hostnames_and_ipv6_brackets() {
+            assert_eq!(split_netloc("example.com:443"), Some(("example.com", 443)));
+            assert_eq!(split_netloc("[::1]:8080"), Some(("::1", 8080)));
+            assert_eq!(split_netloc("no-port"), None);
+            assert_eq!(split_netloc("host:not-a-port"), None);
+        }
     }
 
     // ── extract_from_bytes ────────────────────────────────────────────────────
+
+    #[test]
+    fn exclusive_temp_names_are_distinct_and_exclusive() {
+        let dir = tdir();
+        let (first_path, first) = super::create_exclusive_temp(&dir, "rs").expect("first temp");
+        let (second_path, second) = super::create_exclusive_temp(&dir, "rs").expect("second temp");
+        drop(first);
+        drop(second);
+        assert_ne!(first_path, second_path, "temp names must never repeat");
+        for path in [&first_path, &second_path] {
+            assert!(path.exists());
+            fs::remove_file(path).unwrap();
+        }
+        fs::remove_dir_all(&dir).ok();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn exclusive_temp_is_owner_only() {
+        use std::os::unix::fs::PermissionsExt as _;
+
+        let dir = tdir();
+        let (path, file) = super::create_exclusive_temp(&dir, "rs").expect("temp");
+        let mode = file.metadata().unwrap().permissions().mode() & 0o777;
+        drop(file);
+        fs::remove_file(&path).unwrap();
+        fs::remove_dir_all(&dir).ok();
+        assert_eq!(mode, 0o600, "remote input temp must be owner-only");
+    }
 
     #[test]
     fn extract_rs_empty_source_gives_zero_nodes() {

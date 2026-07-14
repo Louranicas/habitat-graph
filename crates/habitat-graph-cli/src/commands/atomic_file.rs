@@ -19,10 +19,9 @@ static TEMP_SEQUENCE: AtomicU64 = AtomicU64::new(0);
 
 pub(super) const PRIVATE_TEMP_SEPARATOR: &str = ".hgtp.";
 
-pub(super) fn is_private_temporary_suffix(suffix: &str) -> bool {
-    let Some(nonce) = suffix.strip_prefix(PRIVATE_TEMP_SEPARATOR) else {
-        return false;
-    };
+pub(super) const PUBLIC_TEMP_PREFIX: &str = ".habitat-graph.tmp.";
+
+fn is_temporary_nonce(nonce: &str) -> bool {
     let mut parts = nonce.split('.');
     let values = [parts.next(), parts.next(), parts.next()];
     values.into_iter().all(|part| {
@@ -33,6 +32,17 @@ pub(super) fn is_private_temporary_suffix(suffix: &str) -> bool {
                     .all(|byte| byte.is_ascii_digit() || byte.is_ascii_lowercase())
         })
     }) && parts.next().is_none()
+}
+
+pub(super) fn is_private_temporary_suffix(suffix: &str) -> bool {
+    suffix
+        .strip_prefix(PRIVATE_TEMP_SEPARATOR)
+        .is_some_and(is_temporary_nonce)
+}
+
+pub(super) fn is_public_temporary_name(name: &str) -> bool {
+    name.strip_prefix(PUBLIC_TEMP_PREFIX)
+        .is_some_and(is_temporary_nonce)
 }
 
 fn radix36(mut value: u64) -> String {
@@ -57,9 +67,17 @@ fn radix36(mut value: u64) -> String {
 ///
 /// # Errors
 ///
+/// Returns [`GraphError::Guard`] when `owner_only` is requested on a platform without Unix file
+/// permissions — the request fails closed instead of silently writing with default ACLs.
 /// Returns [`GraphError::Io`] when the temporary file cannot be created, written, synchronized,
 /// renamed, or made durable through a parent-directory sync.
 pub(super) fn write(path: &Path, bytes: &[u8], owner_only: bool, context: &str) -> Result<()> {
+    #[cfg(not(unix))]
+    if owner_only {
+        return Err(GraphError::Guard(format!(
+            "{context}: owner-only writes require Unix file permissions"
+        )));
+    }
     let parent = path
         .parent()
         .filter(|parent| !parent.as_os_str().is_empty())
@@ -70,8 +88,6 @@ pub(super) fn write(path: &Path, bytes: &[u8], owner_only: bool, context: &str) 
     options.create_new(true).write(true);
     #[cfg(unix)]
     options.mode(if owner_only { 0o600 } else { 0o666 });
-    #[cfg(not(unix))]
-    let _ = owner_only;
 
     let mut created = false;
     let write_result = (|| -> Result<()> {
@@ -133,7 +149,9 @@ pub(super) fn temporary_path(path: &Path, owner_only: bool, context: &str) -> Re
         name.push(nonce);
         name
     } else {
-        OsString::from(format!(".habitat-graph.tmp.{nonce}"))
+        let name = format!("{PUBLIC_TEMP_PREFIX}{nonce}");
+        debug_assert!(is_public_temporary_name(&name));
+        OsString::from(name)
     };
     Ok(parent.join(temporary_name))
 }

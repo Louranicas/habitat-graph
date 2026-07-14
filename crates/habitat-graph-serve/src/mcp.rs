@@ -8,8 +8,9 @@
 //! unit-tested with no transport, runtime, or I/O. The CLI's `mcp` subcommand wraps
 //! [`handle_jsonrpc`] in a line-oriented stdio loop.
 //!
-//! Tool output funnels every node label through [`display_safe`] — a graph extracted from untrusted
-//! source must not deliver a Trojan-Source escape to the calling model's terminal.
+//! Tool output funnels every node label and source path through [`display_safe`] — a graph
+//! extracted from untrusted source must not deliver a Trojan-Source escape to the calling model's
+//! terminal.
 
 use std::fmt::Write as _;
 
@@ -223,7 +224,7 @@ fn tool_query(graph: &Graph, id: &Value, args: &Value) -> String {
             format!(
                 "  - {} [{}:{}]\n",
                 display_safe(&node.label),
-                node.source_file,
+                display_safe(&node.source_file),
                 node.source_location.start_line
             )
         })
@@ -546,6 +547,19 @@ mod tests {
         let resp = tool_call(&g, 1, "graph_query", json!({ "query": "ev" }));
         let text = text_of(&resp);
         assert!(!text.contains('\u{202e}'), "bidi override must be escaped");
+        assert!(text.contains("\\u{202E}"));
+    }
+
+    #[test]
+    fn graph_query_escapes_bidi_and_control_source_file() {
+        let mut g = Graph::new();
+        let mut spoofed = node(1, "Alpha");
+        spoofed.source_file = "src/ev\u{202e}il\u{1b}[2J.rs".to_owned();
+        g.nodes = vec![spoofed];
+        let resp = tool_call(&g, 1, "graph_query", json!({ "query": "Alpha" }));
+        let text = text_of(&resp);
+        assert!(!text.contains('\u{202e}'), "bidi override must be escaped");
+        assert!(!text.contains('\u{1b}'), "ESC must be escaped");
         assert!(text.contains("\\u{202E}"));
     }
 
