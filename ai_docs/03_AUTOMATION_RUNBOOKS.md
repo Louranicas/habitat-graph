@@ -2,6 +2,41 @@
 
 # habitat-graph — Automation (justfile) & Runbooks (S1008796)
 
+> [!WARNING] STATUS 2026-07-25 (S1009385) — §2 IS A DESIGNED TAXONOMY, NOT A LIVE INVENTORY
+> This document is the *design* that specified the justfile. Its closing line already says the
+> artifacts are PLANNING SKETCHES, but the §2 tables read as an inventory of what exists, and four
+> runbooks now cite them as real automation. Verified by execution 2026-07-25: a substantial share
+> of the §2.2–§2.5 recipes are **not built** and are commented out in `../justfile` under
+> `# ⛔ QUARANTINED S1009385` markers, each carrying its own reason. **That block is the single
+> source — this note deliberately does not reproduce it as prose.** Derive both sets at read time:
+> ```bash
+> just --justfile habitat-graph/justfile --working-directory habitat-graph --summary   # live
+> /usr/bin/grep -n 'QUARANTINED' habitat-graph/justfile                                # quarantined + reasons
+> ```
+> **Nothing below is deleted.** Three findings the quarantine markers do *not* capture, recorded
+> here because they change what the gap actually is:
+>
+> 1. **The export capability is ORPHANED, not missing.** The justfile marks `export`, `report`,
+>    `benchmark`, `arc-graph`, `pv2-register`, `obsidian-export`, `memory-write` as "NOT a CLI
+>    subcommand", which reads as *unimplemented*. That framing is wrong for the export family:
+>    `crates/habitat-graph-export/src/` contains `json.rs` `html.rs` `svg.rs` `graphml.rs`
+>    `cypher.rs` `obsidian.rs` `wiki.rs` `report.rs` `benchmark.rs` — the **library capability
+>    EXISTS; the CLI wiring is ABSENT** (`crates/habitat-graph-cli/src/cli.rs` exposes Extract,
+>    Update, Query, Path, Serve, Mcp, MergeDriver, InstallMergeDriver, InstallMcp, Install, Hook,
+>    Watch, Add, SelfTest, Doctor — and no Export/Report/Benchmark). This is a **front-door wiring
+>    gap over working code**, which is a much cheaper fix than a missing feature, and should not be
+>    left recorded as absence.
+> 2. **§2.5 `arc-coherence` has a live consumer with no producer.** `arc-coherence` resolves and
+>    runs; it reads `graphify-out/arcs.json`; that file does not exist and `arc-graph`, the recipe
+>    that would emit it, is quarantined.
+> 3. **§1's proposed root proxies were never added.** `habitat-graph-gate` / `-arc` / `-health` are
+>    absent from the workspace-root justfile (re-confirmed 2026-07-25), so §5's acceptance box
+>    "Root-workspace justfile carries thin proxies" is correctly still unchecked. Note `-arc` would
+>    proxy to the quarantined `arc-graph`, so it cannot be added as written.
+>
+> §5's acceptance checklist remains the right gate; it is simply not met yet. Treat §2 as the
+> target-state specification and the two commands above as the only statement of current state.
+
 The factory's front door is `just <recipe>` and its operational memory is runbooks. This document
 designs both for habitat-graph, comprehensively, and is then assimilated into the spine
 (`00_DEPLOYMENT_PLAN.md` §5/§7), `plan.toml`, `README.md`, and `CLAUDE.md`.

@@ -2,6 +2,26 @@
 
 # MIGRATION_RUNBOOK — habitat-graph (P0 → P6 strangler walk)
 
+> [!WARNING] STATUS 2026-07-25 (S1009385) — THE PER-PHASE PARITY STEP IS NOT BUILT
+> Verified by execution, not description. Step 3 of the per-phase loop, `just parity`, **does not
+> exist** in `../justfile` — it is commented out under a `# ⛔ QUARANTINED S1009385` marker carrying
+> its own reason. **That block is the single source; this note does not copy it.** Step 2,
+> `just gate`, IS live (confirmed by `just --dry-run`).
+> Consequence for this runbook specifically: the per-phase loop is **impl → gate → ~~parity~~ →
+> verify**. Every "Done when" cell in the Phases table below is stated in terms of parity
+> (`node/edge parity`, `community-structure parity`, `matches goldens`), and none of those can
+> currently be evaluated — see `PARITY_RUNBOOK.md`, where the oracle corpus (`tests/goldens/`,
+> `tests/fixtures/worked/`, the `parity` cargo feature) is confirmed absent as well.
+> **No phase below can honestly be signed off on its stated criterion right now**, and the
+> "Retire Python graphify only after P4" invariant must be treated as firmly in force: the
+> equivalence evidence that would license retiring it cannot presently be produced.
+> Derive the live set at read time rather than trusting this note:
+> ```bash
+> just --justfile habitat-graph/justfile --working-directory habitat-graph --summary
+> /usr/bin/grep -n 'QUARANTINED' habitat-graph/justfile   # the per-recipe reasons
+> ```
+> **Nothing below is deleted** — it is retained as the intended procedure.
+
 **STATUS: PLANNING SKETCH (S1008796).** The operational checklist form of the migration strategy
 (`00_DEPLOYMENT_PLAN.md` §6 is the *why*; this is the *do*). Bottom-up by layer; each phase is
 impl → gate → parity → independent verify. **No phase collapse** — a layer is done or it is not.

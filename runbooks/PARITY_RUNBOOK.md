@@ -2,6 +2,26 @@
 
 # PARITY_RUNBOOK — habitat-graph
 
+> [!WARNING] STATUS 2026-07-25 (S1009385) — EVERY `just` STEP IN THIS RUNBOOK IS UNBUILT
+> Verified by execution, not description. All four recipes this runbook sequences —
+> `parity-refresh` · `golden-verify` · `parity` · `parity-report` — **do not exist** in
+> `../justfile`; they are commented out under `# ⛔ QUARANTINED S1009385` markers, each with its own
+> reason recorded there. **That block is the single source; this note does not copy it.**
+> The parity *oracle itself* is also absent, so restoring the recipes alone would not make this
+> runbook runnable — re-confirmed 2026-07-25: no `tools/` directory (so no `refresh-goldens.sh`,
+> `golden-hash-check.sh`, or `PARITY_VERSIONS.txt`), no `tests/goldens/`, no
+> `tests/fixtures/worked/`, no cargo feature named `parity`, and one `[[bin]]` target only
+> (`habitat-graph`) — so `--bin parity-report` has nothing to build.
+> Derive the live set at read time rather than trusting this note:
+> ```bash
+> just --justfile habitat-graph/justfile --working-directory habitat-graph --summary
+> /usr/bin/grep -n 'QUARANTINED' habitat-graph/justfile   # the per-recipe reasons
+> ```
+> **Nothing below is deleted.** Read it as the *design* of the parity gate. Treat any claim
+> elsewhere that "parity is enforced" as unsubstantiated until the oracle above is built: the
+> load-bearing gate this runbook describes is currently not executable, and no phase can honestly
+> be signed off on `0 REGRESSION` while it is absent.
+
 **STATUS: PLANNING SKETCH (S1008796).** The load-bearing procedure of the whole refactor: prove the
 Rust port emits graphs *equivalent* to Python graphify before any phase is declared done. A port
 that "compiles and looks right" is not done — it is done when the golden diff is clean.

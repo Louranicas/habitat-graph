@@ -2,6 +2,25 @@
 
 # DEPLOY_RUNBOOK — habitat-graph
 
+> [!WARNING] STATUS 2026-07-25 (S1009385) — SEVERAL `just` STEPS BELOW ARE NOT BUILT
+> Verified by execution against this repo's `justfile`, not by description. The following recipes
+> cited below **do not exist**: `golden-verify` (step 0) · `parity` (step 2) · `deploy` (step 6) ·
+> `soak` (step 8) · `rollback` (Rollback section). Each is commented out in `../justfile` under a
+> `# ⛔ QUARANTINED S1009385` marker carrying its own reason — **that block is the single source;
+> this note deliberately does not copy it.**
+> `just nm-converge` (Publication §G9c) is also absent — the workspace-root justfile carries no
+> `nm-*` recipe at all. Use the `no-mistakes` CLI or `/no-mistakes` instead.
+> Steps that DO resolve: `dump` (0) · `gate` (1) · `build-release` (5) · `health` (7).
+> Derive the live set at read time — never trust the prose below or this note for it:
+> ```bash
+> just --justfile habitat-graph/justfile --working-directory habitat-graph --summary
+> /usr/bin/grep -n 'QUARANTINED' habitat-graph/justfile   # the per-recipe reasons
+> ```
+> **Nothing below is deleted.** It is retained as the *intended* procedure, but it is a plan, not a
+> runnable sequence: executed top-to-bottom it fails at step 0. Related unmet precondition already
+> noted below: habitat-graph has no `[[services]]` entry in `~/.config/devenv/devenv.toml`
+> (re-confirmed absent 2026-07-25), which is why `deploy`/`restart` cannot be live.
+
 **STATUS: BUILD COMPLETE, PUBLICATION GATED (S1008796).** The crate exists and is gate-green
 (13 crates, 1225 all-targets tests / 0 failed, pedantic-clean). What remains is the **Publication
 (G9)** sequence below + the live devenv deploy — every step of which is **Luke @ 0.A authority**

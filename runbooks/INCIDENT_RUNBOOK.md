@@ -2,6 +2,30 @@
 
 # INCIDENT_RUNBOOK — habitat-graph
 
+> [!WARNING] STATUS 2026-07-25 (S1009385) — MITIGATIONS BELOW CITE RECIPES THAT DO NOT EXIST
+> Verified by execution, not description. Cited but **absent** from `../justfile`: `deploy`
+> (failure-mode row 2) · `arc-graph` (row 4) · `rollback` (row 6 and the whole Mitigate section).
+> Each is commented out under a `# ⛔ QUARANTINED S1009385` marker carrying its own reason —
+> **that block is the single source; this note does not copy it.** Cited and **live** (confirmed by
+> `just --dry-run`): `health` · `extract` · `build-release` · `mcp-register` · `gate`.
+> **This matters most for Rollback.** "Prefer rollback over hot-fix under pressure" is the correct
+> instinct, but `just rollback` is not a command that exists — there is no `tools/rollback.sh`
+> (re-confirmed 2026-07-25: no `tools/` directory at all). Under real incident pressure this runbook
+> would send an operator to a recipe that errors out. **There is currently no scripted rollback path.**
+> Two further verified traps in the table below:
+> - Row 4 tells you to "re-run `just arc-graph`" when the arc map is empty. `arc-graph` is
+>   quarantined, so the arc map has **no producer** — while `just arc-coherence` IS live and reads
+>   `graphify-out/arcs.json`, a file that does not exist. The consumer runs; the producer is absent.
+> - Rows 2/6 presuppose a deployed service. habitat-graph has **no `[[services]]` entry** in
+>   `~/.config/devenv/devenv.toml` (re-confirmed absent 2026-07-25), so there is no live service to
+>   have an incident with yet. This runbook is forward-looking, not currently actionable.
+> Derive the live set at read time rather than trusting this note:
+> ```bash
+> just --justfile habitat-graph/justfile --working-directory habitat-graph --summary
+> /usr/bin/grep -n 'QUARANTINED' habitat-graph/justfile   # the per-recipe reasons
+> ```
+> **Nothing below is deleted** — it is retained as the intended procedure.
+
 **STATUS: PLANNING SKETCH (S1008796).** Blameless incident response for habitat-graph in production.
 Convention: architect-diagnostics blameless-runbook + postmortem pillar. Read-only forensics first;
 no bare service spawns (sandbox reaps children — use `devenv restart` only).
